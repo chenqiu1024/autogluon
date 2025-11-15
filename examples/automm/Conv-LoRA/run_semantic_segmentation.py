@@ -81,6 +81,10 @@ if __name__ == "__main__":
     hyperparameters.update(
         {
             "optim.lora.r": args.rank,
+            # Paper alignment (Conv-LoRA):
+            # - optim.peft: choose Conv-LoRA adaptation (Sec. 3)
+            # - optim.lora.r: LoRA rank r (Sec. 3)
+            # - optim.lora.conv_lora_expert_num: number of MoE-Conv experts M (Sec. 3.2)
             "optim.peft": "conv_lora",
             "optim.lora.conv_lora_expert_num": args.expert_num,
             "env.num_gpus": args.num_gpus,
@@ -112,7 +116,7 @@ if __name__ == "__main__":
         if dataset_name == "SBU-shadow":
             eval_metrics = ["ber"]
         else:
-            eval_metrics = ["iou"]
+            eval_metrics = ["iou", "dice"]  # Evaluate both IoU and DICE
 
         res = predictor.evaluate(test_df, metrics=eval_metrics)
         print(f"Evaluation results for test dataset {dataset_name}: ", res)

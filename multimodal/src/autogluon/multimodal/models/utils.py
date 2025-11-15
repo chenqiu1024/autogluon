@@ -572,6 +572,9 @@ def inject_adaptation_to_linear_layer(
     -------
     Model with injected LoRA modules.
     """
+    # Paper alignment (Conv-LoRA, Sec. 3.3):
+    # Typical usage sets module_filter to attention modules in the vision encoder (e.g., ".*vision_encoder.*attn")
+    # and filter to projection names (e.g., ["q", "v"]). For "conv_lora", we create ConvLoRALinear instead of LoRA.
     for m_name, module in dict(model.named_modules()).items():
         if extra_trainable_params and any(re.match(filter_layer, m_name) for filter_layer in extra_trainable_params):
             continue

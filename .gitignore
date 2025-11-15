@@ -137,3 +137,5 @@ eda/src/autogluon/eda/version.py
 AutogluonModels
 lightning_logs
 VERSION.minor
+
+examples/automm/Conv-LoRA/datasets

@@ -16,14 +16,16 @@ from ..constants import LABEL, LOGITS, SEMANTIC_MASK, SEMANTIC_SEGMENTATION_IMG
 from ..optim import SemanticSegmentationLitModule, get_loss_func, get_norm_layer_param_names, get_peft_param_names
 from ..optim.metrics.semantic_seg_metrics import Balanced_Error_Rate_Pred as Balanced_Error_Rate
 from ..optim.metrics.semantic_seg_metrics import Binary_IoU_Pred as Binary_IoU
+from ..optim.metrics.semantic_seg_metrics import Binary_DICE_Pred as Binary_DICE
 from ..optim.metrics.semantic_seg_metrics import COD_METRICS_NAMES_Pred as COD_METRICS_NAMES
 from ..optim.metrics.semantic_seg_metrics import Multiclass_IoU_Pred as Multiclass_IoU
+from ..optim.metrics.semantic_seg_metrics import Multiclass_DICE_Pred as Multiclass_DICE
 from ..utils import extract_from_output, setup_save_path
 from .base import BaseLearner
 
 logger = logging.getLogger(__name__)
 
-from ..constants import BER, EM, FM, IOU, MAE, SEMANTIC_SEGMENTATION, SM
+from ..constants import BER, DICE, EM, FM, IOU, MAE, SEMANTIC_SEGMENTATION, SM
 
 
 class SemanticSegmentationLearner(BaseLearner):
@@ -199,6 +201,11 @@ class SemanticSegmentationLearner(BaseLearner):
                     return Binary_IoU()
                 else:
                     return Multiclass_IoU(num_classes=num_classes)
+            elif metric_name == DICE:
+                if num_classes == 1:
+                    return Binary_DICE()
+                else:
+                    return Multiclass_DICE(num_classes=num_classes)
             else:
                 raise ValueError(f"Unknown metric {metric_name}")
 

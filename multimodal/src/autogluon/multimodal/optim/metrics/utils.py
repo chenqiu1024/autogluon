@@ -19,6 +19,7 @@ from ...constants import (
     COVERAGE,
     CROSS_ENTROPY,
     DETECTION_METRICS,
+    DICE,
     DIRECT_LOSS,
     EM,
     F1,
@@ -55,7 +56,14 @@ from ...constants import (
 )
 from .coverage_metrics import Coverage
 from .hit_rate_metrics import CustomHitRate
-from .semantic_seg_metrics import COD_METRICS_NAMES, Balanced_Error_Rate, Binary_IoU, Multiclass_IoU
+from .semantic_seg_metrics import (
+    COD_METRICS_NAMES,
+    Balanced_Error_Rate,
+    Binary_IoU,
+    Binary_DICE,
+    Multiclass_IoU,
+    Multiclass_DICE,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -353,6 +361,11 @@ def get_torchmetric(
             return Binary_IoU(), None
         else:
             return Multiclass_IoU(num_classes=num_classes), None
+    elif metric_name == DICE:
+        if num_classes == 1:
+            return Binary_DICE(), None
+        else:
+            return Multiclass_DICE(num_classes=num_classes), None
     elif metric_name == COVERAGE:
         return Coverage(), None
     else:

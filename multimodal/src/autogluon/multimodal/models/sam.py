@@ -258,6 +258,9 @@ class SAMForSemanticSegmentation(nn.Module):
     """
     Support SAM for semantic segmentation.
     Refer to https://huggingface.co/docs/transformers/main/model_doc/sam
+    Paper alignment (Conv-LoRA, ICLR 2024):
+    - Sec. 4 (Training): When Conv-LoRA is active, expose/aggregate MoE load-balancing loss produced inside
+      attention projections (q/k/v). This module toggles and collects that loss when trainable Conv-LoRA exists.
     """
 
     def __init__(
@@ -383,6 +386,7 @@ class SAMForSemanticSegmentation(nn.Module):
         super().train(mode)
         for module in self.modules():
             if isinstance(module, ConvLoRALinear):
+                # If Conv-LoRA is present and trainable, enable returning moe_loss from the attention blocks (Sec. 4)
                 self.output_moe_loss = True
                 return self
 

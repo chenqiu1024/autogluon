@@ -836,6 +836,9 @@ class SamVisionAttention(nn.Module):
         batch_size, height, width, _ = hidden_states.shape
         # qkv with shape (3, batch_size, nHead, height * width, channel)
         ##### modify here for conv-lora
+        # Paper alignment:
+        # - Sec. 3.3 (Integration): Inject Conv-LoRA at attention projections (q/k/v).
+        #   The adapted linear layer (possibly Conv-LoRA) may return (tensor, moe_loss) when output_moe_loss=True.
         qkv = self.qkv(hidden_states)
         if output_moe_loss:
             qkv, moe_loss = qkv
@@ -864,6 +867,7 @@ class SamVisionAttention(nn.Module):
         else:
             outputs = (attn_output, None)
         if output_moe_loss:
+            # Sec. 4: propagate MoE load-balancing loss upward for aggregation
             outputs += (moe_loss,)
         return outputs
 
@@ -967,6 +971,7 @@ class SamVisionLayer(nn.Module):
         else:
             outputs += (None,)  # keep attn_weights on the same place
         if output_moe_loss:
+            # Sec. 4: return per-layer MoE loss to be summed in encoder
             outputs += (moe_loss,)
 
         return outputs
@@ -1079,6 +1084,7 @@ class SamVisionEncoder(nn.Module):
                 all_self_attentions = all_self_attentions + (layer_outputs[1],)
 
             if output_moe_loss:
+                # Accumulate MoE load-balancing losses across layers (Sec. 4)
                 all_moe_loss = all_moe_loss + layer_outputs[2]
 
         if output_hidden_states:

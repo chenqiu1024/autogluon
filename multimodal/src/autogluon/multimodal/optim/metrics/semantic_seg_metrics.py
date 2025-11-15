@@ -639,6 +639,78 @@ class Binary_IoU(torchmetrics.Metric):
         return torch.mean(torch.tensor(res_list))
 
 
+class Binary_DICE(torchmetrics.Metric):
+    """
+    Compute the DICE coefficient for binary semantic segmentation.
+    DICE = 2 * |intersection| / (|pred| + |gt|) = 2 * IoU / (1 + IoU)
+    """
+
+    def __init__(
+        self,
+    ):
+        super().__init__()
+        self.add_state("logits", default=[], dist_reduce_fx=None)
+        self.add_state("labels", default=[], dist_reduce_fx=None)
+
+    def update(self, logits, labels):
+        self.logits.append(logits)
+        self.labels.append(labels)
+
+    def compute(self):
+        logits = torch.cat(self.logits).cpu()
+        labels = torch.cat(self.labels).cpu()
+
+        res_list = []
+        # Compute DICE from IoU: DICE = 2 * IoU / (1 + IoU)
+        iou_metric = torchmetrics.JaccardIndex(task="binary")
+        for logit, label in zip(logits, labels):
+            iou = iou_metric(logit, label)
+            dice = 2 * iou / (1 + iou)
+            res_list.append(dice)
+        return torch.mean(torch.tensor(res_list))
+
+
+class Multiclass_DICE(torchmetrics.Metric):
+    """
+    Compute the DICE coefficient for multi-class semantic segmentation.
+    """
+
+    def __init__(self, num_classes):
+        super().__init__()
+        self.add_state("total_inter", default=torch.zeros(num_classes), dist_reduce_fx=None)
+        self.add_state("total_union", default=torch.zeros(num_classes), dist_reduce_fx=None)
+        self.num_classes = num_classes
+
+    def update(self, logits, labels):
+        inter, union = self.batch_intersection_union(logits, labels)
+        self.total_inter += inter
+        self.total_union += union
+
+    def compute(self):
+        # DICE = 2 * intersection / (pred + gt)
+        # We can compute from IoU: DICE = 2 * IoU / (1 + IoU)
+        IoU = 1.0 * self.total_inter / (2.220446049250313e-16 + self.total_union)
+        DICE = 2.0 * IoU / (1.0 + IoU)
+        return torch.tensor(DICE.mean().item())
+
+    def batch_intersection_union(self, output, target):
+        mini = 1
+        maxi = self.num_classes
+        nbins = self.num_classes
+        predict = torch.argmax(output, 1) + 1
+        target = target.float() + 1
+
+        predict = predict.float() * (target > 0).float()
+        intersection = predict * (predict == target).float()
+        # areas of intersection and union
+        area_inter = torch.histc(intersection, bins=nbins, min=mini, max=maxi)
+        area_pred = torch.histc(predict, bins=nbins, min=mini, max=maxi)
+        area_lab = torch.histc(target, bins=nbins, min=mini, max=maxi)
+        area_union = area_pred + area_lab - area_inter
+        assert torch.sum(area_inter > area_union).item() == 0, "Intersection area should be smaller than Union area"
+        return area_inter.float(), area_union.float()
+
+
 class Balanced_Error_Rate(torchmetrics.Metric):
     """
     Compute the balanced error rate.
@@ -815,6 +887,78 @@ class Binary_IoU_Pred:
         for logit, label in zip(logits, labels):
             res_list.append(metric(logit, label))
         return torch.mean(torch.tensor(res_list))
+
+
+class Binary_DICE_Pred:
+    """
+    Compute the DICE coefficient for binary semantic segmentation.
+    DICE = 2 * |intersection| / (|pred| + |gt|) = 2 * IoU / (1 + IoU)
+    """
+
+    def __init__(
+        self,
+    ):
+        super().__init__()
+        self.logits = []
+        self.labels = []
+
+    def update(self, logits, labels):
+        self.logits.append(logits)
+        self.labels.append(labels)
+
+    def compute(self):
+        logits = torch.cat(self.logits).cpu()
+        labels = torch.cat(self.labels).cpu()
+
+        res_list = []
+        # Compute DICE from IoU: DICE = 2 * IoU / (1 + IoU)
+        iou_metric = torchmetrics.JaccardIndex(task="binary")
+        for logit, label in zip(logits, labels):
+            iou = iou_metric(logit, label)
+            dice = 2 * iou / (1 + iou)
+            res_list.append(dice)
+        return torch.mean(torch.tensor(res_list))
+
+
+class Multiclass_DICE_Pred:
+    """
+    Compute the DICE coefficient for multi-class semantic segmentation.
+    """
+
+    def __init__(self, num_classes):
+        super().__init__()
+        self.total_inter = torch.zeros(num_classes)
+        self.total_union = torch.zeros(num_classes)
+        self.num_classes = num_classes
+
+    def update(self, logits, labels):
+        inter, union = self.batch_intersection_union(logits, labels)
+        self.total_inter += inter
+        self.total_union += union
+
+    def compute(self):
+        # DICE = 2 * intersection / (pred + gt)
+        # We can compute from IoU: DICE = 2 * IoU / (1 + IoU)
+        IoU = 1.0 * self.total_inter / (2.220446049250313e-16 + self.total_union)
+        DICE = 2.0 * IoU / (1.0 + IoU)
+        return torch.tensor(DICE.mean().item())
+
+    def batch_intersection_union(self, output, target):
+        mini = 1
+        maxi = self.num_classes
+        nbins = self.num_classes
+        predict = torch.argmax(output, 1) + 1
+        target = target.float() + 1
+
+        predict = predict.float() * (target > 0).float()
+        intersection = predict * (predict == target).float()
+        # areas of intersection and union
+        area_inter = torch.histc(intersection, bins=nbins, min=mini, max=maxi)
+        area_pred = torch.histc(predict, bins=nbins, min=mini, max=maxi)
+        area_lab = torch.histc(target, bins=nbins, min=mini, max=maxi)
+        area_union = area_pred + area_lab - area_inter
+        assert torch.sum(area_inter > area_union).item() == 0, "Intersection area should be smaller than Union area"
+        return area_inter.float(), area_union.float()
 
 
 class Balanced_Error_Rate_Pred:

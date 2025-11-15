@@ -607,6 +607,12 @@ class ConvLoRALinear(nn.Linear, LoRALayer):
     """
     Conv-LoRA incorporated in Linear Layer. Weights of linear layer are set to be frozen per default.
 
+    Paper alignment (Convolution Meets LoRA: Parameter Efficient Finetuning for Segment Anything Model, ICLR 2024):
+    - Sec. 3 (Method): Replace standard LoRA's linear residual with a spatial, convolutional expert branch (MoE-Conv).
+    - Sec. 3.2 (MoE-Conv & Gating): Noisy-TopK gating over GAP features, plus load-balancing auxiliary loss.
+    - Sec. 3.3 (Integration): Inject at attention projections (q/k/v) of the vision encoder.
+    - Sec. 4 (Training): Return moe_loss for aggregation with task loss.
+
     Parameters
     ----------
     in_features
@@ -651,13 +657,14 @@ class ConvLoRALinear(nn.Linear, LoRALayer):
         self.fan_in_fan_out = fan_in_fan_out
         # Actual trainable parameters
         if r > 0:
+            # Sec. 3: Low-rank LoRA factors around a frozen base linear
             self.lora_A = nn.Parameter(self.weight.new_zeros((r, in_features)))
             self.lora_B = nn.Parameter(self.weight.new_zeros((out_features, r)))
             self.scaling = self.lora_alpha / self.r
             # Freezing the pre-trained weight matrix
             self.weight.requires_grad = False
 
-            # MoE-Conv
+            # Sec. 3.2: MoE-Conv experts with Noisy-TopK gating
             topk = 1
             self.lora_moe_gating = MoEGate(M=conv_lora_expert_num, d=self.r, K=topk)
             self.lora_moe_experts = nn.ModuleList([])
@@ -684,8 +691,10 @@ class ConvLoRALinear(nn.Linear, LoRALayer):
         return w.T if self.fan_in_fan_out else w
 
     def forward(self, x: torch.Tensor):
+        # Base frozen path + residual (LoRA principle)
         result = F.linear(x, self.T(self.weight), bias=self.bias)
         if self.r > 0:
+            # 1) Project to rank-r LoRA space
             lora_res = self.lora_dropout(x) @ self.lora_A.T
             dim = lora_res.dim()
             if dim == 3:
@@ -695,11 +704,11 @@ class ConvLoRALinear(nn.Linear, LoRALayer):
             else:
                 H, W = lora_res.size()[1:3]
 
-            # Calculate the gating values.
+            # 2) Sec. 3.2: Compute Noisy-TopK gates over spatial features; also returns auxiliary moe_loss.
             lora_res = lora_res.permute(0, 3, 1, 2).contiguous()
             gates, moe_loss = self.lora_moe_gating(lora_res)
 
-            # Distribute data samples to experts.
+            # 3) Route tokens to experts (SparseDispatcher)
             dispatcher = SparseDispatcher(self.num_experts, gates)
             expert_inputs = dispatcher.dispatch(lora_res)
             expert_outputs = []
@@ -708,6 +717,7 @@ class ConvLoRALinear(nn.Linear, LoRALayer):
                     continue
                 upsample_ratio = self.upsample_ratios[i]
                 cur_res = expert_inputs[i]
+                # Per-expert resolution change to diversify receptive fields (paper Sec. 3.2)
                 if upsample_ratio != 1:
                     cur_res = F.interpolate(cur_res, scale_factor=upsample_ratio, mode="bicubic")
                 cur_res = self.lora_moe_experts[i](cur_res)
@@ -715,13 +725,14 @@ class ConvLoRALinear(nn.Linear, LoRALayer):
                     cur_res = F.interpolate(cur_res, size=(int(H), int(W)), mode="bicubic")
                 expert_outputs.append(cur_res)
 
-            # Combine data samples after processing by each expert.
+            # 4) Combine expert outputs (weighted by gates) back to the batch layout
             temp_lora_res = dispatcher.combine(expert_outputs, multiply_by_gates=self.multiply_by_gates)
             lora_res = lora_res + temp_lora_res
 
             lora_res = lora_res.permute(0, 2, 3, 1).contiguous()
             if dim == 3:
                 lora_res = lora_res.reshape(B, L, C)
+            # 5) Project back to output dim with LoRA scale (final residual add)
             result += (lora_res @ self.lora_B.T) * self.scaling
 
         return result, moe_loss
@@ -752,6 +763,11 @@ class MoEGate(nn.Module):
         assert self.k <= self.M
 
     def forward(self, feats, loss_coef=1e-2, noise_epsilon=1e-2):
+        """
+        Paper alignment (Sec. 3.2):
+        - GAP over spatial features -> linear logits (+ noise during training) -> TopK expert selection
+        - Softmax over TopK logits yields gates; compute importance/load stats and CV^2-based load-balancing loss
+        """
         batch_size = feats.shape[0]
 
         feats_S = self.gap(feats).view(batch_size, -1)
