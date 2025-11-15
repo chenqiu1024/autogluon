@@ -704,10 +704,12 @@ class ConvLoRALinear(nn.Linear, LoRALayer):
             else:
                 H, W = lora_res.size()[1:3]
 
+            # Calculate the gating values.
             # 2) Sec. 3.2: Compute Noisy-TopK gates over spatial features; also returns auxiliary moe_loss.
             lora_res = lora_res.permute(0, 3, 1, 2).contiguous()
             gates, moe_loss = self.lora_moe_gating(lora_res)
 
+            # Distribute data samples to experts.
             # 3) Route tokens to experts (SparseDispatcher)
             dispatcher = SparseDispatcher(self.num_experts, gates)
             expert_inputs = dispatcher.dispatch(lora_res)
@@ -725,6 +727,7 @@ class ConvLoRALinear(nn.Linear, LoRALayer):
                     cur_res = F.interpolate(cur_res, size=(int(H), int(W)), mode="bicubic")
                 expert_outputs.append(cur_res)
 
+            # Combine data samples after processing by each expert.
             # 4) Combine expert outputs (weighted by gates) back to the batch layout
             temp_lora_res = dispatcher.combine(expert_outputs, multiply_by_gates=self.multiply_by_gates)
             lora_res = lora_res + temp_lora_res
