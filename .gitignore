@@ -139,3 +139,4 @@ lightning_logs
 VERSION.minor
 
 examples/automm/Conv-LoRA/datasets
+*.pdf
