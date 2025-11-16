@@ -1,0 +1,140 @@
+================================================================================
+  Conv-LoRA + RL 实验命令速查卡（ISIC2017，L20 单卡）
+================================================================================
+
+前提：已在 /root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA 目录
+
+================================================================================
+步骤 0：训练基线 Conv-LoRA（如果还没有）
+--------------------------------------------------------------------------------
+时间：~1 小时（L20）
+
+python run_semantic_segmentation.py \
+  --task isic2017 \
+  --rank 3 \
+  --expert_num 8 \
+  --num_gpus 1 \
+  --per_gpu_batch_size 1 \
+  --batch_size 4 \
+  --output_dir outputs_baseline
+
+验证：ls outputs_baseline/  # 应有 model 文件
+
+================================================================================
+步骤 1：BC 预热
+--------------------------------------------------------------------------------
+时间：~7 分钟（L20）
+
+python rl_bc_routing_policy.py \
+  --task isic2017 \
+  --model_path outputs_baseline/ \
+  --output_dir bc_warmstart/ \
+  --num_epochs 5 \
+  --max_samples 2000 \
+  --batch_size 32 \
+  --lr 1e-3 \
+  --device cuda
+
+输出：bc_warmstart/routing_bc.pt
+
+================================================================================
+步骤 2：RL 训练
+--------------------------------------------------------------------------------
+时间：~30 分钟（L20）
+
+python rl_train_routing_policy.py \
+  --task isic2017 \
+  --output_dir rl_routing/ \
+  --warmstart bc_warmstart/routing_bc.pt \
+  --num_experts 8 \
+  --rank 3 \
+  --num_layers 12 \
+  --lr 1e-4 \
+  --max_steps 6000 \
+  --batch_size 12 \
+  --kl_coef 0.05 \
+  --entropy_coef 0.01 \
+  --adapter_l2_coef 0.001 \
+  --compute_budget 1e10 \
+  --use_lagrangian \
+  --imbalance_weight 0.01 \
+  --ckpt_interval 500 \
+  --vis_interval 100 \
+  --mixed_precision \
+  --device cuda
+
+监控：tensorboard --logdir rl_routing/logs --port 6006 --bind_all
+输出：rl_routing/checkpoints/final.pt
+
+================================================================================
+步骤 3：评估
+--------------------------------------------------------------------------------
+时间：~2 分钟
+
+python rl_eval_routing_policy.py \
+  --task isic2017 \
+  --ckpt_path rl_routing/checkpoints/final.pt \
+  --output_dir eval_results/ \
+  --num_experts 8 \
+  --rank 3 \
+  --num_layers 12 \
+  --save_heatmaps \
+  --device cuda
+
+查看结果：cat eval_results/summary.json
+
+================================================================================
+快速测试路径（验证流程，~10 分钟）
+--------------------------------------------------------------------------------
+
+# BC（2 epochs，少量数据）
+python rl_bc_routing_policy.py \
+  --task isic2017 \
+  --model_path outputs_baseline/ \
+  --output_dir bc_quick/ \
+  --num_epochs 2 \
+  --max_samples 200 \
+  --device cuda
+
+# RL（100 steps）
+python rl_train_routing_policy.py \
+  --task isic2017 \
+  --warmstart bc_quick/routing_bc.pt \
+  --output_dir rl_quick/ \
+  --max_steps 100 \
+  --batch_size 8 \
+  --device cuda
+
+================================================================================
+断点续训
+--------------------------------------------------------------------------------
+
+python rl_train_routing_policy.py \
+  --resume_from rl_routing/checkpoints/step_3000.pt \
+  --max_steps 6000 \
+  ...（其他参数保持一致）
+
+================================================================================
+A/B 测试：使用 RL 路由 vs 基线
+--------------------------------------------------------------------------------
+
+# 基线（Noisy-TopK）
+python run_semantic_segmentation.py \
+  --task isic2017 \
+  --rank 3 \
+  --expert_num 8 \
+  --output_dir outputs_baseline \
+  --eval
+
+# RL 路由（需要修改 MultiModalPredictor 配置）
+# 见 README.md 第 5.4 节
+
+================================================================================
+预计总成本（AutoDL L20 @ 4.5元/小时）
+--------------------------------------------------------------------------------
+
+完整流程（含 BC）：~0.85 小时 × 4.5 元 = ~3.8 元
+快速测试：~0.17 小时 × 4.5 元 = ~0.76 元
+
+================================================================================
+

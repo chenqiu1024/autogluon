@@ -735,6 +735,11 @@ class ConvLoRALinear(nn.Linear, LoRALayer):
                 # Legacy MoEGate: (gates, moe_loss)
                 gates, moe_loss = gate_output
                 gate_info = {}
+            
+            # Save intermediates for BC data collection (Scheme B)
+            # These are used by rl_bc_routing_policy.py to collect expert actions
+            self._last_lora_res = lora_res.clone().detach()
+            self._last_gates = gates.clone().detach()
 
             # Distribute data samples to experts.
             # 3) Route tokens to experts (SparseDispatcher)
