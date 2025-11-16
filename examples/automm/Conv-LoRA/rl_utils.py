@@ -148,18 +148,28 @@ def load_trained_conv_lora_model(task_name, model_path=None, device='cuda'):
     
     # Load weights from checkpoint
     print("Loading weights from checkpoint...")
-    # Remove 'model.' prefix from keys if present
+    # Remove 'model.model.' prefix from Lightning checkpoint keys
+    # Lightning saves as: model.model.vision_encoder.xxx
+    # We need: vision_encoder.xxx (for sam_model.model)
     new_state_dict = {}
     for k, v in state_dict.items():
-        if k.startswith('model.'):
-            new_key = k[6:]  # Remove 'model.' prefix
+        if k.startswith('model.model.'):
+            new_key = k[12:]  # Remove 'model.model.' prefix (12 chars)
+            new_state_dict[new_key] = v
+        elif k.startswith('model.'):
+            new_key = k[6:]  # Remove 'model.' prefix (6 chars)
             new_state_dict[new_key] = v
         else:
             new_state_dict[k] = v
     
     # Load state dict (strict=False to ignore missing keys)
-    sam_model.model.load_state_dict(new_state_dict, strict=False)
-    print("✓ Weights loaded successfully")
+    missing_keys, unexpected_keys = sam_model.model.load_state_dict(new_state_dict, strict=False)
+    print(f"✓ Weights loaded: {len(new_state_dict)} keys")
+    print(f"  Missing: {len(missing_keys)} keys, Unexpected: {len(unexpected_keys)} keys")
+    
+    # Verify Conv-LoRA weights were loaded
+    conv_lora_loaded = sum(1 for k in new_state_dict.keys() if 'lora' in k)
+    print(f"  Conv-LoRA params loaded: {conv_lora_loaded}")
     
     # Find Conv-LoRA layers
     conv_lora_layers = []
