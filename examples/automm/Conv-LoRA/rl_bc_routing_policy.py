@@ -42,7 +42,7 @@ def collect_noisy_topk_actions(
     device='cuda',
 ):
     """
-    Collect expert actions from Noisy-TopK gate by running forward passes.
+    Collect expert actions from Noisy-TopK gate by running real SAM forward passes.
     
     Parameters
     ----------
@@ -53,7 +53,7 @@ def collect_noisy_topk_actions(
     train_df
         Training dataframe
     predictor
-        MultiModalPredictor for data processing
+        MultiModalPredictor for data processing (not used in direct loading)
     max_samples
         Maximum number of samples to collect
     device
@@ -65,30 +65,30 @@ def collect_noisy_topk_actions(
         List of (feats, layer_idx, expert_action) dicts
     """
     print(f"Collecting Noisy-TopK actions from {len(conv_lora_layers)} layers...")
+    print(f"Target: {max_samples} samples from train set")
     
     # Storage for collected data
     bc_data = {i: [] for i in range(len(conv_lora_layers))}
     
-    # Hook to capture features and gates
+    # Hook to capture features and gates AFTER they're saved in forward
     def make_hook(layer_idx, data_storage):
         def hook_fn(module, input, output):
-            # Capture the intermediate features before gating
-            # Input to ConvLoRALinear.forward is x
-            # We need lora_res before gating
+            # After forward completes, _last_lora_res and _last_gates should be set
             if hasattr(module, '_last_lora_res') and hasattr(module, '_last_gates'):
-                feats = module._last_lora_res.detach().cpu()
-                gates = module._last_gates.detach().cpu()
+                feats = module._last_lora_res  # Already detached in forward
+                gates = module._last_gates      # Already detached in forward
                 
                 # Get expert action (argmax of gates)
                 actions = gates.argmax(dim=1)  # (B,)
                 
                 # Store (feats, actions) pairs
                 for i in range(feats.size(0)):
-                    data_storage[layer_idx].append({
-                        'feats': feats[i],  # (C, H, W)
-                        'layer_idx': layer_idx,
-                        'action': actions[i].item(),
-                    })
+                    if feats[i].numel() > 0:  # Valid feature
+                        data_storage[layer_idx].append({
+                            'feats': feats[i].cpu(),  # (C, H, W)
+                            'layer_idx': layer_idx,
+                            'action': actions[i].item(),
+                        })
         return hook_fn
     
     # Register hooks
@@ -97,85 +97,99 @@ def collect_noisy_topk_actions(
         hook = module.register_forward_hook(make_hook(layer_idx, bc_data))
         hooks.append(hook)
     
-    # Also need to capture lora_res and gates inside ConvLoRALinear.forward
-    # This requires a slight modification to the forward pass
-    # For now, we'll use a workaround: patch the forward temporarily
+    # Prepare data for SAM forward
+    from PIL import Image
+    import torchvision.transforms as transforms
     
-    original_forwards = []
-    for layer_idx, (name, module) in enumerate(conv_lora_layers):
-        original_forwards.append(module.forward)
-        
-        def make_patched_forward(original_forward, module_ref):
-            def patched_forward(x):
-                # Call original, but capture intermediate values
-                result, moe_loss = original_forward(x)
-                
-                # The forward already computed these; we need to access them
-                # Since we can't easily intercept mid-forward, we'll use a different approach
-                return result, moe_loss
-            return patched_forward
-        
-        # Patch temporarily
-        # module.forward = make_patched_forward(module.forward, module)
+    # SAM expects 1024x1024 images with ImageNet normalization
+    # Using same normalization as in SAM training
+    transform = transforms.Compose([
+        transforms.Resize((1024, 1024)),
+        transforms.ToTensor(),
+        transforms.Normalize(
+            mean=[0.485, 0.456, 0.406],  # ImageNet mean
+            std=[0.229, 0.224, 0.225]     # ImageNet std
+        ),
+    ])
     
-    # Simplified approach: collect from small batches
     print("Running forward passes to collect BC data...")
     sam_model.eval()
     
     num_collected = 0
     sample_limit = min(max_samples, len(train_df))
+    batch_size = 2  # Small batch to save memory
     
     with torch.no_grad():
         # Process in small batches
-        for idx in tqdm(range(0, sample_limit, 4)):
-            batch_df = train_df.iloc[idx:idx+4]
+        for idx in tqdm(range(0, sample_limit, batch_size)):
+            batch_df = train_df.iloc[idx:idx+batch_size]
             
             try:
-                # Use predictor's internal data processing
-                # This is a simplified version - actual implementation would use DataLoader
-                batch_dict = {}
+                # Load and preprocess images
+                images = []
+                for _, row in batch_df.iterrows():
+                    img = Image.open(row['image']).convert('RGB')
+                    img_tensor = transform(img)
+                    images.append(img_tensor)
                 
-                # For now, create a simple forward call
-                # In production, would use predictor's dataloader
-                # Placeholder: skip actual data loading for now
+                if len(images) == 0:
+                    continue
                 
-                # Forward (this would trigger our hooks)
-                # output = sam_model(batch_dict)
+                # Stack into batch
+                image_batch = torch.stack(images).to(device)  # (B, 3, 1024, 1024)
                 
-                num_collected += len(batch_df)
+                # Set model to training mode to avoid label requirement
+                was_training = sam_model.training
+                sam_model.train()  # Training mode doesn't require labels
+                
+                # Forward through SAMForSemanticSegmentation
+                # It expects batch dict with 'sam_image' key
+                batch_dict = {
+                    'sam_image': image_batch,
+                }
+                
+                # Forward (this triggers hooks on Conv-LoRA layers!)
+                output = sam_model(batch_dict)
+                
+                # Restore eval mode
+                if not was_training:
+                    sam_model.eval()
+                
+                num_collected += len(images)
                 
             except Exception as e:
-                print(f"Warning: Error processing batch at {idx}: {e}")
+                print(f"\nWarning: Error processing batch at {idx}: {e}")
+                import traceback
+                traceback.print_exc()
                 continue
     
     # Remove hooks
     for hook in hooks:
         hook.remove()
     
-    # Restore original forwards
-    # for (name, module), original_fwd in zip(conv_lora_layers, original_forwards):
-    #     module.forward = original_fwd
-    
     # Flatten collected data
     bc_dataset = []
     for layer_idx in range(len(conv_lora_layers)):
         bc_dataset.extend(bc_data[layer_idx])
     
-    print(f"Collected {len(bc_dataset)} BC samples from {len(bc_data)} layers")
+    print(f"\nCollected {len(bc_dataset)} BC samples from {len(conv_lora_layers)} layers")
+    print(f"  Samples per layer: ~{len(bc_dataset) // max(len(conv_lora_layers), 1)}")
     
-    # If no data collected (hooks didn't fire), create synthetic data for testing
+    # Verify data quality
+    if len(bc_dataset) > 0:
+        sample = bc_dataset[0]
+        print(f"  Sample data shape: {sample['feats'].shape}")
+        print(f"  Expert actions range: 0-{max([s['action'] for s in bc_dataset])}")
+    
+    # If still no data collected, there's a problem
     if len(bc_dataset) == 0:
-        print("WARNING: No data collected from hooks. Creating synthetic data for testing...")
-        rank = conv_lora_layers[0][1].lora_A.size(0) if len(conv_lora_layers) > 0 else 3
-        num_experts = conv_lora_layers[0][1].num_experts if len(conv_lora_layers) > 0 else 8
-        
-        for layer_idx in range(len(conv_lora_layers)):
-            for _ in range(100):  # 100 samples per layer
-                bc_dataset.append({
-                    'feats': torch.randn(rank, 16, 16),  # Random features
-                    'layer_idx': layer_idx,
-                    'action': torch.randint(0, num_experts, (1,)).item(),
-                })
+        raise RuntimeError(
+            "Failed to collect BC data even with real forward passes!\n"
+            "This indicates hooks are not firing. Possible issues:\n"
+            "1. Conv-LoRA layers not being called in forward\n"
+            "2. _last_lora_res/_last_gates not being set\n"
+            "3. Model structure mismatch"
+        )
     
     return bc_dataset
 
@@ -212,17 +226,35 @@ def train_bc(
     routing_policy.train()
     
     # Prepare data tensors
+    # Note: Features from different layers may have different spatial sizes
+    # We need to handle this by training layer-by-layer or resizing
+    
     feats_list = []
     layer_idx_list = []
     actions_list = []
     
+    # Group by spatial size and resize to common size
+    import torch.nn.functional as F
+    target_size = 16  # Resize all features to 16x16
+    
     for sample in bc_dataset:
-        feats_list.append(sample['feats'])
+        feat = sample['feats']  # (C, H, W)
+        
+        # Resize if needed
+        if feat.size(1) != target_size or feat.size(2) != target_size:
+            feat = F.interpolate(
+                feat.unsqueeze(0),  # (1, C, H, W)
+                size=(target_size, target_size),
+                mode='bilinear',
+                align_corners=False
+            ).squeeze(0)  # (C, H, W)
+        
+        feats_list.append(feat)
         layer_idx_list.append(sample['layer_idx'])
         actions_list.append(sample['action'])
     
     # Stack into tensors
-    feats_tensor = torch.stack(feats_list).to(device)  # (N, C, H, W)
+    feats_tensor = torch.stack(feats_list).to(device)  # (N, C, target_size, target_size)
     layer_idx_tensor = torch.tensor(layer_idx_list, dtype=torch.long, device=device)
     actions_tensor = torch.tensor(actions_list, dtype=torch.long, device=device)
     
@@ -399,10 +431,17 @@ def main():
     
     # Save checkpoint
     ckpt_path = os.path.join(args.output_dir, "routing_bc.pt")
+    config_dict = vars(args).copy()
+    # Ensure model_path is saved for RL training to reuse
+    if args.model_path:
+        config_dict['model_path'] = args.model_path
+    elif args.bc_data:
+        config_dict['model_path'] = None  # Can't infer from bc_data
+    
     save_checkpoint({
         'policy': routing_policy.state_dict(),
         'optimizer': optimizer.state_dict(),
-        'config': vars(args),
+        'config': config_dict,
         'num_experts': args.num_experts,
         'rank': args.rank,
         'num_layers': args.num_layers,

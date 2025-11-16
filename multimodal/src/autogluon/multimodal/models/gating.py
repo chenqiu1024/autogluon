@@ -180,6 +180,10 @@ class RLGate(nn.Module):
         info_dict
             Contains logits, logprobs, actions for GRPO update
         """
+        # Use stored layer_idx if not provided
+        if layer_idx is None and hasattr(self, '_layer_idx'):
+            layer_idx = self._layer_idx
+        
         # Get policy logits
         logits = self.routing_policy(feats, layer_idx)  # (B, M)
         
