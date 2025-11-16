@@ -1,0 +1,60 @@
+# Default configuration for RL-based expert routing (Scheme B)
+
+routing_rl:
+  enable: true
+  gating_type: rl  # or 'noisy_topk' for baseline
+  topk: 1
+  
+  # Policy architecture
+  policy_hidden_dim: 256
+  layer_embed_dim: 32
+  
+  # Training
+  freeze_sam: true  # Freeze SAM base model during RL
+  freeze_conv_lora: true  # Freeze Conv-LoRA A/B matrices
+  
+  # PERL regularizers
+  kl_coef: 0.05  # KL to Noisy-TopK reference
+  adapter_l2_coef: 0.001  # L2 on routing policy params
+  entropy_coef: 0.01  # Entropy regularization
+  
+  # Compute budget (Lagrangian)
+  compute_budget_flops: 1.0e10  # Target FLOPs budget
+  use_lagrangian: true
+  lagrangian_lr: 0.001
+  
+  # Reward components
+  imbalance_weight: 0.01  # Penalty for load imbalance
+  
+  # Warmstart
+  warmstart_bc: null  # Path to BC checkpoint (optional)
+
+training:
+  batch_size: 4
+  per_gpu_batch_size: 1
+  lr: 1.0e-4
+  max_steps: 10000
+  grad_clip: 1.0
+  mixed_precision: true
+  
+  # Optimizer
+  optimizer: adamw
+  weight_decay: 0.0001
+  
+  # Learning rate schedule
+  lr_schedule: cosine  # or constant
+  warmup_steps: 100
+
+logging:
+  tensorboard_dir: runs/routing_rl
+  artifacts_dir: outputs/routing_rl
+  ckpt_interval: 500
+  vis_interval: 100
+  log_interval: 10
+
+eval:
+  test_batch_size: 8
+  save_heatmaps: true
+  save_json_stats: true
+  save_features: false  # Set true to save encoder/expert features (large files)
+

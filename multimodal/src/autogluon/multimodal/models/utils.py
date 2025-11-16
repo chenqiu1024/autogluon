@@ -1,5 +1,6 @@
 import functools
 import logging
+import os
 import re
 import warnings
 from typing import Dict, List, Optional, Tuple
@@ -513,6 +514,10 @@ def create_adaptation(peft: str, layer: nn.Module, lora_r: int, lora_alpha: int,
             layer.in_features, layer.out_features, r=lora_r, lora_alpha=lora_alpha, merge_weights=False
         )
     elif "conv_lora" in peft:
+        # Scheme B: Support RL-based gating via gate_factory
+        gate_factory = kwargs.get("gate_factory", None)
+        layer_idx = kwargs.get("layer_idx", None)
+        
         return ConvLoRALinear(
             layer.in_features,
             layer.out_features,
@@ -520,6 +525,8 @@ def create_adaptation(peft: str, layer: nn.Module, lora_r: int, lora_alpha: int,
             lora_alpha=lora_alpha,
             merge_weights=False,
             conv_lora_expert_num=kwargs["conv_lora_expert_num"],
+            gate_factory=gate_factory,
+            layer_idx=layer_idx,
         )
     elif "ia3" in peft:
         return IA3Linear(layer.in_features, layer.out_features, merge_weights=False)
@@ -575,6 +582,10 @@ def inject_adaptation_to_linear_layer(
     # Paper alignment (Conv-LoRA, Sec. 3.3):
     # Typical usage sets module_filter to attention modules in the vision encoder (e.g., ".*vision_encoder.*attn")
     # and filter to projection names (e.g., ["q", "v"]). For "conv_lora", we create ConvLoRALinear instead of LoRA.
+    
+    # Track layer indices for RL gating (Scheme B)
+    layer_idx = 0
+    
     for m_name, module in dict(model.named_modules()).items():
         if extra_trainable_params and any(re.match(filter_layer, m_name) for filter_layer in extra_trainable_params):
             continue
@@ -588,10 +599,17 @@ def inject_adaptation_to_linear_layer(
                     assert isinstance(
                         layer, nn.Linear
                     ), f"LoRA can only be applied to torch.nn.Linear, but {layer} is {type(layer)}."
-                    adaptation_layer = create_adaptation(peft, layer, lora_r, lora_alpha, **kwargs)
+                    
+                    # Pass layer_idx for RL gating (Scheme B)
+                    kwargs_with_idx = {**kwargs, 'layer_idx': layer_idx}
+                    adaptation_layer = create_adaptation(peft, layer, lora_r, lora_alpha, **kwargs_with_idx)
                     adaptation_layer.weight = layer.weight
                     adaptation_layer.bias = layer.bias
                     setattr(module, c_name, adaptation_layer)
+                    
+                    # Increment layer index for next Conv-LoRA layer
+                    if "conv_lora" in peft:
+                        layer_idx += 1
 
     return model  # return model to enable method chaining
 
@@ -1686,6 +1704,49 @@ def apply_peft_adaptation(model: nn.Module, config: DictConfig) -> nn.Module:
         A DictConfig object. The optimization config should be accessible by "config.optimization".
     """
     if config.optim.peft in PEFT_ADDITIVE_STRATEGIES:
+        # Scheme B: Prepare gate_factory for RL-based routing
+        gate_factory = None
+        if "conv_lora" in config.optim.peft:
+            gating_type = getattr(config.optim.lora, 'conv_lora_gating', 'noisy_topk')
+            
+            if gating_type == 'rl':
+                # Load routing policy and create RLGate factory
+                from ..models.gating import RLGate, NoisyTopKGate
+                from ..rl.policies.routing_policy import RoutingPolicy
+                from ..rl.utils.checkpoint import load_checkpoint
+                
+                rl_ckpt_path = getattr(config.optim.lora, 'rl_routing_ckpt', None)
+                if rl_ckpt_path and os.path.exists(rl_ckpt_path):
+                    # Load trained routing policy
+                    routing_policy = RoutingPolicy(
+                        num_experts=config.optim.lora.conv_lora_expert_num,
+                        feature_dim=config.optim.lora.r,
+                        hidden_dim=256,
+                        layer_embed_dim=32,
+                        num_layers=32,  # Adjust based on model
+                    )
+                    ckpt = load_checkpoint(rl_ckpt_path)
+                    routing_policy.load_state_dict(ckpt['policy'])
+                    routing_policy.eval()
+                    
+                    # Create reference gate (would need actual MoEGate instance)
+                    # For now, set to None; full implementation would wrap the baseline gate
+                    reference_gate = None
+                    
+                    # Create factory that returns RLGate
+                    def create_rl_gate():
+                        return RLGate(
+                            routing_policy=routing_policy,
+                            reference_gate=reference_gate,
+                            k=1,
+                            compute_kl=False,  # KL only during RL training
+                        )
+                    
+                    gate_factory = create_rl_gate
+                else:
+                    logger.warning(f"RL routing checkpoint not found or not specified: {rl_ckpt_path}")
+                    logger.warning("Falling back to Noisy-TopK gating")
+        
         model = inject_adaptation_to_linear_layer(
             model=model,
             peft=config.optim.peft,
@@ -1695,6 +1756,7 @@ def apply_peft_adaptation(model: nn.Module, config: DictConfig) -> nn.Module:
             filter=config.optim.lora.filter,
             extra_trainable_params=config.optim.extra_trainable_params,
             conv_lora_expert_num=config.optim.lora.conv_lora_expert_num,
+            gate_factory=gate_factory,
         )
         model.name_to_id = model.get_layer_ids()  # Need to update name to id dictionary.
 

@@ -36,6 +36,8 @@ optim:
     r: 8
     alpha: 8
     conv_lora_expert_num: 8 # default setting for Conv-LoRA
+    conv_lora_gating: noisy_topk # Gating type: 'noisy_topk' (default) or 'rl' (for Scheme B)
+    rl_routing_ckpt: null # Path to RL routing policy checkpoint (for Scheme B)
   loss_func:
     "auto" # The replaced loss for regression. Can only support loss function in torch.nn.
     # example

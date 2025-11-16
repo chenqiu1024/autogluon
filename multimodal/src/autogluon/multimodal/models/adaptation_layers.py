@@ -649,12 +649,15 @@ class ConvLoRALinear(nn.Linear, LoRALayer):
         fan_in_fan_out: bool = False,  # Set this to True if the layer to replace stores weight like (fan_in, fan_out)
         merge_weights: bool = False,
         conv_lora_expert_num: Optional[int] = None,
+        gate_factory: Optional[callable] = None,  # Factory to create custom gate
+        layer_idx: Optional[int] = None,  # Layer index for RL gating
         **kwargs,
     ):
         nn.Linear.__init__(self, in_features, out_features, **kwargs)
         LoRALayer.__init__(self, r=r, lora_alpha=lora_alpha, lora_dropout=lora_dropout, merge_weights=merge_weights)
 
         self.fan_in_fan_out = fan_in_fan_out
+        self.layer_idx = layer_idx
         # Actual trainable parameters
         if r > 0:
             # Sec. 3: Low-rank LoRA factors around a frozen base linear
@@ -664,9 +667,15 @@ class ConvLoRALinear(nn.Linear, LoRALayer):
             # Freezing the pre-trained weight matrix
             self.weight.requires_grad = False
 
-            # Sec. 3.2: MoE-Conv experts with Noisy-TopK gating
+            # Sec. 3.2: MoE-Conv experts with Noisy-TopK gating (or RL gating if gate_factory provided)
             topk = 1
-            self.lora_moe_gating = MoEGate(M=conv_lora_expert_num, d=self.r, K=topk)
+            if gate_factory is not None:
+                # Use custom gate (e.g., RLGate for Scheme B)
+                self.lora_moe_gating = gate_factory()
+            else:
+                # Default: Noisy-TopK gate from paper
+                self.lora_moe_gating = MoEGate(M=conv_lora_expert_num, d=self.r, K=topk)
+            
             self.lora_moe_experts = nn.ModuleList([])
             self.upsample_ratios = list(range(1, conv_lora_expert_num + 1))
             for upsample_ratio in self.upsample_ratios:
@@ -675,6 +684,13 @@ class ConvLoRALinear(nn.Linear, LoRALayer):
                 self.lora_moe_experts.append(nn.Sequential(expert, nn.GELU()))
             self.num_experts = conv_lora_expert_num
             self.multiply_by_gates = False
+            
+            # Store expert configs for FLOPs computation (Scheme B)
+            self.expert_configs = [{
+                'in_c': r,
+                'out_c': r,
+                'kernel_size': 3,
+            } for _ in range(conv_lora_expert_num)]
 
         self.reset_parameters()
         if fan_in_fan_out:
@@ -706,8 +722,19 @@ class ConvLoRALinear(nn.Linear, LoRALayer):
 
             # Calculate the gating values.
             # 2) Sec. 3.2: Compute Noisy-TopK gates over spatial features; also returns auxiliary moe_loss.
+            #    For RL gating (Scheme B), this calls RLGate with layer_idx.
             lora_res = lora_res.permute(0, 3, 1, 2).contiguous()
-            gates, moe_loss = self.lora_moe_gating(lora_res)
+            
+            # Check if gate supports BaseGate protocol (returns 3-tuple with info_dict)
+            gate_output = self.lora_moe_gating(lora_res, self.layer_idx) if hasattr(self, 'layer_idx') and self.layer_idx is not None else self.lora_moe_gating(lora_res)
+            
+            if isinstance(gate_output, tuple) and len(gate_output) == 3:
+                # BaseGate protocol: (gates, aux_loss, info_dict)
+                gates, moe_loss, gate_info = gate_output
+            else:
+                # Legacy MoEGate: (gates, moe_loss)
+                gates, moe_loss = gate_output
+                gate_info = {}
 
             # Distribute data samples to experts.
             # 3) Route tokens to experts (SparseDispatcher)
@@ -765,11 +792,22 @@ class MoEGate(nn.Module):
         self.register_buffer("std", torch.tensor([1.0]))
         assert self.k <= self.M
 
-    def forward(self, feats, loss_coef=1e-2, noise_epsilon=1e-2):
+    def forward(self, feats, layer_idx=None, loss_coef=1e-2, noise_epsilon=1e-2):
         """
         Paper alignment (Sec. 3.2):
         - GAP over spatial features -> linear logits (+ noise during training) -> TopK expert selection
         - Softmax over TopK logits yields gates; compute importance/load stats and CV^2-based load-balancing loss
+        
+        Parameters
+        ----------
+        feats
+            Input features (B, C, H, W)
+        layer_idx
+            Layer index (unused for MoEGate, for interface compatibility with RLGate)
+        loss_coef
+            Coefficient for load balancing loss
+        noise_epsilon
+            Noise epsilon for gating
         """
         batch_size = feats.shape[0]
 

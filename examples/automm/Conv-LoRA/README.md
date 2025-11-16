@@ -41,6 +41,143 @@ You can also run the following command to evaluate a checkpoint:
 
 `python3 run_semantic_segmentation.py --task {dataset_name} --output_dir {output_dir} --ckpt_path {ckpt_path} --eval`
 
+---
+
+## 5. RL-based Expert Routing (Scheme B - Experimental)
+
+### Overview
+This extends Conv-LoRA with RL-based expert routing, replacing the Noisy Top-K gating with a learned policy trained via GRPO (Group Relative Policy Optimization) with PERL-style regularizers.
+
+**Goal**: Learn to route tokens to experts for better IoU vs FLOPs trade-off.
+
+**Key Features**:
+- GRPO training with group-wise normalized advantages
+- PERL regularizers: KL to Noisy-TopK reference, adapter L2
+- Optional Lagrangian constraint for compute budget
+- TensorBoard logging + local artifacts (heatmaps, JSON stats)
+- Resumable training with full state checkpointing
+
+### 5.1 Behavior Cloning (BC) Warmstart (Optional)
+
+Pretrain routing policy to imitate Noisy-TopK decisions:
+
+```bash
+python rl_bc_routing_policy.py \
+  --task polyp \
+  --output_dir bc_warmstart/ \
+  --num_experts 8 \
+  --rank 3 \
+  --lr 1e-3 \
+  --num_epochs 10
+```
+
+Output: `bc_warmstart/routing_bc.pt`
+
+### 5.2 RL Training
+
+Train routing policy with GRPO:
+
+```bash
+python rl_train_routing_policy.py \
+  --task polyp \
+  --output_dir rl_routing/ \
+  --warmstart bc_warmstart/routing_bc.pt \
+  --num_experts 8 \
+  --rank 3 \
+  --lr 1e-4 \
+  --max_steps 10000 \
+  --kl_coef 0.05 \
+  --entropy_coef 0.01 \
+  --adapter_l2_coef 0.001 \
+  --compute_budget 1e10 \
+  --use_lagrangian \
+  --ckpt_interval 500 \
+  --vis_interval 100
+```
+
+**Key flags**:
+- `--warmstart`: BC checkpoint for initialization
+- `--kl_coef`: Weight for KL(π || π_NoisyTopK) regularization
+- `--adapter_l2_coef`: Weight for adapter L2 penalty
+- `--compute_budget`: Target FLOPs budget
+- `--use_lagrangian`: Enable Lagrangian constraint on FLOPs
+- `--resume_from`: Resume from checkpoint
+
+**Outputs**:
+- Checkpoints: `rl_routing/checkpoints/step_*.pt`, `final.pt`
+- TensorBoard logs: `rl_routing/logs/`
+- Artifacts: `rl_routing/artifacts/gates_step_*.png`
+
+### 5.3 Evaluation
+
+Evaluate trained routing policy:
+
+```bash
+python rl_eval_routing_policy.py \
+  --task polyp \
+  --ckpt_path rl_routing/checkpoints/final.pt \
+  --output_dir eval_results/ \
+  --save_heatmaps \
+  --save_features
+```
+
+**Outputs**:
+- Summary statistics: `eval_results/summary.json`
+- Per-image stats: `eval_results/stats/*.json`
+- Expert usage heatmaps: `eval_results/heatmaps/*.png`
+- Optional features: `eval_results/features/*.npy` (if `--save_features`)
+
+### 5.4 A/B Testing
+
+Compare RL routing vs baseline Noisy-TopK by toggling config:
+
+```python
+# Baseline (Noisy-TopK)
+hyperparameters = {
+    "optim.lora.conv_lora_gating": "noisy_topk",  # default
+    ...
+}
+
+# RL routing
+hyperparameters = {
+    "optim.lora.conv_lora_gating": "rl",
+    "optim.lora.rl_routing_ckpt": "rl_routing/checkpoints/final.pt",
+    ...
+}
+```
+
+### 5.5 Monitoring & Debugging
+
+**TensorBoard metrics**:
+- `train/reward`, `train/iou`, `train/flops`, `train/imbalance`
+- `train/dual_alpha` (Lagrangian multiplier)
+- `loss/total`, `loss/kl`, `loss/entropy`, `loss/adapter_l2`
+- `train/gates_dist` (histogram of expert selections)
+
+**Artifacts**:
+- Expert usage heatmaps: visualize which experts are selected
+- JSON stats: per-image IoU, FLOPs, gate decisions
+
+**Resume training**:
+```bash
+python rl_train_routing_policy.py \
+  --resume_from rl_routing/checkpoints/step_5000.pt \
+  ...
+```
+
+### 5.6 Limitations & Future Work
+
+**Current limitations**:
+- Placeholder integration (requires hooking into actual Conv-LoRA forward)
+- Single-GPU training only
+- No distributed RL
+
+**Future enhancements (Scheme A)**:
+- Interactive prompt policy for point/box selection
+- Multi-step episodes with ΔIoU rewards
+- Preference-based warmstart (DPO)
+
+---
 
 ### Citation
 
