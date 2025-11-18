@@ -22207,6 +22207,175 @@ def forward_with_rl_gates(self, batch):
 
 ## 💡 我的建议
 
+### 分层 RL（Hierarchical RL）端到端使用说明（Phase 1/2/3）
+
+#### 1. 数据与 Conv-LoRA 预训练
+
+- **数据集准备**：保持与现有 Conv-LoRA 流水线一致，例如：
+  - 目录：`examples/automm/Conv-LoRA/datasets/<name>`
+  - 使用 `prepare_dataset()` 下载/读取（polyp / isic2017 / camo 等）。
+- **Conv-LoRA 预训练**：
+  - 复用当前 Conv-LoRA 训练脚本，得到一个基准模型：
+    - `model_path = AutogluonModels/ag-YYYYMMDD_HHMMSS/epoch=3-step=2000.ckpt`
+
+#### 2. Phase 1：仅路由 RL（方案 B，专家路由）
+
+- 目标：在固定 Conv-LoRA 结构下，用 RL 替代 Noisy-TopK 做专家路由。
+- 脚本：`examples/automm/Conv-LoRA/rl_train_routing_policy.py`
+
+示例命令：
+
+```bash
+cd examples/automm/Conv-LoRA
+
+python rl_train_routing_policy.py \
+  --task isic2017 \
+  --model_path AutogluonModels/ag-.../epoch=3-step=2000.ckpt \
+  --output_dir rl_routing_schemeB \
+  --batch_size 4 \
+  --max_steps 10000 \
+  --compute_budget 1e10 \
+  --imbalance_weight 0.01 \
+  --kl_coef 0.05 \
+  --entropy_coef 0.01
+```
+
+- 输出：
+  - `rl_routing_schemeB/checkpoints/final.pt` 或途中若干 `step_XXXX.pt`。
+  - 其中包含：`policy`（即 `RoutingPolicy.state_dict()`）、`dual_alpha`、训练配置等。
+
+#### 3. Phase 2：分层 RL（只训练 LayerPolicy，RoutingPolicy 冻结）
+
+- 目标：在已有路由策略基础上，让新策略 `LayerPolicy` 学习**哪些层启用 Conv-LoRA/MoE**，用结构稀疏来提升泛化和算力效率。
+- 新脚本：`examples/automm/Conv-LoRA/rl_train_hierarchical_policy.py`
+- Phase 2 设定：`--phase layer`（只更新 LayerPolicy，RoutingPolicy 冻结）。
+
+示例命令：
+
+```bash
+cd examples/automm/Conv-LoRA
+
+python rl_train_hierarchical_policy.py \
+  --phase layer \
+  --task isic2017 \
+  --model_path AutogluonModels/ag-.../epoch=3-step=2000.ckpt \
+  --routing_ckpt rl_routing_schemeB/checkpoints/final.pt \
+  --output_dir rl_hier_layer_only \
+  --batch_size 4 \
+  --max_steps 5000 \
+  --compute_budget 1e10 \
+  --imbalance_weight 0.01 \
+  --layer_penalty_coef 0.01 \
+  --entropy_coef 0.01 \
+  --adapter_l2_coef 0.001
+```
+
+- 训练流程要点：
+  - 每个 batch：
+    1. 用 SAM 提取全局特征 `global_feats`（image_embeds GAP 等）。
+    2. `LayerPolicy(global_feats) → layer_logits (B, L)`，经 `sigmoid` 与 batch 平均得到 `layer_mask (L,)`。
+    3. 对每个 `ConvLoRALinear` 调用 `set_lora_active(layer_mask[i])`，控制该层 LoRA 是否有效。
+    4. 仅在被激活的层中注入 `RLGate`，像 Phase 1 一样做 RL 路由、采集 `gates/logprobs`。
+    5. 计算奖励：
+       \[
+       r = \mathrm{IoU} - \alpha\cdot\frac{\mathrm{FLOPs}}{\text{budget}} - \beta\cdot\text{imbalance} - \gamma\cdot\frac{\#\text{active layers}}{L}
+       \]
+    6. 使用 `build_hierarchical_rollout` 和 `compute_shared_advantages` 为 `LayerPolicy` 构造 rollout 和 advantage，只更新 LayerPolicy（RoutingPolicy 冻结）。
+- 输出：
+  - `rl_hier_layer_only/checkpoints/step_XXXX.pt / final.pt`，包含：
+    - `layer_policy` 参数；
+    - `routing_policy`（冻结状态，便于后续加载）；
+    - `dual_alpha` 与训练配置。
+
+#### 4. Phase 3：联合微调（LayerPolicy + RoutingPolicy）
+
+- 目标：在 Phase 2 已找到较好的层级模式后，同时微调路由策略，使两级策略协同优化。
+- 脚本同 Phase 2：`rl_train_hierarchical_policy.py`
+- Phase 3 设定：`--phase joint`。
+
+示例命令：
+
+```bash
+python rl_train_hierarchical_policy.py \
+  --phase joint \
+  --task isic2017 \
+  --model_path AutogluonModels/ag-.../epoch=3-step=2000.ckpt \
+  --routing_ckpt rl_routing_schemeB/checkpoints/final.pt \
+  --output_dir rl_hier_joint \
+  --batch_size 4 \
+  --max_steps 3000 \
+  --compute_budget 1e10 \
+  --imbalance_weight 0.01 \
+  --layer_penalty_coef 0.01 \
+  --lr_layer 5e-5 \
+  --lr_routing 5e-5 \
+  --entropy_coef 0.01 \
+  --kl_coef 0.05 \
+  --adapter_l2_coef 0.001
+```
+
+- 训练细节：
+  - 两个策略共享同一个标量 reward（IoU + FLOPs + imbalance + layer_penalty）。
+  - 使用 `compute_shared_advantages` 将 reward 展开为：
+    - `adv_layer`（对应 `LayerPolicy` 的 logprobs，长度 ~ B×L）；
+    - `adv_routing`（对应所有层所有 token 的路由 logprobs）。
+  - 分别调用两套 `GRPOTrainer.update`：
+    - `grpo_layer.update(hier_rollout["layer"], adv_layer)`；
+    - `grpo_routing.update(hier_rollout["routing"], adv_routing)`。
+
+#### 5. 推理与评估：如何调用分层 RL 模型
+
+1. **加载 Conv-LoRA + LayerPolicy + RoutingPolicy**：
+   - 使用 `load_trained_conv_lora_model` 恢复 Conv-LoRA+SAM。
+   - 从 `rl_hier_layer_only` 或 `rl_hier_joint` 的 checkpoint 中读取：
+     - `layer_policy.state_dict()`；
+     - `routing_policy.state_dict()`。
+
+2. **对每个验证 batch**：
+
+```python
+predictor, sam_model, conv_lora_layers = load_trained_conv_lora_model(...)
+layer_policy.load_state_dict(...)
+routing_policy.load_state_dict(...)
+
+batch_images, batch_labels = ...
+global_feats = _extract_global_features(sam_model, batch_images).to(device)  # (B, D)
+layer_logits = layer_policy(global_feats)        # (B, L)
+layer_probs = torch.sigmoid(layer_logits)       # (B, L)
+layer_mask = (layer_probs.mean(dim=0) > 0.5).float()  # (L,)
+
+for idx, (_, module) in enumerate(conv_lora_layers):
+    module.set_lora_active(layer_mask[idx].item())
+
+# 然后在各层把 MoEGate 替换为 RLGate，但这次使用“贪心路由”（argmax）
+# 可复用 eval_rl_policy.py 里的逻辑：
+for layer_idx, (name, module) in enumerate(conv_lora_layers):
+    # 仅对激活层使用 RoutingPolicy 进行 argmax 选专家
+    if layer_mask[layer_idx] < 0.5:
+        continue
+    # 在前向中，RLGate 用 logits.argmax(dim=1) 选择专家
+```
+
+3. **计算指标与 FLOPs**：
+   - IoU / DICE：沿用当前 `compute_iou` / DICE 实现；
+   - FLOPs：使用 `compute_expert_flops`/`compute_conv_flops` 和最终 `gates` 统计；
+   - 这样可以对比：
+     - Baseline Conv-LoRA（无 RL）；
+     - 方案 B（仅 Routing RL）；
+     - 分层 RL（LayerPolicy + RoutingPolicy）。
+
+#### 6. 兼容性与可扩展性
+
+- 不启用分层 RL 时：
+  - `ConvLoRALinear.lora_active` 默认为 1.0；
+  - 不创建 `LayerPolicy`，不调用 `set_lora_active`，行为等价于当前实现。
+- 仅方案 B（Routing RL）时：
+  - 继续使用 `rl_train_routing_policy.py` 和现有 `RLGate` 插桩逻辑；
+  - 不需要 `LayerPolicy` 与分层工具。
+- 未来扩展：
+  - `LayerPolicy` 只依赖全局特征 `(B, D)` 与层数 `L`，可扩展到其它 backbone（非 SAM）；
+  - 可以把 `use_patterns=True` 打开，利用模式空间代替逐层 Bernoulli，进一步稳定训练。 
+
 **立即行动**：切换到 agent 模式，让我用 30-60 分钟完成集成，您就能直接跑：
 
 ```bash

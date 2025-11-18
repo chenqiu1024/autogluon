@@ -658,6 +658,9 @@ class ConvLoRALinear(nn.Linear, LoRALayer):
 
         self.fan_in_fan_out = fan_in_fan_out
         self.layer_idx = layer_idx
+        # Activation factor for LoRA residual (for hierarchical RL).
+        # Default is 1.0 (LoRA always active). Can be overridden at runtime.
+        self.lora_active = 1.0
         # Actual trainable parameters
         if r > 0:
             # Sec. 3: Low-rank LoRA factors around a frozen base linear
@@ -768,9 +771,39 @@ class ConvLoRALinear(nn.Linear, LoRALayer):
             if dim == 3:
                 lora_res = lora_res.reshape(B, L, C)
             # 5) Project back to output dim with LoRA scale (final residual add)
-            result += (lora_res @ self.lora_B.T) * self.scaling
+            lora_out = (lora_res @ self.lora_B.T) * self.scaling
+
+            # Apply hierarchical RL activation factor.
+            # - If lora_active is scalar: broadcast to all elements.
+            # - If it's a tensor, it should be broadcastable to lora_out.
+            lora_active = getattr(self, "lora_active", 1.0)
+            if isinstance(lora_active, torch.Tensor):
+                lora_active = lora_active.to(lora_out.device)
+
+            result += lora_active * lora_out
 
         return result, moe_loss
+
+    def set_lora_active(self, value):
+        """
+        Set activation factor for LoRA residual.
+
+        Parameters
+        ----------
+        value
+            float or scalar tensor. 0.0 effectively disables LoRA contribution.
+        """
+        if isinstance(value, (float, int)):
+            self.lora_active = float(value)
+        elif isinstance(value, torch.Tensor):
+            if value.numel() == 1:
+                # Store as Python float for simplicity.
+                self.lora_active = value.detach().item()
+            else:
+                # Keep tensor; expected to be broadcastable in forward.
+                self.lora_active = value.detach()
+        else:
+            raise TypeError(f"Unsupported lora_active type: {type(value)}")
 
 
 class MoEGate(nn.Module):

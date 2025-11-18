@@ -9,6 +9,7 @@ from .visualization import (
 )
 from .checkpoint import save_checkpoint, load_checkpoint
 from .flops import compute_conv_flops, compute_expert_flops
+from .hierarchical import build_hierarchical_rollout, compute_shared_advantages
 
 __all__ = [
     "RolloutBuffer",
@@ -21,5 +22,7 @@ __all__ = [
     "load_checkpoint",
     "compute_conv_flops",
     "compute_expert_flops",
+    "build_hierarchical_rollout",
+    "compute_shared_advantages",
 ]
 
