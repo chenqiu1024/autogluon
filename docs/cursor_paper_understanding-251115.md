@@ -22299,8 +22299,9 @@ python rl_train_hierarchical_policy.py \
 python rl_train_hierarchical_policy.py \
   --phase joint \
   --task isic2017 \
-  --model_path AutogluonModels/ag-.../epoch=3-step=2000.ckpt \
+  --model_path AutogluonModels/ag-20251113_165105/model.ckpt \
   --routing_ckpt rl_routing_schemeB/checkpoints/final.pt \
+  --layer_ckpt rl_hier_layer_only/checkpoints/step_3000.pt \
   --output_dir rl_hier_joint \
   --batch_size 4 \
   --max_steps 3000 \
@@ -22313,6 +22314,11 @@ python rl_train_hierarchical_policy.py \
   --kl_coef 0.05 \
   --adapter_l2_coef 0.001
 ```
+
+**关键参数说明**：
+- `--layer_ckpt`：Phase 2 训练得到的 LayerPolicy checkpoint（必需，否则 LayerPolicy 会从头初始化）
+- `--lr_layer` / `--lr_routing`：降低学习率（5e-5）进行微调，避免破坏已有收敛结果
+- `--max_steps 3000`：联合微调通常不需要太多步，3000 步足够让两级策略互相适应
 
 - 训练细节：
   - 两个策略共享同一个标量 reward（IoU + FLOPs + imbalance + layer_penalty）。

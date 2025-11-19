@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "multimodal"
 
 from autogluon.multimodal.models.adaptation_layers import ConvLoRALinear
 from autogluon.multimodal.models.gating import NoisyTopKGate, RLGate
-from autogluon.multimodal.multimodal_predictor import MultiModalPredictor  # noqa: F401
+# from autogluon.multimodal.multimodal_predictor import MultiModalPredictor  # noqa: F401
 from autogluon.multimodal.rl.algos.grpo import GRPOTrainer
 from autogluon.multimodal.rl.policies.layer_policy import LayerPolicy
 from autogluon.multimodal.rl.policies.routing_policy import RoutingPolicy
@@ -60,12 +60,14 @@ def _extract_global_features(sam_model, batch_images: torch.Tensor) -> torch.Ten
     For SAM-based models, we run a forward pass and use image embeddings.
     """
     batch_dict = {"sam_image": batch_images}
+    
+    # Force train mode to avoid requiring sam_label in forward
     was_training = sam_model.training
-    sam_model.eval()
+    sam_model.train()
     with torch.no_grad():
         output = sam_model(batch_dict)
-    if was_training:
-        sam_model.train()
+    if not was_training:
+        sam_model.eval()
 
     sam_outputs = output["sam"]
     if "image_embeds" in sam_outputs:
@@ -279,7 +281,7 @@ class HierarchicalRLTrainer:
 
         # ---- 6) Build hierarchical rollout & advantages ----
         # Here we approximate Bernoulli logprob via log_sigmoid for active layers.
-        layer_logprobs = torch.log_sigmoid(layer_logits)  # (B, L)
+        layer_logprobs = torch.nn.functional.logsigmoid(layer_logits)  # (B, L)
         layer_logprobs_flat = layer_logprobs.view(-1)
 
         hier_rollout = build_hierarchical_rollout(
@@ -332,6 +334,7 @@ def main():
     parser.add_argument("--phase", type=str, default="layer", choices=["routing", "layer", "joint"])
     parser.add_argument("--model_path", type=str, required=True, help="Trained Conv-LoRA checkpoint")
     parser.add_argument("--routing_ckpt", type=str, default=None, help="Routing policy checkpoint from Scheme B")
+    parser.add_argument("--layer_ckpt", type=str, default=None, help="Layer policy checkpoint from Phase 2")
     parser.add_argument("--output_dir", type=str, default="rl_hierarchical")
     parser.add_argument("--device", type=str, default="cuda")
 
@@ -403,6 +406,12 @@ def main():
         use_patterns=False,
     ).to(args.device)
 
+    # Load layer policy checkpoint if provided (for Phase 3 joint training)
+    if args.layer_ckpt:
+        print(f"Loading layer policy from {args.layer_ckpt}")
+        ckpt = load_checkpoint(args.layer_ckpt, device=args.device)
+        layer_policy.load_state_dict(ckpt["layer_policy"])
+
     # Optimizers and GRPO trainers
     opt_layer = torch.optim.AdamW(layer_policy.parameters(), lr=args.lr_layer)
     opt_routing = torch.optim.AdamW(routing_policy.parameters(), lr=args.lr_routing)
@@ -466,8 +475,9 @@ def main():
         masks = []
         for idx in indices:
             row = train_df.iloc[idx]
-            img = Image.open(os.path.join(dataset_dir, row["image"])).convert("RGB")
-            msk = Image.open(os.path.join(dataset_dir, row["label"])).convert("L")
+            # prepare_dataset already expanded paths, use them directly
+            img = Image.open(row["image"]).convert("RGB")
+            msk = Image.open(row["label"]).convert("L")
             img_tensor = transform(img)
             mask_tensor = transforms.Resize((1024, 1024))(transforms.ToTensor()(msk))
             images.append(img_tensor)
