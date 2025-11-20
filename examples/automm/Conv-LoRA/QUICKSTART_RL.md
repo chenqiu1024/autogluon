@@ -6,23 +6,46 @@
 
 ### Step 0: Train Baseline Conv-LoRA (if not done already)
 
+#### Option A: Use Existing Checkpoint
+
+If you already have a trained Conv-LoRA model:
+
+```bash
+# Example: Use the checkpoint from the hierarchical RL experiments
+BASELINE_CKPT="AutogluonModels/ag-20251113_165105/model.ckpt"
+
+# Verify it exists
+ls -lh $BASELINE_CKPT
+```
+
+#### Option B: Train from Scratch
+
 ```bash
 cd /root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA
 
-# Download dataset (if not done)
-python prepare_semantic_segmentation_datasets.py
+# Train baseline Conv-LoRA on ISIC 2017
+python run_semantic_segmentation.py \
+  --task isic2017 \
+  --seed 42686693 \
+  --rank 3 \
+  --expert_num 8 \
+  --num_gpus 1 \
+  --per_gpu_batch_size 1 \
+  --batch_size 4 \
+  --output_dir baseline_conv_lora
 
-# Train baseline Conv-LoRA
-./train_baseline_first.sh isic2017 outputs_baseline
-
-# This takes ~2 hours on RTX 3090, ~1 hour on L20
+# This takes ~6-8 hours on single GPU (30 epochs)
 ```
 
 **Verify baseline exists**:
 ```bash
-ls outputs_baseline/
-# Should see model files and metrics.txt
+ls baseline_conv_lora/
+# Should see: model.ckpt, config.yaml, hparams.yaml, metrics.txt
 ```
+
+**Expected Baseline Performance**:
+- Validation IoU: ~0.76-0.77
+- Validation DICE: ~0.84-0.85
 
 ---
 
