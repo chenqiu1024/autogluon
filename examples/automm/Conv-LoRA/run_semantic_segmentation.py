@@ -105,6 +105,7 @@ if __name__ == "__main__":
             eval_metric=validation_metric,
             hyperparameters=hyperparameters,
             label="label",
+            path=args.output_dir,  # Specify save path
         )
         predictor.fit(train_data=train_df, tuning_data=val_df, seed=args.seed)
 

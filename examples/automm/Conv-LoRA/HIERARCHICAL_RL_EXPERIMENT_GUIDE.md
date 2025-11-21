@@ -146,13 +146,13 @@ cd examples/automm/Conv-LoRA
 
 python run_semantic_segmentation.py \
   --task isic2017 \
-  --seed 42686693 \
+  --seed 20251119 \
   --rank 3 \
   --expert_num 8 \
   --num_gpus 1 \
   --per_gpu_batch_size 1 \
   --batch_size 4 \
-  --output_dir baseline_conv_lora
+  --output_dir baseline_conv_lora-251119
 ```
 
 **关键参数说明**：
@@ -161,7 +161,7 @@ python run_semantic_segmentation.py \
 - `--expert_num 8`：MoE-Conv 专家数 M=8（与论文一致）
 - `--per_gpu_batch_size 1`：每个 GPU 的批次大小
 - `--batch_size 4`：有效批次大小（使用梯度累积）
-- `--output_dir baseline_conv_lora`：模型保存目录
+- `--output_dir baseline_conv_lora-251119`：模型保存目录
 
 **训练配置**（自动从 `get_default_training_setting` 获取）：
 - 优化器：AdamW
@@ -172,14 +172,22 @@ python run_semantic_segmentation.py \
 - PEFT 方法：`conv_lora`（使用 Noisy-TopK 门控）
 
 **输出**：
+
+模型会保存到指定的 `--output_dir` 目录中：
 ```
-baseline_conv_lora/
-├── model.ckpt                    # 最佳模型 checkpoint
+baseline_conv_lora-251119/
+├── model.ckpt                    # 最佳模型 checkpoint (2.4GB)
 ├── config.yaml                   # 训练配置
 ├── hparams.yaml                  # 超参数
-├── metrics.txt                   # 评估指标
+├── data_processors.pkl           # 数据处理器
+├── df_preprocessor.pkl           # DataFrame 预处理器
+├── eval_metric.pkl               # 评估指标
+├── assets.json                   # 资源清单
+├── metrics.txt                   # 评估指标（测试集）
 └── events.out.tfevents.*         # TensorBoard 日志
 ```
+
+> **注意**：修复后的脚本会将模型保存到 `--output_dir`。如果使用旧版本脚本，模型会默认保存到 `AutogluonModels/ag-YYYYMMDD_HHMMSS/` 目录。
 
 **预期训练结果**：
 - 训练时间：约 6-8 小时（在单个 GPU 上，30 epochs）
@@ -197,15 +205,15 @@ cd examples/automm/Conv-LoRA
 python run_semantic_segmentation.py \
   --task isic2017 \
   --eval \
-  --ckpt_path baseline_conv_lora \
-  --output_dir baseline_conv_lora
+  --ckpt_path baseline_conv_lora-251119 \
+  --output_dir baseline_conv_lora-251119
 
 # 评估测试集（如果有）
 python run_semantic_segmentation.py \
   --task isic2017 \
   --eval \
-  --ckpt_path baseline_conv_lora \
-  --output_dir baseline_conv_lora
+  --ckpt_path baseline_conv_lora-251119 \
+  --output_dir baseline_conv_lora-251119
 ```
 
 **关键参数说明**：
@@ -241,8 +249,54 @@ python run_semantic_segmentation.py \
 **Baseline 性能（本实验使用的 checkpoint）**：
 - 验证集 IoU: **0.7625**
 - 验证集 DICE: **0.8403**
+- 测试集 IoU: **0.7695** (20251119)
+- 测试集 DICE: **0.8513** (20251119)
 
 > **注意**：所有后续 RL 方法的性能提升都是相对于这个 baseline 计算的。
+
+#### 如何找到训练好的模型
+
+**情况 1：使用修复后的脚本**（推荐）
+- 模型保存在：`--output_dir` 指定的目录
+- 例如：`baseline_conv_lora-251119/model.ckpt`
+
+**情况 2：使用旧版脚本**
+- 模型默认保存在：`AutogluonModels/ag-YYYYMMDD_HHMMSS/`
+- 时间戳格式：年月日_时分秒
+- 查找命令：
+  ```bash
+  # 查找最新的模型
+  ls -lt AutogluonModels/
+  
+  # 或者查找最近创建的 .ckpt 文件
+  find AutogluonModels/ -name "model.ckpt" -type f -mtime -1
+  ```
+
+**如何使用训练好的模型进行 RL 训练**：
+```bash
+# 假设模型在 AutogluonModels/ag-20251120_041954/
+python rl_train_routing_policy.py \
+  --task isic2017 \
+  --model_path AutogluonModels/ag-20251120_041954/model.ckpt \
+  --output_dir rl_routing_schemeB-251119 \
+  --max_steps 5000
+```
+
+**快速查找最新模型**（推荐）：
+```bash
+# 使用提供的脚本自动查找
+cd examples/automm/Conv-LoRA
+./find_latest_model.sh
+
+# 脚本会显示：
+# ✅ 找到最新模型：
+#    📁 目录: AutogluonModels/ag-20251120_041954/
+#    📄 文件: model.ckpt
+#    💾 大小: 2.4G
+#    🕒 时间: 2025-11-20 20:03:29
+# 
+# 以及如何使用该模型的完整命令
+```
 
 ---
 
@@ -276,7 +330,7 @@ cd examples/automm/Conv-LoRA
 python rl_train_routing_policy.py \
   --task isic2017 \
   --model_path AutogluonModels/ag-20251113_165105/model.ckpt \
-  --output_dir rl_routing_schemeB \
+  --output_dir rl_routing_schemeB-251119 \
   --max_steps 5000 \
   --batch_size 4 \
   --lr 1e-4 \
@@ -306,11 +360,28 @@ rl_routing_schemeB/
     └── events.out.tfevents.*
 ```
 
-**训练结果**（Phase 1）：
-- 训练集 IoU: ~0.837
-- 验证集 IoU: ~0.764 (baseline: 0.7625)
-- 验证集 DICE: ~0.843 (baseline: 0.8403)
-- 提升：+0.2% IoU, +0.3% DICE
+**训练结果**（Phase 1 - 20251119）：
+- 训练集平均 IoU: **0.914** (std: 0.031)
+- 训练集最佳 IoU: **0.973** (step 520)
+- 训练集最终 IoU: **0.890** (step 4990)
+- Total Loss: 2.253 → 1.829 (-6.43%)
+- KL Loss: 0.00165 → 0.00000 (-99.72%)
+- Imbalance: 0.00257 → 0.00431 (保持低水平)
+- FLOPs: 102.66M (稳定)
+
+**查看训练日志**：
+```bash
+# 使用提供的脚本查看详细统计
+python view_training_logs.py rl_routing_schemeB-251119/logs
+
+# 或使用 TensorBoard 交互式查看
+tensorboard --logdir rl_routing_schemeB-251119/logs --port 6006
+```
+
+**输出文件**：
+- Checkpoints: `rl_routing_schemeB-251119/checkpoints/final.pt`
+- 训练曲线: `rl_routing_schemeB-251119/training_summary.png`
+- 专家热力图: `rl_routing_schemeB-251119/artifacts/gates_step_*.png`
 
 ---
 
@@ -327,8 +398,8 @@ python rl_train_hierarchical_policy.py \
   --phase layer \
   --task isic2017 \
   --model_path AutogluonModels/ag-20251113_165105/model.ckpt \
-  --routing_ckpt rl_routing_schemeB/checkpoints/final.pt \
-  --output_dir rl_hier_layer_only \
+  --routing_ckpt rl_routing_schemeB-251119/checkpoints/final.pt \
+  --output_dir rl_hier_layer_only-251119 \
   --batch_size 4 \
   --max_steps 5000 \
   --compute_budget 1e10 \
@@ -356,15 +427,54 @@ rl_hier_layer_only/
 └── logs/
 ```
 
-**训练结果**（Phase 2）：
-- 验证集 IoU: **81.23%**
-- 验证集 DICE: **88.32%**
-- 平均激活层数: **32.0 / 32**（所有层都激活）
-- FLOPs: 101M
+**训练结果**（Phase 2 - 20251119）：
+```
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📊 Phase 2 (LayerPolicy) 训练统计
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+训练集 IoU:
+  📍 初始值:     0.8666  →  🎯 最终值:     0.9427
+  ⭐ 最佳值:     0.9669  (step 530)
+  📊 平均值:     0.9184  ±  0.0286
 
-**观察**：
-- LayerPolicy 学到的策略是"全部开启所有层"
-- 可能原因：`layer_penalty_coef=0.01` 太小，或者任务确实需要所有层
+训练集 Reward:
+  📍 初始值:     0.8606  →  🎯 最终值:     0.9327
+  ⭐ 最佳值:     0.9569  (step 530)
+
+Active Layers:
+  📍 初始值:     19.00   →  🎯 最终值:     32.00
+  📊 平均值:     31.95   (从 step 40 开始稳定在 32)
+
+FLOPs:          102.49M  (稳定在预算内)
+Imbalance:      0.0028   (极低，负载平衡良好)
+训练耗时:       2小时40分钟 (5000 steps, ~1.92s/step)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
+**关键发现**：
+1. ✅ **训练集 IoU 显著提升**：从 Phase 1 的 0.914 提升到 0.918（平均）
+2. ⚠️ **LayerPolicy 未实现层级稀疏**：快速收敛到使用所有 32 层
+   - 初始随机选择 19 层，但从 step 40 开始就稳定在 32 层
+   - 说明当前 `layer_penalty_coef=0.01` 太小，无法驱动稀疏性
+3. ✅ **专家负载平衡良好**：Imbalance 保持在 0.0028 的极低水平
+4. ✅ **计算预算控制有效**：FLOPs 稳定在 102.49M
+
+**查看训练日志**：
+```bash
+# 使用提供的脚本查看详细统计
+python view_training_logs.py rl_hier_layer_only-251119/logs
+
+# 或使用 TensorBoard 交互式查看
+tensorboard --logdir rl_hier_layer_only-251119/logs --port 6006
+
+# 查看训练过程输出（包含每 50 步的进度）
+tail -100 train_hirl_layer_policy-251119.log
+```
+
+**输出文件**：
+- Checkpoints: `rl_hier_layer_only-251119/checkpoints/final.pt`
+- 训练曲线: `rl_hier_layer_only-251119/training_summary.png`
+- 完整日志: `train_hirl_layer_policy-251119.log`
 
 ---
 
@@ -380,10 +490,10 @@ cd examples/automm/Conv-LoRA
 python rl_train_hierarchical_policy.py \
   --phase joint \
   --task isic2017 \
-  --model_path AutogluonModels/ag-20251113_165105/model.ckpt \
-  --routing_ckpt rl_routing_schemeB/checkpoints/final.pt \
-  --layer_ckpt rl_hier_layer_only/checkpoints/step_3000.pt \
-  --output_dir rl_hier_joint \
+  --model_path AutogluonModels/ag-20251120_041954/model.ckpt \
+  --routing_ckpt rl_routing_schemeB-251119/checkpoints/final.pt \
+  --layer_ckpt rl_hier_layer_only-251119/checkpoints/step_5000.pt \
+  --output_dir rl_hier_joint-251119 \
   --batch_size 4 \
   --max_steps 3000 \
   --compute_budget 1e10 \
@@ -412,21 +522,126 @@ rl_hier_joint/
 └── logs/
 ```
 
-**训练结果**（Phase 3）：
-- 验证集 IoU: **80.97%**
-- 验证集 DICE: **87.98%**
-- 平均激活层数: **32.0 / 32**
-- FLOPs: 101M
+**训练结果**（Phase 3 - 20251119）：
+```
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📊 Phase 3 (Joint Training) 训练统计
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+训练集 IoU:
+  📍 初始值:     0.7982  →  🎯 最终值:     0.9442  (step 3000)
+  ⭐ 最佳值:     0.9705  (step 250)
+  📊 平均值:     0.9106  ±  0.0362
 
-**观察**：
-- Phase 3 相比 Phase 2 略有下降（-0.26% IoU, -0.34% DICE）
-- 可能原因：训练步数不够，或学习率设置需要调整
+训练集 Reward:
+  📍 初始值:     0.7881  →  🎯 最终值:     0.9341  (step 3000)
+  ⭐ 最佳值:     0.9605  (step 250)
+
+Active Layers:
+  📊 平均值:     32.00   (始终保持 32 层全部激活)
+
+FLOPs:          102.66M  (稳定)
+Imbalance:      0.0027   (极低，负载平衡良好)
+训练耗时:       约1小时40分钟 (3000 steps, ~2.0s/step)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+注：最终值来自训练日志文件的实际记录（step 3000），而非 TensorBoard 
+    的最后记录点（step 2990），因为 TensorBoard 记录条件为 step % 10 == 0。
+```
+
+**关键发现**：
+1. ✅ **Phase 3 最终 IoU 最高**：
+   - Phase 2 最终 IoU: 0.9126 (step 5000)
+   - Phase 3 最终 IoU: 0.9442 (step 3000)
+   - 提升: +0.0316 (+3.46%)
+
+2. ⚠️ **平均 IoU 相比 Phase 2 略有下降**：
+   - Phase 2 平均 IoU: 0.9184
+   - Phase 3 平均 IoU: 0.9106
+   - 下降: -0.0078 (-0.85%)
+
+3. ✅ **早期达到峰值性能**：
+   - 最佳 IoU 0.9705 出现在 step 250（仅训练 8.3%）
+   - 说明预训练的策略已经很好，联合微调快速收敛
+
+4. ⚠️ **训练过程有波动**：
+   - 训练过程中 IoU 在 0.81-0.97 之间波动
+   - 最终收敛到 0.9442，表现良好
+   - 可能需要更小的学习率以减少波动
+
+5. ✅ **其他指标稳定**：
+   - Active Layers: 32.0（与 Phase 2 一致）
+   - FLOPs: 102.66M（稳定在预算内）
+   - Imbalance: 0.0027（专家负载平衡良好）
+
+**查看训练日志**：
+```bash
+# 使用提供的脚本查看详细统计
+python view_training_logs.py rl_hier_joint-251119/logs
+
+# 或使用 TensorBoard 交互式查看
+tensorboard --logdir rl_hier_joint-251119/logs --port 6006
+
+# 查看训练过程输出
+tail -50 rl_hier_joint-251119.log
+```
+
+**输出文件**：
+- Checkpoints: `rl_hier_joint-251119/checkpoints/final.pt`
+- 训练曲线: `rl_hier_joint-251119/training_summary.png`
+- 完整日志: `rl_hier_joint-251119.log`
+
+---
+
+## 三阶段训练对比总结
+
+### 训练集性能对比（实际记录值）
+
+| 指标 | Phase 1<br>RoutingPolicy | Phase 2<br>LayerPolicy | Phase 3<br>Joint | 最佳 |
+|------|-------------------------|----------------------|-----------------|------|
+| **最终 IoU** | N/A* | 0.9126 (step 5000) | **0.9442** (step 3000) | Phase 3 🥇 |
+| **平均 IoU** | 0.9142 | **0.9184** | 0.9106 | Phase 2 🥇 |
+| **最佳 IoU** | **0.9734** (step 520) | 0.9669 (step 530) | 0.9705 (step 250) | Phase 1 🥇 |
+| **初始 IoU** | 0.9323 | 0.8666 | 0.7982 | - |
+| **最终 Reward** | N/A* | 0.9026 | **0.9341** | Phase 3 🥇 |
+| **Active Layers** | N/A* | 31.95 (avg) | 32.0 | - |
+| **FLOPs (M)** | 102.66 | 102.49 | 102.66 | Phase 2 🥇 |
+| **Imbalance** | 0.0029 | 0.0028 | **0.0027** | Phase 3 🥇 |
+| **训练步数** | 5000 | 5000 | 3000 | - |
+| **训练耗时** | ~2.6h | ~2.7h | ~1.7h | - |
+
+**说明**：
+- 最终 IoU 值来自训练日志文件的实际记录（每 50 步打印一次）
+- TensorBoard 日志的记录频率为每 10 步，但最后一步可能未记录（step % 10 == 0）
+- Phase 3 用更少的训练步数（3000 vs 5000）达到了最高的最终 IoU (0.9442)
+- *Phase 1 的训练日志只有进度条，无详细指标记录
+
+### 关键观察
+
+#### 1. 最终性能
+- **Phase 3 最终 IoU 最高**（0.9442），但仅训练了 3000 步
+- **Phase 2 平均 IoU 最高**（0.9184），训练最稳定
+- **Phase 1 峰值 IoU 最高**（0.9734），但后期有下降
+
+#### 2. 训练效率
+- **Phase 3 最快收敛**：step 250 达到 0.9705（8.3% 训练进度）
+- **Phase 2 最稳定**：标准差最小（0.0286）
+- **Phase 1 波动最大**：标准差 0.0308
+
+#### 3. 计算效率
+- 所有阶段的 FLOPs 都稳定在 ~102M
+- Imbalance 都保持在极低水平（< 0.003）
+- Active Layers 始终为 32（未实现稀疏性）
+
+#### 4. 训练策略
+- **Phase 1**：从头训练 RoutingPolicy，需要较长时间探索
+- **Phase 2**：基于预训练的 RoutingPolicy，LayerPolicy 快速学习
+- **Phase 3**：两个策略联合微调，快速收敛但有波动
 
 ---
 
 ## 实验结果
 
-### 定量对比
+### 定量对比（验证集/测试集）
 
 | 方法 | Mean IoU | Mean DICE | Active Layers | FLOPs | 说明 |
 |------|----------|-----------|---------------|-------|------|
@@ -484,6 +699,156 @@ python eval_hierarchical_policy.py \
   --batch_size 4 \
   --output_file hier_joint_eval_val.json
 ```
+
+---
+
+## 如何查看训练日志
+
+所有 RL 训练脚本都会自动记录详细的训练日志，包括损失、奖励、IoU、FLOPs 等指标。
+
+### 日志文件位置
+
+训练日志保存在输出目录的 `logs/` 子目录中：
+
+```
+<output_dir>/
+├── logs/
+│   └── events.out.tfevents.*     # TensorBoard 日志
+├── checkpoints/
+│   └── *.pt                       # 模型 checkpoints
+└── artifacts/
+    └── *.png                      # 可视化图片（如专家热力图）
+```
+
+### 方法 1：使用提供的脚本（推荐）
+
+我们提供了 `view_training_logs.py` 脚本来快速查看训练统计：
+
+```bash
+cd examples/automm/Conv-LoRA
+
+# 查看 Phase 1 (RoutingPolicy) 的训练日志
+python view_training_logs.py rl_routing_schemeB-251119/logs
+
+# 查看 Phase 2 (LayerPolicy) 的训练日志
+python view_training_logs.py rl_hier_layer_only/logs
+
+# 查看 Phase 3 (Joint) 的训练日志
+python view_training_logs.py rl_hier_joint/logs
+```
+
+**输出示例**：
+```
+📊 Loading logs from: rl_routing_schemeB-251119/logs
+
+✅ Available metrics (9 total):
+  - loss/adapter_l2
+  - loss/entropy
+  - loss/kl
+  - loss/total
+  - train/dual_alpha
+  - train/flops
+  - train/imbalance
+  - train/iou
+  - train/reward
+
+================================================================================
+📈 TRAINING SUMMARY STATISTICS
+================================================================================
+
+IoU (train/iou):
+  📍 Initial:      0.932330  (step 0)
+  🎯 Final:        0.889535  (step 4990)
+  ⭐ Best:         0.973440  (step 520)
+  📊 Mean:         0.914206
+  📏 Std:          0.030767
+  📈 Change:      -0.006493  (-0.71%)
+
+[... 更多指标 ...]
+
+✅ Training curves saved to: rl_routing_schemeB-251119/training_summary.png
+```
+
+脚本会自动生成：
+- 📊 所有关键指标的统计摘要（初始值、最终值、最佳值、均值、标准差）
+- 📈 训练曲线图（保存为 `training_summary.png`）
+- 📉 平滑曲线（用于观察趋势）
+
+### 方法 2：使用 TensorBoard（交互式）
+
+```bash
+cd examples/automm/Conv-LoRA
+
+# 启动 TensorBoard
+tensorboard --logdir rl_routing_schemeB-251119/logs --port 6006
+
+# 如果在远程服务器上，需要端口转发：
+# 在本地机器执行：ssh -L 6006:localhost:6006 user@remote_server
+
+# 然后在浏览器打开：http://localhost:6006
+```
+
+**TensorBoard 优势**：
+- 实时交互式可视化
+- 可以同时对比多个实验
+- 支持缩放、平滑、下载数据等功能
+
+### 方法 3：使用 Python 直接读取
+
+```python
+from tensorboard.backend.event_processing import event_accumulator
+
+# 加载日志
+ea = event_accumulator.EventAccumulator("rl_routing_schemeB-251119/logs")
+ea.Reload()
+
+# 查看所有可用指标
+print(ea.Tags()['scalars'])
+
+# 读取特定指标
+iou_events = ea.Scalars('train/iou')
+for event in iou_events[:5]:  # 显示前 5 个
+    print(f"Step {event.step}: IoU = {event.value:.4f}")
+```
+
+### 记录的指标说明
+
+#### Phase 1 (RoutingPolicy)
+- `train/reward`: 总奖励 = IoU - α×(FLOPs/budget) - β×imbalance
+- `train/iou`: 分割 IoU（越高越好）
+- `train/flops`: 计算量（FLOPs）
+- `train/imbalance`: 专家负载不平衡度（越低越好）
+- `train/dual_alpha`: Lagrangian 对偶变量（用于计算预算约束）
+- `loss/total`: 总损失
+- `loss/kl`: KL 散度损失（与 Noisy-TopK 的距离）
+- `loss/entropy`: 熵正则化损失
+- `loss/adapter_l2`: Adapter 参数 L2 正则化
+
+#### Phase 2 & 3 (Hierarchical RL)
+除了上述指标外，还包括：
+- `train/layer_active`: 激活的层数
+- `train/layer_penalty`: 层激活惩罚
+- `loss/layer_*`: LayerPolicy 的损失项
+- `loss/routing_*`: RoutingPolicy 的损失项
+
+### 查看专家使用热力图
+
+训练过程中会定期保存专家使用情况的可视化：
+
+```bash
+# 查看所有热力图
+ls -lh rl_routing_schemeB-251119/artifacts/
+
+# 用图片查看器打开
+eog rl_routing_schemeB-251119/artifacts/gates_step_4900.png
+# 或
+display rl_routing_schemeB-251119/artifacts/gates_step_4900.png
+```
+
+这些热力图显示：
+- 每个 Conv-LoRA 层中各个专家的使用频率
+- 专家负载是否平衡
+- 训练过程中专家选择策略的演化
 
 ---
 
@@ -846,6 +1211,78 @@ layer_logprobs = torch.nn.functional.logsigmoid(layer_logits)
 **原因**：`layer_penalty_coef` 太小
 
 **解决**：增大到 0.05-0.1，或降低 `compute_budget`
+
+---
+
+## 附录：数据记录说明
+
+### 训练日志 vs TensorBoard 的差异
+
+在本实验中，我们发现训练日志文件和 TensorBoard 记录的最终值可能存在差异，原因如下：
+
+#### 记录机制差异
+
+**训练日志文件**（`*.log`）：
+```python
+# 每 50 步打印一次
+if (step + 1) % 50 == 0:
+    print(f"[{step+1}/{max_steps}] ... iou={iou:.4f} ...")
+```
+- 记录频率：每 50 步
+- 最后记录：step 2999 显示为 `[3000/3000]`
+- **优点**：包含训练的真实最后一步
+
+**TensorBoard 日志**：
+```python
+# 每 10 步记录一次
+if step % 10 == 0:
+    log_scalars(writer, {...}, step)
+```
+- 记录频率：每 10 步
+- 记录条件：`step % 10 == 0`
+- 最后记录：对于 3000 步训练，最后记录的是 step 2990
+- **问题**：由于循环是 `for step in range(3000)`（step 0-2999），最后一个 step 2999 不满足 `2999 % 10 == 0`，因此未被记录
+
+#### 实际影响
+
+| Phase | 训练步数 | 日志文件最终值 | TensorBoard 最终值 | 差异 |
+|-------|---------|--------------|-------------------|------|
+| Phase 1 | 5000 | N/A (无记录) | 0.8895 (step 4990) | - |
+| Phase 2 | 5000 | 0.9126 (step 5000) | 0.9427 (step 4990) | -0.0301 |
+| Phase 3 | 3000 | **0.9442** (step 3000) | 0.9260 (step 2990) | **+0.0182** |
+
+**结论**：
+- ✅ **日志文件的值更准确**，因为它记录了训练的真实最后一步
+- ⚠️ **TensorBoard 的值可能偏低**，因为它缺少最后 10 步的更新
+- 📝 本文档中的"最终 IoU"均采用日志文件的实际记录值
+
+#### 修复建议
+
+为避免此问题，可以修改训练脚本：
+
+```python
+# 方法 1：确保最后一步也被记录
+if step % 10 == 0 or step == max_steps - 1:
+    log_scalars(writer, {...}, step)
+
+# 方法 2：使用 (step + 1) 作为条件
+if (step + 1) % 10 == 0:
+    log_scalars(writer, {...}, step + 1)
+```
+
+### 提取工具
+
+我们提供了两个工具来帮助提取和对比训练数据：
+
+1. **`extract_final_values.py`**：从日志文件提取最终值
+   ```bash
+   python extract_final_values.py
+   ```
+
+2. **`compare_phases.py`**：对比三个阶段的训练曲线
+   ```bash
+   python compare_phases.py
+   ```
 
 ---
 

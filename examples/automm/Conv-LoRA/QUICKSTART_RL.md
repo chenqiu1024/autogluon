@@ -47,6 +47,32 @@ ls baseline_conv_lora/
 - Validation IoU: ~0.76-0.77
 - Validation DICE: ~0.84-0.85
 
+#### Finding Your Trained Model
+
+**Problem**: The model is NOT saved to `--output_dir`, but to `AutogluonModels/ag-YYYYMMDD_HHMMSS/`
+
+**Solution 1**: Use the provided script to find it automatically:
+```bash
+cd /root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA
+./find_latest_model.sh
+```
+
+**Solution 2**: Manual search:
+```bash
+# Find the latest model directory
+ls -lt AutogluonModels/ | head -5
+
+# Or find recent checkpoint files
+find AutogluonModels/ -name "model.ckpt" -type f -mtime -1
+```
+
+**Example**: If trained on 2024-11-20 at 04:19, model is at:
+```
+AutogluonModels/ag-20251120_041954/model.ckpt  (2.4GB)
+```
+
+**Use this path** for subsequent RL training steps below.
+
 ---
 
 ## Three-Step RL Training
