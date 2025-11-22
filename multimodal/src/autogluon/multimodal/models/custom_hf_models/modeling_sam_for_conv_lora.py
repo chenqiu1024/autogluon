@@ -832,14 +832,15 @@ class SamVisionAttention(nn.Module):
         attn = attn.reshape(batch_size, query_height * query_width, key_height * key_width)
         return attn
 
-    def forward(self, hidden_states: torch.Tensor, output_attentions=False, output_moe_loss=False) -> torch.Tensor:
+    def forward(self, hidden_states: torch.Tensor, output_attentions=False, output_moe_loss=False, layer_mask=None) -> torch.Tensor:
         batch_size, height, width, _ = hidden_states.shape
         # qkv with shape (3, batch_size, nHead, height * width, channel)
         ##### modify here for conv-lora
         # Paper alignment:
         # - Sec. 3.3 (Integration): Inject Conv-LoRA at attention projections (q/k/v).
         #   The adapted linear layer (possibly Conv-LoRA) may return (tensor, moe_loss) when output_moe_loss=True.
-        qkv = self.qkv(hidden_states)
+        # RL layer selection: pass layer_mask to control Conv-LoRA activation
+        qkv = self.qkv(hidden_states, layer_mask=layer_mask)
         if output_moe_loss:
             qkv, moe_loss = qkv
         qkv = qkv.reshape(batch_size, height * width, 3, self.num_attention_heads, -1).permute(2, 0, 3, 1, 4)
@@ -860,7 +861,11 @@ class SamVisionAttention(nn.Module):
         attn_output = (attn_probs @ value).reshape(batch_size, self.num_attention_heads, height, width, -1)
         attn_output = attn_output.permute(0, 2, 3, 1, 4).reshape(batch_size, height, width, -1)
 
-        attn_output = self.proj(attn_output)
+        # RL layer selection: pass layer_mask to proj layer
+        attn_output = self.proj(attn_output, layer_mask=layer_mask)
+        if output_moe_loss and isinstance(attn_output, tuple):
+            attn_output, proj_moe_loss = attn_output
+            moe_loss = moe_loss + proj_moe_loss  # Accumulate moe_loss from proj layer
 
         if output_attentions:
             outputs = (attn_output, attn_weights)
@@ -940,6 +945,7 @@ class SamVisionLayer(nn.Module):
         hidden_states: torch.Tensor,
         output_attentions: Optional[bool] = False,
         output_moe_loss: Optional[bool] = False,
+        layer_mask: Optional[bool] = None,
     ) -> Tuple[torch.FloatTensor]:
         residual = hidden_states
 
@@ -950,8 +956,9 @@ class SamVisionLayer(nn.Module):
             hidden_states, padding_shape = self.window_partition(hidden_states, self.window_size)
 
         ### modify here
+        # RL layer selection: pass layer_mask to attention
         attn_outputs = self.attn(
-            hidden_states=hidden_states, output_attentions=output_attentions, output_moe_loss=output_moe_loss
+            hidden_states=hidden_states, output_attentions=output_attentions, output_moe_loss=output_moe_loss, layer_mask=layer_mask
         )
         if output_moe_loss:
             hidden_states, attn_weights, moe_loss = attn_outputs
@@ -1039,6 +1046,7 @@ class SamVisionEncoder(nn.Module):
         output_hidden_states: Optional[bool] = None,
         output_moe_loss: Optional[bool] = None,  # MoE loss for Conv-LoRA
         return_dict: Optional[bool] = None,
+        layer_masks: Optional[torch.Tensor] = None,  # RL layer selection: [B, num_layers] or [num_layers]
     ) -> Union[Tuple, SamVisionEncoderOutput]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -1058,6 +1066,13 @@ class SamVisionEncoder(nn.Module):
         all_moe_loss = 0.0 if output_moe_loss else None
 
         for i, layer_module in enumerate(self.layers):
+            # RL layer selection: get mask for current layer
+            layer_mask = None
+            if layer_masks is not None:
+                if layer_masks.dim() == 1:  # [num_layers]
+                    layer_mask = layer_masks[i]
+                else:  # [B, num_layers]
+                    layer_mask = layer_masks[:, i]
             if output_hidden_states:
                 all_hidden_states = all_hidden_states + (hidden_states,)
 
@@ -1075,7 +1090,7 @@ class SamVisionEncoder(nn.Module):
                 )
             else:
                 layer_outputs = layer_module(
-                    hidden_states, output_attentions=output_attentions, output_moe_loss=output_moe_loss
+                    hidden_states, output_attentions=output_attentions, output_moe_loss=output_moe_loss, layer_mask=layer_mask
                 )
 
             hidden_states = layer_outputs[0]

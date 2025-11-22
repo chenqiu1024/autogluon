@@ -690,10 +690,11 @@ class ConvLoRALinear(nn.Linear, LoRALayer):
     def T(self, w):
         return w.T if self.fan_in_fan_out else w
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor, layer_mask: Optional[bool] = None):
         # Base frozen path + residual (LoRA principle)
         result = F.linear(x, self.T(self.weight), bias=self.bias)
-        if self.r > 0:
+        # layer_mask: if provided and False, skip Conv-LoRA adaptation (RL layer selection)
+        if self.r > 0 and (layer_mask is None or layer_mask):
             # 1) Project to rank-r LoRA space
             lora_res = self.lora_dropout(x) @ self.lora_A.T
             dim = lora_res.dim()
@@ -737,6 +738,9 @@ class ConvLoRALinear(nn.Linear, LoRALayer):
                 lora_res = lora_res.reshape(B, L, C)
             # 5) Project back to output dim with LoRA scale (final residual add)
             result += (lora_res @ self.lora_B.T) * self.scaling
+        else:
+            # If layer is masked out, return zero moe_loss
+            moe_loss = 0.0
 
         return result, moe_loss
 
