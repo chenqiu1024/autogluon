@@ -27,7 +27,6 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
 import matplotlib.pyplot as plt
-import seaborn as sns
 from tqdm import tqdm
 from datetime import datetime
 
@@ -263,9 +262,13 @@ def train_rl_policy(
         )
         
         # Evaluate rewards for each sample in the batch
+        # Per-image evaluation: each image uses its own policy-generated mask
         rewards = []
         for i in range(batch_size):
-            result = env.step(layer_masks[i])
+            # Get single image data
+            single_image_data = batch_data.iloc[[i]].reset_index(drop=True)
+            # Evaluate this image with its specific mask
+            result = env.step(single_image_data, layer_masks[i])
             rewards.append(result['reward'])
         
         rewards = torch.tensor(rewards, dtype=torch.float32, device=device)

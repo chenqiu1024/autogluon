@@ -395,6 +395,7 @@ class SAMForSemanticSegmentation(nn.Module):
     def forward(
         self,
         batch,
+        layer_masks=None,
     ):
         """
         Parameters
@@ -402,6 +403,8 @@ class SAMForSemanticSegmentation(nn.Module):
         batch
             A dictionary containing the input mini-batch data.
             We need to use the keys with the model prefix to index required data.
+        layer_masks : torch.Tensor, optional
+            Layer activation masks for RL-based layer selection, shape [B, num_layers] or [num_layers]
 
         Returns
         -------
@@ -409,7 +412,7 @@ class SAMForSemanticSegmentation(nn.Module):
         """
         # binary
         if self.num_classes == 1:
-            rets = self.model(batch[self.image_key], multimask_output=False, output_moe_loss=self.output_moe_loss)
+            rets = self.model(batch[self.image_key], multimask_output=False, output_moe_loss=self.output_moe_loss, layer_masks=layer_masks)
             pred_masks = rets.pred_masks[:, 0, :, :, :]
             pred_masks = F.interpolate(
                 pred_masks, (self.image_size, self.image_size), mode="bilinear", align_corners=False
@@ -420,7 +423,7 @@ class SAMForSemanticSegmentation(nn.Module):
                 rets_dict = {self.prefix: {LOGITS: pred_masks, LABEL: batch[self.label_key]}}
         # multi-class
         else:
-            rets = self.model(batch[self.image_key], multimask_output=False, output_moe_loss=self.output_moe_loss)
+            rets = self.model(batch[self.image_key], multimask_output=False, output_moe_loss=self.output_moe_loss, layer_masks=layer_masks)
             rets, class_predictions = rets
             pred_masks = rets.pred_masks[:, 0, :, :, :]
             pred_classes = class_predictions[:, 0, :, :]

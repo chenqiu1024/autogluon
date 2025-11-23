@@ -840,9 +840,15 @@ class SamVisionAttention(nn.Module):
         # - Sec. 3.3 (Integration): Inject Conv-LoRA at attention projections (q/k/v).
         #   The adapted linear layer (possibly Conv-LoRA) may return (tensor, moe_loss) when output_moe_loss=True.
         # RL layer selection: pass layer_mask to control Conv-LoRA activation
-        qkv = self.qkv(hidden_states, layer_mask=layer_mask)
-        if output_moe_loss:
-            qkv, moe_loss = qkv
+        from ...models.adaptation_layers import ConvLoRALinear
+        if isinstance(self.qkv, ConvLoRALinear):
+            qkv = self.qkv(hidden_states, layer_mask=layer_mask)
+            if output_moe_loss:
+                qkv, moe_loss = qkv
+        else:
+            # Regular nn.Linear, doesn't support layer_mask
+            qkv = self.qkv(hidden_states)
+            moe_loss = 0.0 if output_moe_loss else None
         qkv = qkv.reshape(batch_size, height * width, 3, self.num_attention_heads, -1).permute(2, 0, 3, 1, 4)
         # q, k, v with shape (batch_size * nHead, height * width, channel)
         query, key, value = qkv.reshape(3, batch_size * self.num_attention_heads, height * width, -1).unbind(0)
@@ -861,11 +867,17 @@ class SamVisionAttention(nn.Module):
         attn_output = (attn_probs @ value).reshape(batch_size, self.num_attention_heads, height, width, -1)
         attn_output = attn_output.permute(0, 2, 3, 1, 4).reshape(batch_size, height, width, -1)
 
-        # RL layer selection: pass layer_mask to proj layer
-        attn_output = self.proj(attn_output, layer_mask=layer_mask)
-        if output_moe_loss and isinstance(attn_output, tuple):
-            attn_output, proj_moe_loss = attn_output
-            moe_loss = moe_loss + proj_moe_loss  # Accumulate moe_loss from proj layer
+        # RL layer selection: pass layer_mask to proj layer if it's ConvLoRALinear
+        # Check if proj layer accepts layer_mask parameter (i.e., it's ConvLoRALinear)
+        from ...models.adaptation_layers import ConvLoRALinear
+        if isinstance(self.proj, ConvLoRALinear):
+            attn_output = self.proj(attn_output, layer_mask=layer_mask)
+            if output_moe_loss and isinstance(attn_output, tuple):
+                attn_output, proj_moe_loss = attn_output
+                moe_loss = moe_loss + proj_moe_loss  # Accumulate moe_loss from proj layer
+        else:
+            # Regular nn.Linear, doesn't support layer_mask
+            attn_output = self.proj(attn_output)
 
         if output_attentions:
             outputs = (attn_output, attn_weights)
@@ -1346,6 +1358,7 @@ class SamModel(SamPreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         output_moe_loss: Optional[bool] = None,  # MoE loss for Conv-LoRA
+        layer_masks: Optional[torch.Tensor] = None,  # RL layer selection
         return_dict=None,
         **kwargs,
     ) -> List[Dict[str, torch.Tensor]]:
@@ -1422,6 +1435,7 @@ class SamModel(SamPreTrainedModel):
                 output_hidden_states=output_hidden_states,
                 output_moe_loss=output_moe_loss,
                 return_dict=return_dict,
+                layer_masks=layer_masks,
             )
             image_embeddings = vision_outputs[0]
 

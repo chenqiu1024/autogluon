@@ -95,7 +95,10 @@ class ConvLoRAEnvironment:
         return_std: bool = False,
     ) -> Tuple[float, Optional[float]]:
         """
-        Evaluate segmentation performance with given layer masks.
+        Evaluate segmentation performance with given layer masks on the eval subset.
+        
+        This method is used for computing baseline reward (all layers active).
+        For per-image evaluation during RL training, use evaluate_single_image().
         
         Parameters
         ----------
@@ -120,8 +123,14 @@ class ConvLoRAEnvironment:
         # Store original forward method
         original_forward = model.forward
         
+        # Ensure layer_masks has batch dimension
+        if layer_masks.dim() == 1:
+            # Single mask for all images: [32] -> [1, 32]
+            layer_masks = layer_masks.unsqueeze(0)
+        
         # Create a wrapper that injects layer_masks
         def forward_with_masks(*args, **kwargs):
+            # Use the same mask for all images in the batch
             kwargs['layer_masks'] = layer_masks
             return original_forward(*args, **kwargs)
         
@@ -151,33 +160,98 @@ class ConvLoRAEnvironment:
             # Restore original forward method
             model.forward = original_forward
     
-    def step(
+    def evaluate_single_image(
         self,
-        layer_masks: torch.Tensor,
-    ) -> Dict[str, float]:
+        image_data: pd.DataFrame,
+        layer_mask: torch.Tensor,
+    ) -> float:
         """
-        Execute one environment step with given layer masks.
+        Evaluate a single image with its specific layer mask.
+        
+        This is the correct method for per-image RL training, ensuring that
+        each image is evaluated with its own policy-generated mask.
         
         Parameters
         ----------
-        layer_masks : torch.Tensor
-            Layer activation masks, shape [B, 32] or [32]
+        image_data : pd.DataFrame
+            Single image data (should be 1 row)
+        layer_mask : torch.Tensor
+            Layer activation mask for this specific image, shape [32] or [1, 32]
+        
+        Returns
+        -------
+        reward : float
+            Reward (IoU or DICE) for this single image
+        """
+        self.num_evaluations += 1
+        
+        # Ensure single image
+        assert len(image_data) == 1, f"Expected 1 image, got {len(image_data)}"
+        
+        # Get the model from predictor
+        model = self.predictor._learner._model
+        model.eval()
+        
+        # Store original forward method
+        original_forward = model.forward
+        
+        # Ensure layer_mask has batch dimension [1, 32]
+        if layer_mask.dim() == 1:
+            layer_mask = layer_mask.unsqueeze(0)
+        
+        # Create a wrapper that injects this specific layer_mask
+        def forward_with_mask(*args, **kwargs):
+            kwargs['layer_masks'] = layer_mask
+            return original_forward(*args, **kwargs)
+        
+        # Temporarily replace forward method
+        model.forward = forward_with_mask
+        
+        try:
+            # Evaluate this single image with its specific mask
+            with torch.no_grad():
+                metrics = self.predictor.evaluate(
+                    image_data,
+                    metrics=[self.reward_metric],
+                )
+            
+            reward = metrics[self.reward_metric]
+            return reward
+        
+        finally:
+            # Restore original forward method
+            model.forward = original_forward
+    
+    def step(
+        self,
+        image_data: pd.DataFrame,
+        layer_mask: torch.Tensor,
+    ) -> Dict[str, float]:
+        """
+        Execute one environment step: evaluate a single image with its layer mask.
+        
+        Parameters
+        ----------
+        image_data : pd.DataFrame
+            Single image data (1 row)
+        layer_mask : torch.Tensor
+            Layer activation mask for this image, shape [32] or [1, 32]
         
         Returns
         -------
         result : dict
             Dictionary containing:
-            - reward: reward value (IoU or DICE)
+            - reward: reward value (IoU or DICE) for this image
             - num_active_layers: number of activated layers
             - done: always True (episodic task)
         """
-        reward = self.evaluate_policy(layer_masks)
+        reward = self.evaluate_single_image(image_data, layer_mask)
         
         # Compute number of active layers
-        if layer_masks.dim() == 1:
-            num_active = layer_masks.sum().item()
+        if layer_mask.dim() == 1:
+            num_active = layer_mask.sum().item()
         else:
-            num_active = layer_masks.sum(dim=1).mean().item()
+            num_active = layer_mask.sum().item()  # [1, 32] -> scalar
         
         return {
             'reward': reward,
@@ -249,27 +323,40 @@ class BatchedConvLoRAEnvironment:
     
     def evaluate_batch(
         self,
+        batch_data: pd.DataFrame,
         layer_masks_batch: torch.Tensor,
     ) -> torch.Tensor:
         """
-        Evaluate a batch of layer mask configurations.
+        Evaluate a batch of images with their corresponding layer masks.
+        
+        Each image is evaluated with its own specific layer mask, following
+        the per-image dynamic selection paradigm.
         
         Parameters
         ----------
+        batch_data : pd.DataFrame
+            Batch of image data, shape [B, ...]
         layer_masks_batch : torch.Tensor
             Batch of layer masks, shape [B, 32]
+            layer_masks_batch[i] is the mask for batch_data.iloc[i]
         
         Returns
         -------
         rewards : torch.Tensor
-            Rewards for each configuration, shape [B]
+            Rewards for each image, shape [B]
         """
         B = layer_masks_batch.size(0)
+        assert len(batch_data) == B, f"Batch size mismatch: {len(batch_data)} vs {B}"
+        
         rewards = []
         
         for i in range(B):
+            # Get single image data
+            single_image_data = batch_data.iloc[[i]].reset_index(drop=True)
             layer_mask = layer_masks_batch[i]  # [32]
-            result = self.base_env.step(layer_mask)
+            
+            # Evaluate this image with its specific mask
+            result = self.base_env.step(single_image_data, layer_mask)
             rewards.append(result['reward'])
         
         return torch.tensor(rewards, dtype=torch.float32, device=self.device)
