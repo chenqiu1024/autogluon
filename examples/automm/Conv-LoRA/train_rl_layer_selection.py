@@ -130,7 +130,8 @@ def train_rl_policy(
     eval_subset_size: int = 200,
     learning_rate: float = 1e-4,
     baseline_decay: float = 0.99,
-    entropy_coef: float = 0.01,
+    entropy_coef: float = 0.05,
+    init_bias: float = 0.0,
     warmup_steps: int = 100,
     save_freq: int = 100,
     eval_freq: int = 50,
@@ -205,11 +206,14 @@ def train_rl_policy(
     
     # Initialize policy
     print("Initializing policy network...")
+    print(f"Policy init_bias: {init_bias} (sigmoid({init_bias}) = {torch.sigmoid(torch.tensor(init_bias)):.3f})")
     # SAM-ViT-Huge has 1280 hidden dim and 32 layers
+    # Use init_bias=0.0 to start from neutral state (50% activation probability)
+    # instead of init_bias=2.0 which led to getting stuck at 88% for all layers
     policy = LayerSelectionPolicy(
         hidden_dim=1280,
         num_layers=32,
-        init_bias=2.0,  # Encourage activating all layers initially
+        init_bias=init_bias,  # Configurable via command line
     ).to(device)
     
     # Initialize optimizer and algorithm
@@ -287,6 +291,16 @@ def train_rl_policy(
         episode_rewards.append(mean_reward)
         episode_num_layers.append(mean_num_layers)
         
+        # Compute probability distribution statistics
+        prob_min = layer_probs.min().item()
+        prob_max = layer_probs.max().item()
+        prob_mean = layer_probs.mean().item()
+        prob_std = layer_probs.std().item()
+        
+        # Count how many layers have high/low probabilities
+        high_prob_layers = (layer_probs > 0.7).float().mean().item() * 32
+        low_prob_layers = (layer_probs < 0.3).float().mean().item() * 32
+        
         # Logging
         writer.add_scalar('train/reward', mean_reward, episode)
         writer.add_scalar('train/num_active_layers', mean_num_layers, episode)
@@ -296,25 +310,45 @@ def train_rl_policy(
         writer.add_scalar('train/baseline', update_info['baseline'], episode)
         writer.add_scalar('train/grad_norm', update_info['grad_norm'], episode)
         
+        # Log probability distribution statistics
+        writer.add_scalar('train/prob_min', prob_min, episode)
+        writer.add_scalar('train/prob_max', prob_max, episode)
+        writer.add_scalar('train/prob_mean', prob_mean, episode)
+        writer.add_scalar('train/prob_std', prob_std, episode)
+        writer.add_scalar('train/high_prob_layers', high_prob_layers, episode)
+        writer.add_scalar('train/low_prob_layers', low_prob_layers, episode)
+        
         # Periodic evaluation on test set
         if (episode + 1) % eval_freq == 0:
             policy.eval()
             with torch.no_grad():
-                # Use deterministic policy for evaluation
                 test_embeddings = torch.randn(len(test_data), 64, 64, 1280).to(device)
-                test_masks, test_probs, _ = policy(
+                
+                # Evaluate both stochastic and deterministic modes
+                # Stochastic (used during training)
+                test_masks_stoch, test_probs_stoch, _ = policy(
+                    test_embeddings,
+                    deterministic=False,
+                )
+                stats_stoch = policy.get_layer_statistics(test_probs_stoch)
+                num_layers_stoch = test_masks_stoch.sum(dim=1).float().mean().item()
+                
+                # Deterministic (threshold at 0.5)
+                test_masks_det, test_probs_det, _ = policy(
                     test_embeddings,
                     deterministic=True,
                 )
+                stats_det = policy.get_layer_statistics(test_probs_det)
+                num_layers_det = test_masks_det.sum(dim=1).float().mean().item()
                 
-                # Note: Full test evaluation would be expensive
-                # For monitoring, we just track the policy statistics
-                stats = policy.get_layer_statistics(test_probs)
+                # Log both modes for comparison
+                writer.add_scalar('eval/num_layers_stochastic', num_layers_stoch, episode)
+                writer.add_scalar('eval/num_layers_deterministic', num_layers_det, episode)
+                writer.add_scalar('eval/prob_mean', test_probs_det.mean().item(), episode)
+                writer.add_scalar('eval/prob_std', test_probs_det.std().item(), episode)
                 
-                writer.add_scalar('eval/mean_num_layers', stats['mean_num_layers'], episode)
-                
-                # Log layer activation frequencies
-                for layer_idx, freq in enumerate(stats['layer_activation_freq']):
+                # Log layer activation frequencies (deterministic)
+                for layer_idx, freq in enumerate(stats_det['layer_activation_freq']):
                     writer.add_scalar(f'eval/layer_{layer_idx}_freq', freq, episode)
         
         # Save checkpoint
@@ -341,12 +375,13 @@ def train_rl_policy(
                     os.path.join(output_dir, 'checkpoints', 'best.pt')
                 )
         
-        # Print progress
+        # Print progress with enhanced statistics
         if (episode + 1) % 10 == 0:
             tqdm.write(
                 f"Episode {episode+1}/{num_episodes} | "
                 f"Reward: {mean_reward:.4f} | "
                 f"Layers: {mean_num_layers:.1f}/32 | "
+                f"Prob: [{prob_min:.3f}, {prob_max:.3f}] (std={prob_std:.3f}) | "
                 f"Loss: {update_info['loss']:.4f}"
             )
     
@@ -476,8 +511,10 @@ def main():
                        help='Learning rate (default: 1e-4)')
     parser.add_argument('--baseline_decay', type=float, default=0.99,
                        help='Baseline decay rate (default: 0.99)')
-    parser.add_argument('--entropy_coef', type=float, default=0.01,
-                       help='Entropy coefficient (default: 0.01)')
+    parser.add_argument('--entropy_coef', type=float, default=0.05,
+                       help='Entropy coefficient (default: 0.05, increased from 0.01)')
+    parser.add_argument('--init_bias', type=float, default=0.0,
+                       help='Initial bias for policy output layer (default: 0.0 for 50%% activation probability)')
     parser.add_argument('--warmup_steps', type=int, default=100,
                        help='Number of warmup steps (default: 100)')
     
@@ -523,6 +560,7 @@ def main():
         learning_rate=args.learning_rate,
         baseline_decay=args.baseline_decay,
         entropy_coef=args.entropy_coef,
+        init_bias=args.init_bias,
         warmup_steps=args.warmup_steps,
         save_freq=args.save_freq,
         eval_freq=args.eval_freq,

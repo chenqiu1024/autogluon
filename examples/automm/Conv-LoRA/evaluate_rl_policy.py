@@ -53,7 +53,7 @@ def evaluate_with_policy(
     device: str = 'cuda',
 ):
     """
-    Evaluate model with RL policy on test set.
+    Evaluate model with RL policy on test set using per-image layer masks.
     
     Parameters
     ----------
@@ -75,15 +75,12 @@ def evaluate_with_policy(
     model = predictor._learner._model
     model.eval()
     
-    # For full evaluation, we need to properly extract patch embeddings
-    # and apply layer masks during inference
-    # This is a simplified placeholder
-    
     print("\nEvaluating with RL policy...")
+    print("Generating layer masks for test images...")
     
     # Generate layer masks for all test images
     # In practice, we would extract actual patch embeddings
-    # For now, use dummy embeddings
+    # For now, use dummy embeddings (consistent with training)
     num_test = len(test_data)
     patch_embeddings = torch.randn(num_test, 64, 64, 1280).to(device)
     
@@ -93,24 +90,79 @@ def evaluate_with_policy(
             deterministic=True,
         )
     
-    # Store layer mask for use during prediction
-    # Note: This requires modifying the predictor's forward pass
-    # to accept and use layer_masks
+    print(f"Generated layer masks for {num_test} images")
+    print(f"Average active layers: {layer_masks.sum(dim=1).float().mean():.1f}/32")
     
-    # For demonstration, evaluate without actually using masks
-    # In production, this would use the layer_masks
-    metrics = predictor.evaluate(test_data, metrics=['iou', 'dice'])
+    # Per-image evaluation using layer masks
+    print("\nEvaluating each image with its specific layer mask...")
+    
+    iou_scores = []
+    dice_scores = []
+    num_active_layers_list = []
+    
+    # Store original forward method
+    original_forward = model.forward
+    
+    try:
+        for i in tqdm(range(num_test), desc="Evaluating"):
+            # Get single image data
+            single_image_data = test_data.iloc[[i]].reset_index(drop=True)
+            layer_mask = layer_masks[i]  # [32]
+            
+            # Count active layers
+            num_active = layer_mask.sum().item()
+            num_active_layers_list.append(num_active)
+            
+            # Create forward wrapper to inject layer_mask
+            def forward_with_mask(*args, **kwargs):
+                # Inject layer_mask for this specific image
+                kwargs['layer_masks'] = layer_mask.unsqueeze(0)  # [1, 32]
+                return original_forward(*args, **kwargs)
+            
+            # Temporarily replace forward method
+            model.forward = forward_with_mask
+            
+            # Evaluate this single image
+            with torch.no_grad():
+                metrics = predictor.evaluate(
+                    single_image_data,
+                    metrics=['iou', 'dice'],
+                )
+            
+            iou_scores.append(metrics['iou'])
+            dice_scores.append(metrics['dice'])
+    
+    finally:
+        # Restore original forward method
+        model.forward = original_forward
+    
+    # Aggregate results
+    avg_iou = np.mean(iou_scores)
+    avg_dice = np.mean(dice_scores)
+    std_iou = np.std(iou_scores)
+    std_dice = np.std(dice_scores)
+    
+    print(f"\nAggregated results:")
+    print(f"  IoU:  {avg_iou:.4f} ± {std_iou:.4f}")
+    print(f"  DICE: {avg_dice:.4f} ± {std_dice:.4f}")
     
     # Compute statistics
-    num_active_layers = layer_masks.sum(dim=1).cpu().numpy()
+    num_active_layers = np.array(num_active_layers_list)
     layer_activation_freq = layer_masks.float().mean(dim=0).cpu().numpy()
     
     results = {
-        'metrics': metrics,
+        'metrics': {
+            'iou': avg_iou,
+            'dice': avg_dice,
+            'iou_std': std_iou,
+            'dice_std': std_dice,
+        },
         'num_active_layers_mean': num_active_layers.mean(),
         'num_active_layers_std': num_active_layers.std(),
         'layer_activation_freq': layer_activation_freq.tolist(),
         'layer_masks': layer_masks.cpu().numpy(),
+        'per_image_iou': iou_scores,
+        'per_image_dice': dice_scores,
     }
     
     return results
