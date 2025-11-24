@@ -1,0 +1,1 @@
+Evaluation results for test dataset isic2017: {'iou': 0.769519031047821, 'dice': 0.8513133525848389} 
