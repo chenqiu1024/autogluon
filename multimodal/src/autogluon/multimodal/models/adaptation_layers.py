@@ -762,7 +762,11 @@ class ConvLoRALinear(nn.Linear, LoRALayer):
             # 5) Project back to output dim with LoRA scale (final residual add)
             result += (lora_res @ self.lora_B.T) * self.scaling
 
-        return result, moe_loss, selected_experts
+        # Return 3 values if GSPO is enabled, 2 values otherwise for backward compatibility
+        if self.gspo_enabled and selected_experts is not None:
+            return result, moe_loss, selected_experts
+        else:
+            return result, moe_loss
 
 
 class MoEGate(nn.Module):

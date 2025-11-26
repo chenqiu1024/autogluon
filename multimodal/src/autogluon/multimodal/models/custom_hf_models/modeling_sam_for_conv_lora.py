@@ -838,10 +838,14 @@ class SamVisionAttention(nn.Module):
         ##### modify here for conv-lora
         # Paper alignment:
         # - Sec. 3.3 (Integration): Inject Conv-LoRA at attention projections (q/k/v).
-        #   The adapted linear layer (possibly Conv-LoRA) may return (tensor, moe_loss) when output_moe_loss=True.
+        #   The adapted linear layer (possibly Conv-LoRA) may return (tensor, moe_loss, selected_experts) when output_moe_loss=True.
         qkv = self.qkv(hidden_states)
         if output_moe_loss:
-            qkv, moe_loss = qkv
+            # Handle both 2-value and 3-value returns for backward compatibility
+            if isinstance(qkv, tuple) and len(qkv) == 3:
+                qkv, moe_loss, selected_experts = qkv
+            else:
+                qkv, moe_loss = qkv
         qkv = qkv.reshape(batch_size, height * width, 3, self.num_attention_heads, -1).permute(2, 0, 3, 1, 4)
         # q, k, v with shape (batch_size * nHead, height * width, channel)
         query, key, value = qkv.reshape(3, batch_size * self.num_attention_heads, height * width, -1).unbind(0)
