@@ -36,6 +36,11 @@ optim:
     r: 8
     alpha: 8
     conv_lora_expert_num: 8 # default setting for Conv-LoRA
+    gspo_enabled: False # Enable GSPO (Group Sequence Policy Optimization) enhancements
+    gspo_group_size: 3 # Number of experts to select in GSPO mode (TopK)
+    gspo_quality_momentum: 0.9 # Momentum coefficient for expert quality history updates
+    gspo_warmup_epochs: 5 # Number of epochs before enabling full GSPO training
+    gspo_contrastive_weight: 0.1 # Weight for contrastive loss in GSPO training
   loss_func:
     "auto" # The replaced loss for regression. Can only support loss function in torch.nn.
     # example

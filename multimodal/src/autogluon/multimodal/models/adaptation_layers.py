@@ -649,12 +649,16 @@ class ConvLoRALinear(nn.Linear, LoRALayer):
         fan_in_fan_out: bool = False,  # Set this to True if the layer to replace stores weight like (fan_in, fan_out)
         merge_weights: bool = False,
         conv_lora_expert_num: Optional[int] = None,
+        gspo_enabled: bool = False,
+        gspo_group_size: int = 3,
+        gspo_quality_momentum: float = 0.9,
         **kwargs,
     ):
         nn.Linear.__init__(self, in_features, out_features, **kwargs)
         LoRALayer.__init__(self, r=r, lora_alpha=lora_alpha, lora_dropout=lora_dropout, merge_weights=merge_weights)
 
         self.fan_in_fan_out = fan_in_fan_out
+        self.gspo_enabled = gspo_enabled
         # Actual trainable parameters
         if r > 0:
             # Sec. 3: Low-rank LoRA factors around a frozen base linear
@@ -665,8 +669,16 @@ class ConvLoRALinear(nn.Linear, LoRALayer):
             self.weight.requires_grad = False
 
             # Sec. 3.2: MoE-Conv experts with Noisy-TopK gating
+            # GSPO: Pass GSPO parameters to MoEGate
             topk = 1
-            self.lora_moe_gating = MoEGate(M=conv_lora_expert_num, d=self.r, K=topk)
+            self.lora_moe_gating = MoEGate(
+                M=conv_lora_expert_num, 
+                d=self.r, 
+                K=topk,
+                gspo_enabled=gspo_enabled,
+                gspo_group_size=gspo_group_size,
+                gspo_quality_momentum=gspo_quality_momentum
+            )
             self.lora_moe_experts = nn.ModuleList([])
             self.upsample_ratios = list(range(1, conv_lora_expert_num + 1))
             for upsample_ratio in self.upsample_ratios:
@@ -693,6 +705,9 @@ class ConvLoRALinear(nn.Linear, LoRALayer):
     def forward(self, x: torch.Tensor):
         # Base frozen path + residual (LoRA principle)
         result = F.linear(x, self.T(self.weight), bias=self.bias)
+        moe_loss = 0
+        selected_experts = None
+        
         if self.r > 0:
             # 1) Project to rank-r LoRA space
             lora_res = self.lora_dropout(x) @ self.lora_A.T
@@ -707,7 +722,16 @@ class ConvLoRALinear(nn.Linear, LoRALayer):
             # Calculate the gating values.
             # 2) Sec. 3.2: Compute Noisy-TopK gates over spatial features; also returns auxiliary moe_loss.
             lora_res = lora_res.permute(0, 3, 1, 2).contiguous()
-            gates, moe_loss = self.lora_moe_gating(lora_res)
+            
+            # GSPO: Receive selected experts info
+            if self.gspo_enabled:
+                gates, moe_loss, selected_experts = self.lora_moe_gating(lora_res)
+            else:
+                gate_output = self.lora_moe_gating(lora_res)
+                if len(gate_output) == 3:
+                    gates, moe_loss, selected_experts = gate_output
+                else:
+                    gates, moe_loss = gate_output
 
             # Distribute data samples to experts.
             # 3) Route tokens to experts (SparseDispatcher)
@@ -738,20 +762,28 @@ class ConvLoRALinear(nn.Linear, LoRALayer):
             # 5) Project back to output dim with LoRA scale (final residual add)
             result += (lora_res @ self.lora_B.T) * self.scaling
 
-        return result, moe_loss
+        return result, moe_loss, selected_experts
 
 
 class MoEGate(nn.Module):
-    def __init__(self, d, M=4, K=1, noisy_gating=True):
+    def __init__(self, d, M=4, K=1, noisy_gating=True, gspo_enabled=False, gspo_group_size=3, gspo_quality_momentum=0.9):
         """Constructor
         Args:
             d: input channel dimensionality.
             M: the number of experts.
             K: the number of chosen experts for each forward pass.
+            gspo_enabled: whether to enable GSPO (Group Sequence Policy Optimization) enhancements.
+            gspo_group_size: number of experts to select when GSPO is enabled (overrides K).
+            gspo_quality_momentum: momentum coefficient for expert quality history updates.
         """
         super(MoEGate, self).__init__()
         self.M = M
-        self.k = K
+        self.gspo_enabled = gspo_enabled
+        self.gspo_group_size = gspo_group_size
+        self.gspo_quality_momentum = gspo_quality_momentum
+        
+        # GSPO: Use group_size as K when enabled, otherwise use original K
+        self.k = gspo_group_size if gspo_enabled else K
         self.gap = nn.AdaptiveAvgPool2d((1, 1))  # global average pooling
 
         self.noisy_gating = noisy_gating
@@ -763,6 +795,12 @@ class MoEGate(nn.Module):
         self.softmax = nn.Softmax(1)
         self.register_buffer("mean", torch.tensor([0.0]))
         self.register_buffer("std", torch.tensor([1.0]))
+        
+        # GSPO: Expert quality tracking
+        if gspo_enabled:
+            self.register_buffer("expert_quality_history", torch.zeros(M))
+            self.register_buffer("expert_usage_count", torch.zeros(M))
+        
         assert self.k <= self.M
 
     def forward(self, feats, loss_coef=1e-2, noise_epsilon=1e-2):
@@ -770,12 +808,22 @@ class MoEGate(nn.Module):
         Paper alignment (Sec. 3.2):
         - GAP over spatial features -> linear logits (+ noise during training) -> TopK expert selection
         - Softmax over TopK logits yields gates; compute importance/load stats and CV^2-based load-balancing loss
+        
+        GSPO enhancement:
+        - Quality-aware bias added to logits based on expert historical performance
+        - Supports multi-expert selection (TopK > 1) for group-level optimization
         """
         batch_size = feats.shape[0]
 
         feats_S = self.gap(feats).view(batch_size, -1)
 
         clean_logits = feats_S @ self.w_gate
+        
+        # GSPO: Add quality-aware bias to encourage high-performing experts
+        if self.gspo_enabled and self.training:
+            quality_bias = self._compute_quality_bias()
+            clean_logits = clean_logits + quality_bias.unsqueeze(0)
+        
         if self.noisy_gating and self.training:
             raw_noise_stddev = feats_S @ self.w_noise
             noise_stddev = self.softplus(raw_noise_stddev) + noise_epsilon
@@ -800,7 +848,7 @@ class MoEGate(nn.Module):
         loss = self.cv_squared(importance) + self.cv_squared(load)
         loss *= loss_coef
 
-        return gates, loss
+        return gates, loss, top_k_indices
 
     def _gates_to_load(self, gates):
         """Compute the true load per expert, given the gates.
@@ -860,6 +908,65 @@ class MoEGate(nn.Module):
         prob_if_out = normal.cdf((clean_values - threshold_if_out) / noise_stddev)
         prob = torch.where(is_in, prob_if_in, prob_if_out)
         return prob
+    
+    def _compute_quality_bias(self):
+        """
+        GSPO: Compute quality-aware bias for expert selection.
+        
+        This method balances exploitation (favoring high-quality experts) and
+        exploration (giving chances to less-used experts).
+        
+        Returns:
+            bias: Tensor of shape [M] to be added to logits
+        """
+        if not hasattr(self, 'expert_quality_history'):
+            return torch.zeros(self.M, device=self.w_gate.device)
+        
+        # Normalize quality history to compute exploitation bias
+        quality_history = self.expert_quality_history
+        if quality_history.sum() > 0:
+            quality_bias = (quality_history - quality_history.mean()) / (quality_history.std() + 1e-8)
+        else:
+            quality_bias = torch.zeros_like(quality_history)
+        
+        # Compute exploration bonus for less-used experts
+        usage_count = self.expert_usage_count
+        if usage_count.sum() > 0:
+            usage_normalized = usage_count / (usage_count.sum() + 1e-8)
+            exploration_bonus = 1.0 - usage_normalized
+        else:
+            exploration_bonus = torch.ones_like(usage_count)
+        
+        # Combine: 80% exploitation + 20% exploration
+        combined_bias = 0.8 * quality_bias + 0.2 * exploration_bonus
+        
+        return combined_bias
+    
+    def update_quality_history(self, selected_experts, quality_scores):
+        """
+        GSPO: Update expert quality history based on actual performance.
+        
+        This provides the feedback loop for quality-aware gating.
+        
+        Args:
+            selected_experts: Tensor of shape [batch, k] containing selected expert indices
+            quality_scores: Tensor of shape [batch] containing quality metrics (e.g., IoU, DICE)
+        """
+        if not self.gspo_enabled or not hasattr(self, 'expert_quality_history'):
+            return
+        
+        with torch.no_grad():
+            for b in range(selected_experts.shape[0]):
+                quality = quality_scores[b].item() if quality_scores[b].numel() == 1 else quality_scores[b].mean().item()
+                for k in range(selected_experts.shape[1]):
+                    expert_id = selected_experts[b, k].item()
+                    # Momentum update
+                    current_quality = self.expert_quality_history[expert_id]
+                    self.expert_quality_history[expert_id] = (
+                        self.gspo_quality_momentum * current_quality +
+                        (1 - self.gspo_quality_momentum) * quality
+                    )
+                    self.expert_usage_count[expert_id] += 1
 
 
 class SparseDispatcher(object):

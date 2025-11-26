@@ -64,6 +64,13 @@ if __name__ == "__main__":
         help="The effective batch size. If batch_size > per_gpu_batch_size * num_gpus, gradient accumulation would be used.",
     )
     parser.add_argument("--eval", action="store_true")
+    
+    # GSPO parameters
+    parser.add_argument("--gspo_enable", action="store_true", help="Enable GSPO (Group Sequence Policy Optimization) training")
+    parser.add_argument("--gspo_group_size", type=int, default=4, help="Number of predictions per group in GSPO")
+    parser.add_argument("--gspo_warmup_epochs", type=int, default=5, help="Number of epochs before enabling GSPO")
+    parser.add_argument("--gspo_contrastive_weight", type=float, default=0.1, help="Weight for contrastive loss in GSPO")
+    parser.add_argument("--gspo_quality_momentum", type=float, default=0.9, help="Momentum for expert quality history")
     args = parser.parse_args()
 
     dataset_name = args.task
@@ -95,6 +102,17 @@ if __name__ == "__main__":
             "env.batch_size": args.batch_size,
         }
     )
+    
+    # GSPO configuration
+    if args.gspo_enable:
+        print(f"Enabling GSPO with group_size={args.gspo_group_size}, warmup_epochs={args.gspo_warmup_epochs}")
+        hyperparameters.update({
+            "optim.lora.gspo_enabled": True,
+            "optim.lora.gspo_group_size": args.gspo_group_size,
+            "optim.lora.gspo_quality_momentum": args.gspo_quality_momentum,
+            "optim.lora.gspo_warmup_epochs": args.gspo_warmup_epochs,
+            "optim.lora.gspo_contrastive_weight": args.gspo_contrastive_weight,
+        })
 
     if args.eval:  # load a checkpoint for evaluation
         predictor = MultiModalPredictor.load(args.ckpt_path)
