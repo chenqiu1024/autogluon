@@ -4914,3 +4914,103 @@ optimizer.step()
 
 ---
 
+## Bug 修复记录 (2025-11-27)
+
+### 问题：首次运行训练时出错
+
+**错误信息**：
+```
+AttributeError: 'SemanticSegmentationLearner' object has no attribute '_data_module'
+```
+
+**原因**：
+- `SemanticSegmentationLearner` 不存储 `_data_module` 属性
+- 需要通过 `get_datamodule_per_run()` 方法动态创建
+
+**修复内容**：
+
+#### 1. DataModule 创建
+
+```python
+# 修复前
+datamodule = learner._data_module  # ❌ 属性不存在
+
+# 修复后
+datamodule = learner.get_datamodule_per_run(
+    df_preprocessor=learner._df_preprocessor,
+    data_processors=learner._data_processors,
+    per_gpu_batch_size=learner._config.env.per_gpu_batch_size,
+    num_workers=learner._config.env.num_workers,
+    is_train=True,
+)  # ✅ 正确创建
+```
+
+#### 2. 优化器配置
+
+```python
+# 修复前
+optim_kwargs = learner._config.optim  # DictConfig
+optim_kwargs['lr'] = self.learning_rate  # ❌ 不能直接赋值
+
+# 修复后
+optim_config = learner._config.optim
+optim_kwargs = dict(
+    optim_type=optim_config.optim_type,
+    lr=self.learning_rate,  # ✅ 转换为字典后赋值
+    # ... 其他参数
+)
+```
+
+#### 3. Checkpoint Callback
+
+```python
+# 修复前
+trainer = pl.Trainer(
+    enable_checkpointing=True,  # ❌ 没有配置 callback
+)
+
+# 修复后
+checkpoint_callback = ModelCheckpoint(
+    dirpath=os.path.join(self.output_dir, 'checkpoints'),
+    monitor='rloo_mean_reward',
+    mode='max',
+    save_top_k=3,
+)
+trainer = pl.Trainer(
+    callbacks=[checkpoint_callback],  # ✅ 添加 callback
+)
+```
+
+### 验证
+
+所有修复已验证：
+- ✅ 导入测试通过
+- ✅ 无 linter 错误
+- ✅ 参数解析正常
+
+### 使用修复后的版本
+
+```bash
+# 清理旧日志
+rm train_rloo-251127.log
+
+# 重新运行（在 conv-lora 环境中）
+nohup python run_semantic_segmentation_rloo_real.py \
+  --task isic2017 \
+  --ckpt_path AutogluonModels/ag-20251126_062717 \
+  --output_dir outputs/rloo/isic2017/20251127 \
+  --num_generations 4 \
+  --beta 0.05 \
+  --reward_type combo \
+  --learning_rate 1e-5 \
+  --epochs 3 \
+  --batch_size 2 > train_rloo-251127.log 2>&1 &
+
+# 监控
+tail -f train_rloo-251127.log
+```
+
+**详细修复说明**：见 `BUGFIX_RLOO_TRAINING.md`
+
+---
+

@@ -7,10 +7,13 @@ import os
 from typing import Dict, List, Optional
 
 import pandas as pd
-import pytorch_lightning as pl
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
+
+# 使用 lightning.pytorch 而不是 pytorch_lightning（与 AutoGluon 一致）
+from lightning.pytorch import Trainer, seed_everything
+from lightning.pytorch.callbacks import ModelCheckpoint
 
 from autogluon.multimodal import MultiModalPredictor
 from autogluon.multimodal.constants import LABEL
@@ -89,9 +92,38 @@ class RLOOTrainer:
         
         os.makedirs(self.output_dir, exist_ok=True)
         torch.manual_seed(self.seed)
-        pl.seed_everything(self.seed)
+        seed_everything(self.seed)
         
-    def setup_model_and_datamodule(self, predictor: MultiModalPredictor):
+    def load_train_data(self, task: str):
+        """
+        重新加载训练和验证数据集
+        """
+        dataset_name = task
+        dataset_dir = os.path.join(f"datasets/{dataset_name}", dataset_name)
+        train_csv = os.path.join(dataset_dir, "train.csv")
+        val_csv = os.path.join(dataset_dir, "val.csv")
+        
+        if not os.path.exists(train_csv):
+            raise FileNotFoundError(f"Training data not found: {train_csv}")
+        
+        train_df = pd.read_csv(train_csv)
+        
+        # 展开路径（与原始训练脚本一致）
+        for col in ["image", "label"]:
+            if col in train_df.columns:
+                train_df[col] = train_df[col].apply(lambda ele: os.path.join(dataset_dir, ele))
+        
+        # 加载验证集（如果存在）
+        val_df = None
+        if os.path.exists(val_csv):
+            val_df = pd.read_csv(val_csv)
+            for col in ["image", "label"]:
+                if col in val_df.columns:
+                    val_df[col] = val_df[col].apply(lambda ele: os.path.join(dataset_dir, ele))
+        
+        return train_df, val_df
+    
+    def setup_model_and_datamodule(self, predictor: MultiModalPredictor, task: str):
         """
         从 AutoGluon Predictor 中提取模型和 DataModule
         """
@@ -100,8 +132,21 @@ class RLOOTrainer:
         # 获取模型
         model = learner._model
         
-        # 获取 DataModule
-        datamodule = learner._data_module
+        # 重新加载训练和验证数据
+        train_data, val_data = self.load_train_data(task)
+        
+        # 手动设置数据到 learner（因为 get_datamodule_per_run 依赖这些属性）
+        learner._train_data = train_data
+        learner._tuning_data = val_data  # 设置验证数据，DataModule 需要它
+        
+        # 创建 DataModule
+        datamodule = learner.get_datamodule_per_run(
+            df_preprocessor=learner._df_preprocessor,
+            data_processors=learner._data_processors,
+            per_gpu_batch_size=self.batch_size,  # 使用我们指定的 batch_size
+            num_workers=self.num_workers,
+            is_train=True,
+        )
         
         return model, datamodule
     
@@ -162,7 +207,7 @@ class RLOOTrainer:
         
         return lit_module
     
-    def train(self, predictor: MultiModalPredictor):
+    def train(self, predictor: MultiModalPredictor, task: str):
         """
         执行 RLOO 训练
         """
@@ -172,6 +217,7 @@ class RLOOTrainer:
         print(f"配置:")
         print(f"  Checkpoint: {self.ckpt_path}")
         print(f"  输出目录: {self.output_dir}")
+        print(f"  任务: {task}")
         print(f"  候选数量 (G): {self.num_generations}")
         print(f"  KL 系数 (β): {self.beta}")
         print(f"  Reward 类型: {self.reward_type}")
@@ -181,7 +227,7 @@ class RLOOTrainer:
         print("="*80 + "\n")
         
         # 设置模型和数据
-        model, datamodule = self.setup_model_and_datamodule(predictor)
+        model, datamodule = self.setup_model_and_datamodule(predictor, task)
         
         # 冻结非 Conv-LoRA 参数
         trainable_params = self.freeze_non_conv_lora_params(model)
@@ -193,23 +239,53 @@ class RLOOTrainer:
         
         # 获取优化器配置
         learner = predictor._learner
-        optim_kwargs = learner._config.optim
         
-        # 更新学习率
-        optim_kwargs['lr'] = self.learning_rate
+        # 获取验证指标（不需要参数，使用 learner 内部的 _output_shape）
+        validation_metric, custom_metric_func = learner.get_validation_metric_per_run()
+        
+        # 获取 loss 函数
+        loss_func, aug_loss_func = learner.get_loss_func_per_run(learner._config)
+        
+        # 构建优化器配置
+        optim_config = learner._config.optim
+        optim_kwargs = dict(
+            optim_type=optim_config.optim_type,
+            lr_choice=optim_config.lr_choice,
+            lr_schedule=optim_config.lr_schedule,
+            lr=self.learning_rate,  # 使用我们指定的学习率
+            lr_decay=optim_config.lr_decay,
+            end_lr=optim_config.end_lr,
+            lr_mult=optim_config.lr_mult,
+            weight_decay=optim_config.weight_decay,
+            warmup_steps=optim_config.warmup_steps,
+            loss_func=loss_func,
+            validation_metric=validation_metric,
+            validation_metric_name=learner._validation_metric_name,
+            custom_metric_func=custom_metric_func,
+        )
         
         # 创建 LitModule
         lit_module = self.create_lit_module(model, optim_kwargs)
         
+        # 创建 checkpoint callback
+        checkpoint_callback = ModelCheckpoint(
+            dirpath=os.path.join(self.output_dir, 'checkpoints'),
+            filename='rloo-{epoch:02d}-{rloo_mean_reward:.4f}',
+            monitor='rloo_mean_reward',
+            mode='max',
+            save_top_k=3,
+            save_last=True,
+        )
+        
         # 创建 PyTorch Lightning Trainer
-        trainer = pl.Trainer(
+        trainer = Trainer(
             max_epochs=self.epochs,
             accelerator='auto',
             devices=1,
             default_root_dir=self.output_dir,
             enable_progress_bar=True,
             log_every_n_steps=10,
-            enable_checkpointing=True,
+            callbacks=[checkpoint_callback],
             logger=True,
         )
         
@@ -223,7 +299,10 @@ class RLOOTrainer:
         print(f"\n模型已保存到: {self.output_dir}")
         print("\n训练统计:")
         print(f"  总 epochs: {self.epochs}")
-        print(f"  最终 checkpoint: {trainer.checkpoint_callback.best_model_path}")
+        if checkpoint_callback.best_model_path:
+            print(f"  最佳 checkpoint: {checkpoint_callback.best_model_path}")
+        if checkpoint_callback.last_model_path:
+            print(f"  最后 checkpoint: {checkpoint_callback.last_model_path}")
         print("="*80 + "\n")
         
         return trainer, lit_module
@@ -335,7 +414,7 @@ def main():
     )
     
     # 训练
-    trainer, lit_module = rloo_trainer.train(predictor)
+    trainer, lit_module = rloo_trainer.train(predictor, args.task)
     
     print("\n✓ 训练完成！")
     print(f"✓ 输出目录: {args.output_dir}")
