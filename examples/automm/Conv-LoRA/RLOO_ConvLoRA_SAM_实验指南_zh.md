@@ -79,25 +79,50 @@ python run_semantic_segmentation.py \
    - 使用 `mask_log_prob_from_logits` 计算每个候选的 log π(M | logits)；
    - 调用 `rloo_loss` 计算 leave-one-out advantage 下的 REINFORCE 损失。
 
-4. **参数更新（结构示例）**  
-   - 构造优化器：`AdamW(仅 Conv-LoRA 参数, lr=1e-5)`；
-   - 对每个 batch：前向 → 计算 RLOO loss → `loss.backward()` → `optimizer.step()`。
+4. **指标监控与验证**  
+   - 记录每个 epoch 的平均 loss、reward、IoU、Dice、KL 等指标；
+   - 验证 RLOO 算法的各个组件是否正确工作。
 
-> 当前示例代码出于安全起见，仍在 `no_grad` 环境下调用 AutoGluon 推理，
-> 主要目的是演示 RLOO 的 **外层结构和 reward/advantage 计算逻辑**。
-> 真正要启用梯度，需要参考 AutoGluon 的 `SemanticSegmentationLitModule` / `BaseDataModule` 等模块，
-> 在模型和 DataModule 层实现自定义训练循环。
+### ⚠️ 重要说明：当前实现状态
+
+**当前版本是一个概念验证（Proof of Concept）实现**，主要目的是：
+
+✅ **已实现并验证**：
+- 完整的 RLOO 算法逻辑（多候选采样、reward 计算、KL 正则、leave-one-out advantage）
+- Conv-LoRA 参数识别与管理
+- 与 AutoGluon 数据流的集成
+- 详细的指标监控和日志输出
+
+❌ **当前限制**：
+- **不进行真实的梯度更新**：由于 AutoGluon 的 `predict_per_run` 在 `no_grad` 环境中运行，当前实现无法进行端到端的反向传播
+- 模型参数实际上未被更新
+
+### 🔧 如何实现真实的 RL 训练
+
+要实现完整的 RLOO 训练，需要深入 AutoGluon 内部：
+
+1. **在 `SemanticSegmentationLitModule` 中添加 RLOO 训练模式**
+   - 扩展 `training_step` 方法，支持 RLOO 风格的 loss 计算
+   - 直接使用 `self.model(batch)` 进行带梯度的前向传播
+
+2. **修改 DataModule 以支持多次采样**
+   - 每个 batch 需要重复前向 G 次以生成多个候选
+
+3. **集成 reward 计算与 KL 正则**
+   - 将 `rloo_utils.py` 中的函数集成到训练循环中
+
+当前实现的所有核心组件都可以直接迁移到上述深度集成中。
 
 ---
 
 ### 关键命令示例
 
-假设阶段一的 checkpoint 路径为 `outputs/leaf_supervised/AutogluonModels/ag-20251126_062717`：
+假设阶段一的 checkpoint 路径为 `AutogluonModels/ag-20251126_062717`（**注意：传入目录而非 `.ckpt` 文件**）：
 
 ```bash
 python run_semantic_segmentation_rloo.py \
   --task leaf_disease_segmentation \
-  --ckpt_path outputs/leaf_supervised/AutogluonModels/ag-20251126_062717 \
+  --ckpt_path AutogluonModels/ag-20251126_062717 \
   --output_dir outputs_rloo/leaf \
   --num_generations 4 \
   --beta 0.05 \
@@ -105,6 +130,11 @@ python run_semantic_segmentation_rloo.py \
   --epochs 3 \
   --batch_size 2
 ```
+
+**重要提示**：
+- `--ckpt_path` 应该传入 **AutoGluon 模型目录**（包含 `config.yaml`、`model.ckpt` 等文件的目录），而不是直接传入 `.ckpt` 文件路径。
+- 脚本会自动处理：如果你不小心传入了 `.ckpt` 文件路径，会自动取其父目录。
+- 如果从其他目录运行，建议使用绝对路径或从 `examples/automm/Conv-LoRA/` 目录下执行。
 
 运行结束后，脚本会在 `output_dir` 下保存一个新的 AutoGluon Predictor 目录（示意为 `rloo_finetuned`），
 后续可以用 `MultiModalPredictor.load` 进行评估。

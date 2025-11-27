@@ -58,18 +58,47 @@ class SAMConvLoRAWrapper(nn.Module):
         trainable_names: List[str] = []
         if peft_param_names is None:
             # 兜底策略：如果配置中没有显式 PEFT 参数名，则默认所有包含 "lora" 字样的参数为可训练
+            print("Warning: peft_param_names is None, using fallback strategy (searching for 'lora' in parameter names)")
             for name, p in self.model.named_parameters():
                 if "lora" in name.lower():
                     p.requires_grad = True
                     trainable_names.append(name)
         else:
+            # peft_param_names 可能是完整参数名，也可能是参数名的后缀/模式
+            # 我们尝试两种匹配方式：精确匹配和子串匹配
             peft_set = set(peft_param_names)
-            for name, p in self.model.named_parameters():
+            model_param_names = dict(self.model.named_parameters())
+            
+            # 首先尝试精确匹配
+            for name, p in model_param_names.items():
                 if name in peft_set:
                     p.requires_grad = True
                     trainable_names.append(name)
+            
+            # 如果精确匹配失败，尝试子串匹配
+            if len(trainable_names) == 0:
+                print(f"Warning: No exact match found for peft_param_names. Trying substring matching...")
+                for name, p in model_param_names.items():
+                    for peft_pattern in peft_param_names:
+                        if peft_pattern in name:
+                            p.requires_grad = True
+                            trainable_names.append(name)
+                            break
+            
+            # 如果还是没有找到，使用兜底策略
+            if len(trainable_names) == 0:
+                print(f"Warning: No parameters matched peft_param_names. Using fallback strategy (searching for 'lora')...")
+                for name, p in model_param_names.items():
+                    if "lora" in name.lower() or "conv_lora" in name.lower():
+                        p.requires_grad = True
+                        trainable_names.append(name)
 
         self._trainable_param_names = trainable_names
+        print(f"Found {len(trainable_names)} trainable parameters (Conv-LoRA):")
+        for name in trainable_names[:5]:  # 只打印前5个
+            print(f"  - {name}")
+        if len(trainable_names) > 5:
+            print(f"  ... and {len(trainable_names) - 5} more")
 
     @property
     def trainable_param_names(self) -> List[str]:
