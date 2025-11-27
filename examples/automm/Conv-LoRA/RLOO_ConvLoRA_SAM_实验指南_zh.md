@@ -73,7 +73,9 @@ python run_semantic_segmentation.py \
 3. **RLOO 步骤（示意实现）**  
    对每个 batch：
    - 调用 `learner.predict_per_run` 得到 logits 与 GT 掩码；
-   - 对每张图像重复采样 `G = num_generations` 个候选 mask，形成 `{M_i}`；
+   - 对每张图像生成 `G = num_generations` 个候选 mask：
+     - 第 1 个候选：直接对 logits 阈值化（>0.5）得到模型的主要预测
+     - 后续候选：在 logits 上添加小的高斯噪声后再阈值化，引入多样性
    - 基于 GT mask 计算每个候选的 IoU / Dice，组合成 reward；
    - 通过 `rloo_utils` 中的 `bernoulli_kl` 计算当前策略与参考策略之间的 KL 惩罚，形成总 reward；
    - 使用 `mask_log_prob_from_logits` 计算每个候选的 log π(M | logits)；

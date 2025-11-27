@@ -133,9 +133,18 @@ def rloo_step_on_batch(
     all_dice = []
 
     for g in range(num_generations):
-        # 采样 Bernoulli mask
-        probs = torch.sigmoid(pred_logits)
-        sampled_mask = torch.bernoulli(probs).to(device)
+        # 生成候选 mask：在 logits 上添加小的随机噪声，而不是完全重新采样
+        # 这样可以保持模型预测的基本结构，同时引入多样性
+        if g == 0:
+            # 第一个候选使用原始预测（阈值化）
+            probs = torch.sigmoid(pred_logits)
+            sampled_mask = (probs > 0.5).float()
+        else:
+            # 后续候选：在 logits 上添加小噪声
+            noise_scale = 0.5  # 可调整的噪声强度
+            noisy_logits = pred_logits + torch.randn_like(pred_logits) * noise_scale
+            probs = torch.sigmoid(noisy_logits)
+            sampled_mask = (probs > 0.5).float()
 
         # 计算 reward（IoU/Dice/组合）
         rewards_metric = compute_segmentation_reward(
@@ -155,6 +164,7 @@ def rloo_step_on_batch(
         rewards_total = rewards_metric - beta * kl_values
 
         # log π(M | logits)
+        # 注意：这里的 log_prob 应该基于原始 pred_logits，而不是 noisy_logits
         log_p = mask_log_prob_from_logits(sampled_mask, pred_logits)  # (B,)
 
         all_log_probs.append(log_p)
