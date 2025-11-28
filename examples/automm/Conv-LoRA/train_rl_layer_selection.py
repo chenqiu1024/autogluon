@@ -37,6 +37,7 @@ from autogluon.multimodal import MultiModalPredictor
 from autogluon.multimodal.rl.policies import LayerSelectionPolicy
 from autogluon.multimodal.rl.envs import ConvLoRAEnvironment
 from autogluon.multimodal.rl.algos import REINFORCE
+from autogluon.multimodal.rl.algos.rloo import RLOO
 
 
 def expand_path(df, dataset_dir):
@@ -136,6 +137,8 @@ def train_rl_policy(
     save_freq: int = 100,
     eval_freq: int = 50,
     reward_metric: str = 'iou',
+    algo_name: str = 'reinforce',
+    rloo_k: int = 4,
     device: str = 'cuda',
 ):
     """
@@ -171,6 +174,10 @@ def train_rl_policy(
         Frequency of evaluation on test set
     reward_metric : str
         Metric to use as reward ('iou' or 'dice')
+    algo_name : str
+        Algorithm to use ('reinforce' or 'rloo')
+    rloo_k : int
+        Number of samples per input for RLOO (default: 4)
     device : str
         Device to run on
     """
@@ -188,6 +195,9 @@ def train_rl_policy(
     print(f"Batch size: {batch_size}")
     print(f"Eval subset size: {eval_subset_size}")
     print(f"Reward metric: {reward_metric}")
+    print(f"Algorithm: {algo_name}")
+    if algo_name == 'rloo':
+        print(f"RLOO K: {rloo_k}")
     print(f"{'='*60}\n")
     
     # Initialize environment
@@ -218,14 +228,25 @@ def train_rl_policy(
     
     # Initialize optimizer and algorithm
     optimizer = optim.Adam(policy.parameters(), lr=learning_rate)
-    algo = REINFORCE(
-        policy=policy,
-        optimizer=optimizer,
-        baseline_decay=baseline_decay,
-        entropy_coef=entropy_coef,
-        max_grad_norm=1.0,
-        device=device,
-    )
+    
+    if algo_name == 'rloo':
+        algo = RLOO(
+            policy=policy,
+            optimizer=optimizer,
+            k=rloo_k,
+            entropy_coef=entropy_coef,
+            max_grad_norm=1.0,
+            device=device,
+        )
+    else:
+        algo = REINFORCE(
+            policy=policy,
+            optimizer=optimizer,
+            baseline_decay=baseline_decay,
+            entropy_coef=entropy_coef,
+            max_grad_norm=1.0,
+            device=device,
+        )
     
     # Training statistics
     best_reward = baseline_reward
@@ -258,22 +279,52 @@ def train_rl_policy(
         # In production, replace this with actual patch embeddings
         patch_embeddings = torch.randn(batch_size, 64, 64, 1280).to(device)
         
-        # Policy forward: generate layer masks
-        layer_masks, layer_probs, log_probs = policy(
-            patch_embeddings,
-            deterministic=False,
-            temperature=1.0,
-        )
-        
-        # Evaluate rewards for each sample in the batch
-        # Per-image evaluation: each image uses its own policy-generated mask
-        rewards = []
-        for i in range(batch_size):
-            # Get single image data
-            single_image_data = batch_data.iloc[[i]].reset_index(drop=True)
-            # Evaluate this image with its specific mask
-            result = env.step(single_image_data, layer_masks[i])
-            rewards.append(result['reward'])
+        if algo_name == 'rloo':
+            # RLOO: Generate k samples for each image in the batch
+            # We repeat the batch k times to process efficiently
+            # batch_size * k samples total
+            
+            # Repeat patch embeddings k times: [B, ...] -> [B*K, ...]
+            # We interleave repeats: [img1, img1, ..., img2, img2, ...]
+            patch_embeddings_expanded = patch_embeddings.repeat_interleave(rloo_k, dim=0)
+            
+            # Policy forward: generate layer masks for all B*K samples
+            layer_masks, layer_probs, log_probs = policy(
+                patch_embeddings_expanded,
+                deterministic=False,
+                temperature=1.0,
+            )
+            
+            # Evaluate rewards for each sample
+            rewards = []
+            for i in range(batch_size):
+                # Get single image data
+                single_image_data = batch_data.iloc[[i]].reset_index(drop=True)
+                
+                # Evaluate k samples for this image
+                for k in range(rloo_k):
+                    idx = i * rloo_k + k
+                    result = env.step(single_image_data, layer_masks[idx])
+                    rewards.append(result['reward'])
+            
+        else:
+            # REINFORCE: Single sample per image
+            # Policy forward: generate layer masks
+            layer_masks, layer_probs, log_probs = policy(
+                patch_embeddings,
+                deterministic=False,
+                temperature=1.0,
+            )
+            
+            # Evaluate rewards for each sample in the batch
+            # Per-image evaluation: each image uses its own policy-generated mask
+            rewards = []
+            for i in range(batch_size):
+                # Get single image data
+                single_image_data = batch_data.iloc[[i]].reset_index(drop=True)
+                # Evaluate this image with its specific mask
+                result = env.step(single_image_data, layer_masks[i])
+                rewards.append(result['reward'])
         
         rewards = torch.tensor(rewards, dtype=torch.float32, device=device)
         
@@ -421,6 +472,8 @@ def train_rl_policy(
             'baseline_decay': baseline_decay,
             'entropy_coef': entropy_coef,
             'eval_subset_size': eval_subset_size,
+            'algo': algo_name,
+            'rloo_k': rloo_k if algo_name == 'rloo' else None,
         }
     }
     
@@ -528,6 +581,12 @@ def main():
     parser.add_argument('--reward_metric', type=str, default='iou', choices=['iou', 'dice'],
                        help='Reward metric (default: iou)')
     
+    # Algorithm
+    parser.add_argument('--algo', type=str, default='reinforce', choices=['reinforce', 'rloo'],
+                       help='Algorithm to use (default: reinforce)')
+    parser.add_argument('--rloo_k', type=int, default=4,
+                       help='Number of samples per input for RLOO (default: 4)')
+
     # Device
     parser.add_argument('--device', type=str, default='cuda',
                        help='Device to use (default: cuda)')
@@ -565,6 +624,8 @@ def main():
         save_freq=args.save_freq,
         eval_freq=args.eval_freq,
         reward_metric=args.reward_metric,
+        algo_name=args.algo,
+        rloo_k=args.rloo_k,
         device=args.device,
     )
     
