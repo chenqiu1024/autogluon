@@ -94,18 +94,15 @@ class RLOOSemanticSegmentationLitModule(SemanticSegmentationLitModule):
         output = run_model(self.model, batch)
         pred_logits = output[self.model.prefix][LOGITS]
         
-        # 获取参考 logits（用于 KL 计算）
-        # 在第一个 epoch 的开始，参考策略就是当前策略
-        with torch.no_grad():
-            ref_logits = pred_logits.detach()
-        
         # 收集所有候选的 log_probs 和 rewards
         all_log_probs = []
         all_rewards = []
         all_iou = []
         all_dice = []
+        all_kl = []
         
         # 生成 G 个候选 mask
+        # 改进的采样策略：使用温度采样和递增的噪声强度
         for g in range(self.num_generations):
             # 在相同的 logits 基础上生成不同的候选
             if g == 0:
@@ -113,9 +110,25 @@ class RLOOSemanticSegmentationLitModule(SemanticSegmentationLitModule):
                 probs = torch.sigmoid(pred_logits)
                 sampled_mask = (probs > 0.5).float()
             else:
-                # 后续候选：在 logits 上添加噪声以引入多样性
-                noise_scale = 0.5
-                noisy_logits = pred_logits + torch.randn_like(pred_logits) * noise_scale
+                # 后续候选：使用更激进的采样策略以增加多样性
+                
+                # 策略1: 温度采样 - 温度从 0.5 递增到 2.0
+                # 更高的温度使得预测更加"平滑"，增加不确定性
+                temperature = 0.5 + 1.5 * (g / self.num_generations)
+                scaled_logits = pred_logits / temperature
+                
+                # 策略2: 添加更大的噪声 - 噪声强度从 1.0 递增到 3.0
+                # 这确保后面的候选与原始预测有显著差异
+                noise_scale = 1.0 + 2.0 * (g / self.num_generations)
+                noisy_logits = scaled_logits + torch.randn_like(pred_logits) * noise_scale
+                
+                # 策略3: 随机丢弃（类似 dropout）
+                # 对于奇数索引的候选，随机将一些 logits 设为 0
+                if g % 2 == 1:
+                    dropout_rate = 0.1  # 10% 的像素被随机丢弃
+                    dropout_mask = (torch.rand_like(noisy_logits) > dropout_rate).float()
+                    noisy_logits = noisy_logits * dropout_mask
+                
                 probs = torch.sigmoid(noisy_logits)
                 # 使用 Bernoulli 采样
                 sampled_mask = torch.bernoulli(probs)
@@ -135,9 +148,20 @@ class RLOOSemanticSegmentationLitModule(SemanticSegmentationLitModule):
                 all_iou.append(iou_vals.mean().item())
                 all_dice.append(dice_vals.mean().item())
                 
-                # KL 正则：惩罚偏离参考策略
-                kl_values = bernoulli_kl(pred_logits, ref_logits)
-                rewards_total = rewards_metric - self.beta * kl_values
+                # 计算采样多样性：当前候选的概率分布与第一个候选的差异
+                # 这可以用来监控采样的多样性
+                if g == 0:
+                    first_candidate_probs = torch.sigmoid(pred_logits)
+                    kl_div = 0.0
+                else:
+                    current_probs = torch.sigmoid(noisy_logits)
+                    # KL散度近似：衡量当前候选与第一个候选的差异
+                    kl_div = bernoulli_kl(noisy_logits, pred_logits).mean().item()
+                all_kl.append(kl_div)
+                
+                # 使用原始 reward（不加 KL 惩罚）
+                # 如果 beta > 0，我们可以在这里添加 KL 惩罚
+                rewards_total = rewards_metric
             
             # 计算 log π(M | logits)（需要梯度！）
             log_p = mask_log_prob_from_logits(sampled_mask.detach(), pred_logits)
@@ -158,7 +182,7 @@ class RLOOSemanticSegmentationLitModule(SemanticSegmentationLitModule):
                 "mean_reward": rewards.mean().item(),
                 "mean_iou": sum(all_iou) / len(all_iou),
                 "mean_dice": sum(all_dice) / len(all_dice),
-                "mean_kl": bernoulli_kl(pred_logits, ref_logits).mean().item(),
+                "mean_diversity": sum(all_kl) / len(all_kl),  # 候选的多样性
             }
         
         # 记录额外指标
