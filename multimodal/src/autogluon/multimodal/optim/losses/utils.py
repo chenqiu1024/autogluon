@@ -25,6 +25,7 @@ from .focal_loss import FocalLoss
 from .lemda_loss import LemdaLoss
 from .softmax_losses import MultiNegativesSoftmaxLoss, SoftTargetCrossEntropy
 from .structure_loss import StructureLoss
+from .rloo_loss import RLOOLoss
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +84,11 @@ def get_loss_func(
     elif problem_type == SEMANTIC_SEGMENTATION:
         if "structure_loss" in loss_func_name.lower():
             loss_func = StructureLoss()
+        elif "rloo_loss" in loss_func_name.lower():
+            # Extract RLOO params from config if available, otherwise use defaults
+            rloo_weight = config.rloo.weight if (config and hasattr(config, "rloo")) else 1.0
+            k = config.rloo.k if (config and hasattr(config, "rloo")) else 4
+            loss_func = RLOOLoss(k=k, rloo_weight=rloo_weight)
         elif "balanced_bce" in loss_func_name.lower():
             loss_func = BBCEWithLogitLoss()
         elif "mask2former_loss" in loss_func_name.lower():
