@@ -40,6 +40,7 @@ class RLOOTrainer:
         num_generations: int = 4,
         beta: float = 0.05,
         reward_type: str = "combo",
+        supervised_weight: float = 0.0,
         learning_rate: float = 1e-5,
         epochs: int = 3,
         batch_size: int = 2,
@@ -59,6 +60,9 @@ class RLOOTrainer:
             KL 正则系数
         reward_type
             reward 类型："iou", "dice", 或 "combo"
+        supervised_weight
+            混合训练中监督损失的权重（0-1之间）
+            0 = 纯RLOO，1 = 纯监督
         learning_rate
             学习率
         epochs
@@ -75,6 +79,7 @@ class RLOOTrainer:
         self.num_generations = num_generations
         self.beta = beta
         self.reward_type = reward_type
+        self.supervised_weight = supervised_weight
         self.learning_rate = learning_rate
         self.epochs = epochs
         self.batch_size = batch_size
@@ -201,6 +206,7 @@ class RLOOTrainer:
             num_generations=self.num_generations,
             beta=self.beta,
             reward_type=self.reward_type,
+            supervised_weight=self.supervised_weight,
             trainable_param_names=trainable_param_names,
             **optim_kwargs,
         )
@@ -221,6 +227,11 @@ class RLOOTrainer:
         print(f"  候选数量 (G): {self.num_generations}")
         print(f"  KL 系数 (β): {self.beta}")
         print(f"  Reward 类型: {self.reward_type}")
+        print(f"  监督权重: {self.supervised_weight}")
+        if self.supervised_weight > 0:
+            print(f"  训练模式: 混合 (监督: {self.supervised_weight:.1%}, RLOO: {(1-self.supervised_weight):.1%})")
+        else:
+            print(f"  训练模式: 纯 RLOO")
         print(f"  学习率: {self.learning_rate}")
         print(f"  Epochs: {self.epochs}")
         print(f"  Batch size: {self.batch_size}")
@@ -360,6 +371,12 @@ def main():
         choices=["iou", "dice", "combo"],
         help="reward 类型"
     )
+    parser.add_argument(
+        "--supervised_weight",
+        type=float,
+        default=0.0,
+        help="混合训练中监督损失的权重 (0-1)，0=纯RLOO，1=纯监督"
+    )
     
     # 训练参数
     parser.add_argument(
@@ -406,6 +423,7 @@ def main():
         num_generations=args.num_generations,
         beta=args.beta,
         reward_type=args.reward_type,
+        supervised_weight=args.supervised_weight,
         learning_rate=args.learning_rate,
         epochs=args.epochs,
         batch_size=args.batch_size,

@@ -44,6 +44,7 @@ class RLOOSemanticSegmentationLitModule(SemanticSegmentationLitModule):
         num_generations: int = 4,
         beta: float = 0.05,
         reward_type: str = "combo",
+        supervised_weight: float = 0.0,  # 混合训练：监督损失权重
         ref_logits_cache: Optional[Dict] = None,
         # 其他参数传递给父类
         **kwargs
@@ -61,6 +62,10 @@ class RLOOSemanticSegmentationLitModule(SemanticSegmentationLitModule):
             KL 正则系数，控制偏离参考策略的程度
         reward_type
             reward 类型："iou", "dice", 或 "combo"
+        supervised_weight
+            混合训练中监督损失的权重（0-1之间）
+            total_loss = supervised_weight * supervised_loss + (1-supervised_weight) * rloo_loss
+            如果为 0，则纯 RLOO；如果为 1，则纯监督
         ref_logits_cache
             可选的参考 logits 缓存（用于 KL 计算）
             如果为 None，则使用当前模型的第一次前向传播作为参考
@@ -73,6 +78,7 @@ class RLOOSemanticSegmentationLitModule(SemanticSegmentationLitModule):
         self.num_generations = num_generations
         self.beta = beta
         self.reward_type = reward_type
+        self.supervised_weight = supervised_weight
         self.ref_logits_cache = ref_logits_cache if ref_logits_cache is not None else {}
         
     def _rloo_training_step(self, batch: Dict):
@@ -110,24 +116,17 @@ class RLOOSemanticSegmentationLitModule(SemanticSegmentationLitModule):
                 probs = torch.sigmoid(pred_logits)
                 sampled_mask = (probs > 0.5).float()
             else:
-                # 后续候选：使用更激进的采样策略以增加多样性
+                # 后续候选：使用保守的采样策略
+                # 目标：生成高质量但略有差异的候选
                 
-                # 策略1: 温度采样 - 温度从 0.5 递增到 2.0
-                # 更高的温度使得预测更加"平滑"，增加不确定性
-                temperature = 0.5 + 1.5 * (g / self.num_generations)
+                # 策略1: 固定温度（轻微平滑）
+                temperature = 1.0
                 scaled_logits = pred_logits / temperature
                 
-                # 策略2: 添加更大的噪声 - 噪声强度从 1.0 递增到 3.0
-                # 这确保后面的候选与原始预测有显著差异
-                noise_scale = 1.0 + 2.0 * (g / self.num_generations)
+                # 策略2: 小噪声 - 从 0.1 递增到 0.5（保守）
+                # 确保候选仍然接近原始预测，避免生成低质量 mask
+                noise_scale = 0.1 + 0.4 * (g / self.num_generations)
                 noisy_logits = scaled_logits + torch.randn_like(pred_logits) * noise_scale
-                
-                # 策略3: 随机丢弃（类似 dropout）
-                # 对于奇数索引的候选，随机将一些 logits 设为 0
-                if g % 2 == 1:
-                    dropout_rate = 0.1  # 10% 的像素被随机丢弃
-                    dropout_mask = (torch.rand_like(noisy_logits) > dropout_rate).float()
-                    noisy_logits = noisy_logits * dropout_mask
                 
                 probs = torch.sigmoid(noisy_logits)
                 # 使用 Bernoulli 采样
@@ -155,8 +154,11 @@ class RLOOSemanticSegmentationLitModule(SemanticSegmentationLitModule):
                     kl_div = 0.0
                 else:
                     current_probs = torch.sigmoid(noisy_logits)
-                    # KL散度近似：衡量当前候选与第一个候选的差异
-                    kl_div = bernoulli_kl(noisy_logits, pred_logits).mean().item()
+                    # KL散度：衡量当前候选与第一个候选的差异
+                    # bernoulli_kl 返回每个样本的像素级KL总和，需要除以像素数得到平均值
+                    kl_sum = bernoulli_kl(noisy_logits, pred_logits).mean().item()
+                    num_pixels = pred_logits.numel() / pred_logits.shape[0]  # 每个样本的像素数
+                    kl_div = kl_sum / num_pixels  # 归一化到每个像素的平均KL
                 all_kl.append(kl_div)
                 
                 # 使用原始 reward（不加 KL 惩罚）
@@ -174,7 +176,17 @@ class RLOOSemanticSegmentationLitModule(SemanticSegmentationLitModule):
         rewards = torch.stack(all_rewards, dim=1)  # (B, G)
         
         # 计算 RLOO loss（会有梯度）
-        loss = rloo_loss(log_probs=log_probs, rewards=rewards, normalize_advantage=True)
+        rloo_loss_value = rloo_loss(log_probs=log_probs, rewards=rewards, normalize_advantage=True)
+        
+        # 混合训练：添加监督损失
+        if self.supervised_weight > 0:
+            # 计算监督损失（标准的分割损失）
+            supervised_loss = self.loss_func(pred_logits, label)
+            # 组合损失
+            loss = self.supervised_weight * supervised_loss + (1 - self.supervised_weight) * rloo_loss_value
+        else:
+            # 纯 RLOO 训练
+            loss = rloo_loss_value
         
         # 构造监控指标
         with torch.no_grad():
@@ -182,8 +194,13 @@ class RLOOSemanticSegmentationLitModule(SemanticSegmentationLitModule):
                 "mean_reward": rewards.mean().item(),
                 "mean_iou": sum(all_iou) / len(all_iou),
                 "mean_dice": sum(all_dice) / len(all_dice),
-                "mean_diversity": sum(all_kl) / len(all_kl),  # 候选的多样性
+                "mean_diversity": sum(all_kl) / len(all_kl),  # 候选的多样性（归一化后的KL）
             }
+            
+            # 如果使用混合训练，记录额外指标
+            if self.supervised_weight > 0:
+                metrics["rloo_loss"] = rloo_loss_value.item()
+                metrics["supervised_loss"] = supervised_loss.item()
         
         # 记录额外指标
         for key, value in metrics.items():

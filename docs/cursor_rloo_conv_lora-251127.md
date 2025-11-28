@@ -1,5 +1,5 @@
 # 了解 RL 训练的实现步骤
-_Exported on 11/27/2025 at 20:35:24 PST from Cursor (2.1.39)_
+_Exported on 11/28/2025 at 00:46:14 PST from Cursor (2.1.39)_
 
 ---
 
@@ -27477,5 +27477,5427 @@ nohup python run_semantic_segmentation_rloo_real.py \
 
 # 查看日志
 tail -f exp3-fixed_kl-251127.log
+```
+
+---
+
+**User**
+
+训练完成：模型已保存到: outputs/rloo/isic2017/exp3_fixed_kl
+
+训练统计:
+
+  总 epochs: 5
+
+  最佳 checkpoint: /root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA/outputs/rloo/isic2017/exp3_fixed_kl/checkpoints/rloo-epoch=00-rloo_mean_reward=1.4561.ckpt
+
+  最后 checkpoint: /root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA/outputs/rloo/isic2017/exp3_fixed_kl/checkpoints/last.ckpt  接着如何用训练出的最好模型在测试集上评估性能？
+
+---
+
+**Cursor**
+
+太好了！训练完成了。让我先检查一下训练日志中的 `mean_diversity` 指标，看看修复是否生效：
+
+太好了！🎉 我看到 `rloo_mean_diversity_step` 现在有值了（~3e+5），**不再是 0**！这说明修复生效了，模型现在真的在探索多样化的候选。
+
+## 📊 评估训练好的模型
+
+使用以下命令在测试集上评估最佳模型：
+
+### 🎯 评估最佳 checkpoint（推荐）
+
+```bash
+cd /root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA
+
+python evaluate_rloo_lightning.py \
+  --checkpoint_path outputs/rloo/isic2017/exp3_fixed_kl/checkpoints/rloo-epoch=00-rloo_mean_reward=1.4561.ckpt \
+  --base_predictor_path AutogluonModels/ag-20251126_062717 \
+  --task isic2017 \
+  --batch_size 4 \
+  --output_file results_exp3_fixed_kl.json
+```
+
+### 📈 完整对比评估（包含基线）
+
+如果想同时对比基线和新模型：
+
+```bash
+python compare_rloo_models.py \
+  --base_predictor_path AutogluonModels/ag-20251126_062717 \
+  --task isic2017 \
+  --batch_size 4 \
+  --checkpoints \
+    AutogluonModels/ag-20251126_062717/model.ckpt \
+    outputs/rloo/isic2017/exp3_fixed_kl/checkpoints/rloo-epoch=00-rloo_mean_reward=1.4561.ckpt \
+  --checkpoint_names \
+    "Baseline (Conv-LoRA)" \
+    "RLOO (exp3_fixed_kl)" \
+  --output_file comparison_exp3.json
+```
+
+### ⚡ 最简单的评估命令
+
+```bash
+cd /root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA && \
+python evaluate_rloo_lightning.py \
+  --checkpoint_path outputs/rloo/isic2017/exp3_fixed_kl/checkpoints/rloo-epoch=00-rloo_mean_reward=1.4561.ckpt \
+  --base_predictor_path AutogluonModels/ag-20251126_062717 \
+  --task isic2017 \
+  --batch_size 4
+```
+
+## 🔍 关键观察
+
+从训练日志来看：
+
+**修复效果确认**：
+- ✅ `rloo_mean_diversity_step` 不再是 0（现在是 ~3e+5）
+- ✅ 采样策略确实在生成多样化的候选
+
+**训练指标**：
+- `rloo_mean_iou_step`: ~0.69-0.85（比之前的 0.91 低，说明有真实探索）
+- `rloo_mean_dice_step`: ~0.79-0.92
+- `rloo_mean_reward`: ~1.46-1.77
+
+**这是好迹象！** 训练集指标略低说明模型不再过拟合单一策略，而是在探索。
+
+## 🎯 预期结果
+
+基于之前的基线：
+- **之前基线测试集**: IoU 0.7707, Dice 0.8521
+- **exp1 (beta=0.01, 10 epochs)**: IoU 0.7624 ↓
+- **期望 exp3 (fixed KL)**: IoU > 0.77, Dice > 0.85 ✓
+
+由于这次有真实的多样性探索，测试集性能应该会有提升或至少保持。
+
+## 📊 结果对比表
+
+评估后你会看到：
+
+```
+测试样本数: 600
+平均 IoU:  0.XXXX ± 0.XXXX
+平均 Dice: 0.XXXX ± 0.XXXX
+```
+
+请运行评估命令，然后分享结果！🚀
+
+```shellscript
+cd /root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA
+
+python evaluate_rloo_lightning.py \
+  --checkpoint_path outputs/rloo/isic2017/exp3_fixed_kl/checkpoints/rloo-epoch=00-rloo_mean_reward=1.4561.ckpt \
+  --base_predictor_path AutogluonModels/ag-20251126_062717 \
+  --task isic2017 \
+  --batch_size 4 \
+  --output_file results_exp3_fixed_kl.json
+```
+
+```shellscript
+python compare_rloo_models.py \
+  --base_predictor_path AutogluonModels/ag-20251126_062717 \
+  --task isic2017 \
+  --batch_size 4 \
+  --checkpoints \
+    AutogluonModels/ag-20251126_062717/model.ckpt \
+    outputs/rloo/isic2017/exp3_fixed_kl/checkpoints/rloo-epoch=00-rloo_mean_reward=1.4561.ckpt \
+  --checkpoint_names \
+    "Baseline (Conv-LoRA)" \
+    "RLOO (exp3_fixed_kl)" \
+  --output_file comparison_exp3.json
+```
+
+```shellscript
+cd /root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA && \
+python evaluate_rloo_lightning.py \
+  --checkpoint_path outputs/rloo/isic2017/exp3_fixed_kl/checkpoints/rloo-epoch=00-rloo_mean_reward=1.4561.ckpt \
+  --base_predictor_path AutogluonModels/ag-20251126_062717 \
+  --task isic2017 \
+  --batch_size 4
+```
+
+```plaintext
+测试样本数: 600
+平均 IoU:  0.XXXX ± 0.XXXX
+平均 Dice: 0.XXXX ± 0.XXXX
+```
+
+---
+
+**User**
+
+@bash (467-475) 当前这个结果反而更差了！请分析一下，给出下一步实验的建议
+
+---
+
+**Cursor**
+
+看到结果了，确实更差了！让我深入分析一下问题。
+
+```python
+kl_div = bernoulli_kl(noisy_logits, pred_logits).mean().item()
+```
+
+```python
+kl = p * torch.log(p / q) + (1.0 - p) * torch.log((1.0 - p) / (1.0 - q))
+# 在通道与空间维度上求和，得到每个样本的 KL
+while kl.ndim > 1:
+    kl = kl.sum(dim=-1)
+return kl  # 形状 (N,)
+```
+
+```python
+kl_div = bernoulli_kl(noisy_logits, pred_logits).mean().item()
+```
+
+## 📊 结果分析
+
+让我创建一个详细的分析报告：
+
+```markdown
+# RLOO 实验结果分析与改进建议
+
+## 📊 实验结果对比
+
+| 实验 | Epochs | Beta | 采样策略 | 测试 IoU | 测试 Dice | 训练 IoU 范围 |
+|------|--------|------|----------|----------|-----------|--------------|
+| **基线 (3 epochs)** | 3 | 0.05 | noise=0.5 | **0.7707** | **0.8521** | ~0.91-0.96 |
+| **Exp1 (10 epochs)** | 10 | 0.01 | noise=0.5 | 0.7624 ↓ | 0.8466 ↓ | ~0.91-0.96 |
+| **Exp3 (fixed KL)** | 5 | 0.0 | noise=1.0-3.0 | **0.6568 ↓↓** | **0.7678 ↓↓** | ~0.52-0.88 |
+
+### 关键发现
+
+❌ **Exp3 性能大幅下降**：
+- IoU 下降 **11.4 个百分点**（0.7707 → 0.6568）
+- Dice 下降 **8.4 个百分点**（0.8521 → 0.7678）
+
+## 🔍 问题诊断
+
+### 问题 1：Diversity 指标异常（3e+5）
+
+**根本原因**：`bernoulli_kl` 函数返回的是像素级 KL 之**和**，而不是平均值。
+
+**代码位置**：`rloo_utils.py` 第 76-79 行
+```python
+kl = p * torch.log(p / q) + (1.0 - p) * torch.log((1.0 - p) / (1.0 - q))
+while kl.ndim > 1:
+    kl = kl.sum(dim=-1)  # ← 求和，不是平均！
+return kl  # 对于 256x256 图像 = ~65536 个像素的总和
+```
+
+**影响**：
+- diversity = 3e+5 不是真实的 KL 散度（应该是 ~4.5-5.0）
+- 无法有效监控采样多样性
+
+### 问题 2：采样噪声过大
+
+**当前设置**：
+```python
+temperature = 0.5 + 1.5 * (g / num_generations)  # 0.5 → 2.0
+noise_scale = 1.0 + 2.0 * (g / num_generations)  # 1.0 → 3.0
+```
+
+**后果**：
+- 生成的候选质量极差
+- 训练集 IoU 低至 **0.52-0.59**（部分样本）
+- 模型学到的是**低质量策略**
+
+**对比**：
+- 基线（noise=0.5）：训练 IoU ~0.91-0.96，测试 IoU 0.77
+- Exp3（noise=1.0-3.0）：训练 IoU ~0.52-0.88，测试 IoU 0.66 ↓
+
+### 问题 3：过度探索 vs 利用平衡
+
+**现象**：
+- 太多探索（noise 太大）→ 候选质量差
+- 模型优化错误的目标：学习生成低质量的 mask
+
+**RLOO 的假设**：
+- 需要多样化的**高质量**候选
+- 候选之间应该有差异，但都应该是合理的分割
+
+**当前情况**：
+- 候选太随机，大部分是噪声
+- 偏离原始预测太远，失去了监督学习的基础
+
+## 🔧 根本问题
+
+### 核心矛盾
+
+**RLOO 适用场景**：
+- 有一个合理的初始策略
+- 通过小幅扰动探索改进
+- 候选质量相近，细微差异决定 reward
+
+**当前情况**：
+- 采样噪声太大 → 候选质量极差
+- 已经有很好的监督模型（IoU 0.77）
+- RLOO 反而破坏了原有性能
+
+### 为什么基线（noise=0.5）也没提升？
+
+1. **KL 散度计算错误**：`ref_logits = pred_logits`，没有真正的参考
+2. **采样多样性不足**：noise=0.5 可能还是太小
+3. **RLOO 本身可能不适合这个任务**：
+   - 分割是像素密集预测
+   - 一次预测 65536 个像素
+   - 微小噪声难以产生有意义的探索
+
+## 💡 改进方案
+
+### 方案 A：保守采样 + 混合训练（推荐）
+
+**策略**：
+1. 大幅降低采样噪声（0.1-0.5）
+2. 添加监督损失（30-50%）
+3. 使用较少的 epochs（3-5）
+
+**优点**：
+- 保持监督学习的稳定性
+- RL 提供微调
+- 不会破坏原有性能
+
+**实现**：
+```python
+# 1. 降低噪声
+temperature = 1.0  # 固定温度
+noise_scale = 0.1 + 0.4 * (g / num_generations)  # 0.1 → 0.5
+
+# 2. 混合损失
+supervised_loss = self.loss_func(pred_logits, gt_mask)
+rloo_loss_value = rloo_loss(log_probs, rewards)
+total_loss = 0.4 * supervised_loss + 0.6 * rloo_loss_value
+```
+
+### 方案 B：放弃 RLOO，改用 PPO
+
+**原因**：
+- RLOO 的 leave-one-out baseline 可能不适合密集预测
+- PPO 有更稳定的更新机制
+- clip 机制防止过大的策略更新
+
+**缺点**：
+- 实现更复杂
+- 需要更多工程工作
+
+### 方案 C：回归监督学习 + 改进基础模型
+
+**认清现实**：
+- 当前监督模型（IoU 0.77）已经很好
+- RLOO 没有带来提升，反而下降
+- 应该改进数据、模型或训练方法
+
+**建议**：
+1. 增加数据增强（测试时增强 TTA）
+2. 改进 loss 函数（focal loss, boundary loss）
+3. 调整模型架构（更多 Conv-LoRA 层）
+4. 使用更大的基础模型
+
+### 方案 D：修复 Diversity + 极小噪声
+
+**最后一试**：
+1. 修复 diversity 计算（除以像素数）
+2. 使用极小的噪声（0.05-0.2）
+3. 只训练 1-2 个 epochs
+4. 如果还是下降，就放弃 RLOO
+
+## 📋 推荐的实验计划
+
+### 优先级 1：混合训练（方案 A）
+
+```bash
+python run_semantic_segmentation_rloo_real.py \
+  --task isic2017 \
+  --ckpt_path AutogluonModels/ag-20251126_062717 \
+  --output_dir outputs/rloo/isic2017/exp4_hybrid \
+  --num_generations 4 \
+  --beta 0.0 \
+  --reward_type combo \
+  --learning_rate 1e-5 \
+  --epochs 3 \
+  --batch_size 2 \
+  --supervised_weight 0.4  # 需要添加此参数
+```
+
+**修改需求**：
+1. 在 `lit_semantic_seg_rloo.py` 中降低采样噪声
+2. 添加混合损失逻辑
+3. 修复 diversity 计算
+
+### 优先级 2：修复 Diversity + 微小噪声
+
+只修复技术问题，看是否有帮助：
+
+```bash
+# 修改采样策略后
+python run_semantic_segmentation_rloo_real.py \
+  --task isic2017 \
+  --ckpt_path AutogluonModels/ag-20251126_062717 \
+  --output_dir outputs/rloo/isic2017/exp4_tiny_noise \
+  --num_generations 4 \
+  --beta 0.0 \
+  --reward_type combo \
+  --learning_rate 5e-6 \
+  --epochs 2 \
+  --batch_size 2
+```
+
+### 优先级 3：放弃 RLOO，改进基础模型
+
+如果上述都失败：
+
+```python
+# 回到监督学习
+predictor.fit(
+    train_data="data/isic2017/train.csv",
+    hyperparameters={
+        "optimization.learning_rate": 1e-5,
+        "optimization.max_epochs": 20,
+        "data.augmentation": "strong",
+        "loss": "focal_loss",  # 改进 loss
+    }
+)
+```
+
+## 🎯 成功标准
+
+### 最低要求
+- 测试 IoU ≥ 0.77（不比基线差）
+- 训练稳定，不崩溃
+
+### 理想目标
+- 测试 IoU > 0.78（超过基线 1%）
+- 训练集与测试集差距 < 10%
+
+### 放弃标准
+如果连续 3 个实验都无法达到最低要求，建议：
+1. 放弃 RLOO
+2. 专注于改进监督学习
+3. 考虑其他方法（TTA、模型集成等）
+
+## 🔍 深层思考
+
+### 为什么 RLOO 在这个任务上困难？
+
+1. **语义分割的特殊性**：
+   - 65536 个像素的联合预测
+   - 像素之间高度相关
+   - 不是单一的离散决策
+
+2. **监督信号已经很强**：
+   - 每个像素都有 GT 标签
+   - 监督学习已经很有效（IoU 0.77）
+   - RL 很难超越密集监督
+
+3. **采样空间过大**：
+   - 2^65536 种可能的 mask
+   - 随机采样很难找到好的候选
+   - 需要结构化的探索
+
+4. **Reward 稀疏性**：
+   - IoU/Dice 是全局指标
+   - 单个像素的改变影响很小
+   - 梯度信号弱
+
+### 结论
+
+**RLOO 可能根本不适合密集预测任务**，特别是当监督学习已经表现很好时。
+
+建议：
+1. 先尝试方案 A（混合训练）
+2. 如果失败，考虑放弃 RLOO
+3. 转而改进监督学习或使用其他技术
+
+---
+
+**下一步行动**：实现方案 A（混合训练 + 保守采样）
+
+```
+
+现在让我实现**方案 A：混合训练 + 保守采样**：
+
+```python
+"""
+RLOO-enabled SemanticSegmentationLitModule
+扩展 AutoGluon 的 SemanticSegmentationLitModule 以支持 RLOO 训练
+"""
+import logging
+from typing import Callable, Dict, Optional
+
+import torch
+import torchmetrics
+from transformers.models.mask2former.modeling_mask2former import Mask2FormerLoss
+
+from autogluon.multimodal.constants import CLASS_LOGITS, LOGITS, LABEL, MOE_LOSS, SEMANTIC_MASK, WEIGHT
+from autogluon.multimodal.models.utils import run_model
+from autogluon.multimodal.optim.lit_semantic_seg import SemanticSegmentationLitModule
+from autogluon.multimodal.optim.metrics.semantic_seg_metrics import Multiclass_IoU
+
+from rloo_utils import (
+    bernoulli_kl,
+    compute_segmentation_reward,
+    mask_log_prob_from_logits,
+    rloo_loss,
+)
+
+logger = logging.getLogger(__name__)
+
+
+class RLOOSemanticSegmentationLitModule(SemanticSegmentationLitModule):
+    """
+    扩展 SemanticSegmentationLitModule 以支持 RLOO 强化学习训练。
+    
+    在 RLOO 模式下，训练步骤会：
+    1. 对每个样本生成 G 个候选 mask
+    2. 基于 GT mask 计算每个候选的 reward（IoU/Dice）
+    3. 应用 KL 正则以避免偏离参考策略过远
+    4. 使用 leave-one-out baseline 计算 advantage
+    5. 通过 REINFORCE 风格的 loss 更新策略
+    """
+    
+    def __init__(
+        self,
+        model,
+        # RLOO 相关参数
+        enable_rloo: bool = False,
+        num_generations: int = 4,
+        beta: float = 0.05,
+        reward_type: str = "combo",
+        supervised_weight: float = 0.0,  # 混合训练：监督损失权重
+        ref_logits_cache: Optional[Dict] = None,
+        # 其他参数传递给父类
+        **kwargs
+    ):
+        """
+        Parameters
+        ----------
+        model
+            分割模型
+        enable_rloo
+            是否启用 RLOO 训练模式
+        num_generations
+            每个样本生成的候选 mask 数量 G
+        beta
+            KL 正则系数，控制偏离参考策略的程度
+        reward_type
+            reward 类型："iou", "dice", 或 "combo"
+        ref_logits_cache
+            可选的参考 logits 缓存（用于 KL 计算）
+            如果为 None，则使用当前模型的第一次前向传播作为参考
+        **kwargs
+            传递给父类的其他参数
+        """
+        super().__init__(model=model, **kwargs)
+        
+        self.enable_rloo = enable_rloo
+        self.num_generations = num_generations
+        self.beta = beta
+        self.reward_type = reward_type
+        self.ref_logits_cache = ref_logits_cache if ref_logits_cache is not None else {}
+        
+    def _rloo_training_step(self, batch: Dict):
+        """
+        RLOO 训练步骤：生成多个候选并计算 REINFORCE loss
+        
+        关键改进：
+        1. 只进行一次前向传播获取 logits（保留梯度）
+        2. 通过在 logits 上采样生成 G 个候选 mask
+        3. 计算每个候选的 reward 和 log_prob
+        4. 使用 REINFORCE + leave-one-out baseline 更新策略
+        """
+        # 获取 GT label
+        label = batch[self.model.label_key]
+        B = label.shape[0]
+        device = label.device
+        
+        # 前向传播获取 logits（保留梯度！）
+        output = run_model(self.model, batch)
+        pred_logits = output[self.model.prefix][LOGITS]
+        
+        # 收集所有候选的 log_probs 和 rewards
+        all_log_probs = []
+        all_rewards = []
+        all_iou = []
+        all_dice = []
+        all_kl = []
+        
+        # 生成 G 个候选 mask
+        # 改进的采样策略：使用温度采样和递增的噪声强度
+        for g in range(self.num_generations):
+            # 在相同的 logits 基础上生成不同的候选
+            if g == 0:
+                # 第一个候选使用确定性预测（模式，即阈值化）
+                probs = torch.sigmoid(pred_logits)
+                sampled_mask = (probs > 0.5).float()
+            else:
+                # 后续候选：使用更激进的采样策略以增加多样性
+                
+                # 策略1: 温度采样 - 温度从 0.5 递增到 2.0
+                # 更高的温度使得预测更加"平滑"，增加不确定性
+                temperature = 0.5 + 1.5 * (g / self.num_generations)
+                scaled_logits = pred_logits / temperature
+                
+                # 策略2: 添加更大的噪声 - 噪声强度从 1.0 递增到 3.0
+                # 这确保后面的候选与原始预测有显著差异
+                noise_scale = 1.0 + 2.0 * (g / self.num_generations)
+                noisy_logits = scaled_logits + torch.randn_like(pred_logits) * noise_scale
+                
+                # 策略3: 随机丢弃（类似 dropout）
+                # 对于奇数索引的候选，随机将一些 logits 设为 0
+                if g % 2 == 1:
+                    dropout_rate = 0.1  # 10% 的像素被随机丢弃
+                    dropout_mask = (torch.rand_like(noisy_logits) > dropout_rate).float()
+                    noisy_logits = noisy_logits * dropout_mask
+                
+                probs = torch.sigmoid(noisy_logits)
+                # 使用 Bernoulli 采样
+                sampled_mask = torch.bernoulli(probs)
+            
+            # 计算 reward（基于 GT）
+            # 注意：reward 计算不需要梯度
+            with torch.no_grad():
+                rewards_metric = compute_segmentation_reward(
+                    pred_masks=sampled_mask,
+                    gt_masks=label,
+                    reward_type=self.reward_type,
+                )
+                
+                # 记录单独的 IoU 和 Dice 用于监控
+                iou_vals = compute_segmentation_reward(sampled_mask, label, "iou")
+                dice_vals = compute_segmentation_reward(sampled_mask, label, "dice")
+                all_iou.append(iou_vals.mean().item())
+                all_dice.append(dice_vals.mean().item())
+                
+                # 计算采样多样性：当前候选的概率分布与第一个候选的差异
+                # 这可以用来监控采样的多样性
+                if g == 0:
+                    first_candidate_probs = torch.sigmoid(pred_logits)
+                    kl_div = 0.0
+                else:
+                    current_probs = torch.sigmoid(noisy_logits)
+                    # KL散度近似：衡量当前候选与第一个候选的差异
+                    kl_div = bernoulli_kl(noisy_logits, pred_logits).mean().item()
+                all_kl.append(kl_div)
+                
+                # 使用原始 reward（不加 KL 惩罚）
+                # 如果 beta > 0，我们可以在这里添加 KL 惩罚
+                rewards_total = rewards_metric
+            
+            # 计算 log π(M | logits)（需要梯度！）
+            log_p = mask_log_prob_from_logits(sampled_mask.detach(), pred_logits)
+            
+            all_log_probs.append(log_p)
+            all_rewards.append(rewards_total)
+        
+        # Stack 所有候选
+        log_probs = torch.stack(all_log_probs, dim=1)  # (B, G)
+        rewards = torch.stack(all_rewards, dim=1)  # (B, G)
+        
+        # 计算 RLOO loss（会有梯度）
+        loss = rloo_loss(log_probs=log_probs, rewards=rewards, normalize_advantage=True)
+        
+        # 构造监控指标
+        with torch.no_grad():
+            metrics = {
+                "mean_reward": rewards.mean().item(),
+                "mean_iou": sum(all_iou) / len(all_iou),
+                "mean_dice": sum(all_dice) / len(all_dice),
+                "mean_diversity": sum(all_kl) / len(all_kl),  # 候选的多样性
+            }
+        
+        # 记录额外指标
+        for key, value in metrics.items():
+            self.log(f"rloo_{key}", value, on_step=True, on_epoch=True, prog_bar=True)
+        
+        return loss
+    
+    def training_step(self, batch, batch_idx):
+        """
+        重写训练步骤以支持 RLOO 模式
+        """
+        if self.enable_rloo:
+            # RLOO 训练模式
+            loss = self._rloo_training_step(batch)
+            
+            if not self.automatic_optimization:
+                # 手动优化
+                optimizer = self.optimizers()
+                lr_scheduler = self.lr_schedulers()
+                loss = loss / self.hparams.accumulate_grad_batches
+                self.manual_backward(loss)
+                
+                if (batch_idx + 1) % self.hparams.accumulate_grad_batches == 0 or self.trainer.is_last_batch:
+                    optimizer.step()
+                    optimizer.zero_grad()
+                    lr_scheduler.step()
+            
+            self.log("train_loss", loss)
+            return loss
+        else:
+            # 标准监督训练模式
+            return super().training_step(batch, batch_idx)
+
+
+```
+
+```python
+"""
+RLOO-enabled SemanticSegmentationLitModule
+扩展 AutoGluon 的 SemanticSegmentationLitModule 以支持 RLOO 训练
+"""
+import logging
+from typing import Callable, Dict, Optional
+
+import torch
+import torchmetrics
+from transformers.models.mask2former.modeling_mask2former import Mask2FormerLoss
+
+from autogluon.multimodal.constants import CLASS_LOGITS, LOGITS, LABEL, MOE_LOSS, SEMANTIC_MASK, WEIGHT
+from autogluon.multimodal.models.utils import run_model
+from autogluon.multimodal.optim.lit_semantic_seg import SemanticSegmentationLitModule
+from autogluon.multimodal.optim.metrics.semantic_seg_metrics import Multiclass_IoU
+
+from rloo_utils import (
+    bernoulli_kl,
+    compute_segmentation_reward,
+    mask_log_prob_from_logits,
+    rloo_loss,
+)
+
+logger = logging.getLogger(__name__)
+
+
+class RLOOSemanticSegmentationLitModule(SemanticSegmentationLitModule):
+    """
+    扩展 SemanticSegmentationLitModule 以支持 RLOO 强化学习训练。
+    
+    在 RLOO 模式下，训练步骤会：
+    1. 对每个样本生成 G 个候选 mask
+    2. 基于 GT mask 计算每个候选的 reward（IoU/Dice）
+    3. 应用 KL 正则以避免偏离参考策略过远
+    4. 使用 leave-one-out baseline 计算 advantage
+    5. 通过 REINFORCE 风格的 loss 更新策略
+    """
+    
+    def __init__(
+        self,
+        model,
+        # RLOO 相关参数
+        enable_rloo: bool = False,
+        num_generations: int = 4,
+        beta: float = 0.05,
+        reward_type: str = "combo",
+        supervised_weight: float = 0.0,  # 混合训练：监督损失权重
+        ref_logits_cache: Optional[Dict] = None,
+        # 其他参数传递给父类
+        **kwargs
+    ):
+        """
+        Parameters
+        ----------
+        model
+            分割模型
+        enable_rloo
+            是否启用 RLOO 训练模式
+        num_generations
+            每个样本生成的候选 mask 数量 G
+        beta
+            KL 正则系数，控制偏离参考策略的程度
+        reward_type
+            reward 类型："iou", "dice", 或 "combo"
+        supervised_weight
+            混合训练中监督损失的权重（0-1之间）
+            total_loss = supervised_weight * supervised_loss + (1-supervised_weight) * rloo_loss
+            如果为 0，则纯 RLOO；如果为 1，则纯监督
+        ref_logits_cache
+            可选的参考 logits 缓存（用于 KL 计算）
+            如果为 None，则使用当前模型的第一次前向传播作为参考
+        **kwargs
+            传递给父类的其他参数
+        """
+        super().__init__(model=model, **kwargs)
+        
+        self.enable_rloo = enable_rloo
+        self.num_generations = num_generations
+        self.beta = beta
+        self.reward_type = reward_type
+        self.supervised_weight = supervised_weight
+        self.ref_logits_cache = ref_logits_cache if ref_logits_cache is not None else {}
+        
+    def _rloo_training_step(self, batch: Dict):
+        """
+        RLOO 训练步骤：生成多个候选并计算 REINFORCE loss
+        
+        关键改进：
+        1. 只进行一次前向传播获取 logits（保留梯度）
+        2. 通过在 logits 上采样生成 G 个候选 mask
+        3. 计算每个候选的 reward 和 log_prob
+        4. 使用 REINFORCE + leave-one-out baseline 更新策略
+        """
+        # 获取 GT label
+        label = batch[self.model.label_key]
+        B = label.shape[0]
+        device = label.device
+        
+        # 前向传播获取 logits（保留梯度！）
+        output = run_model(self.model, batch)
+        pred_logits = output[self.model.prefix][LOGITS]
+        
+        # 收集所有候选的 log_probs 和 rewards
+        all_log_probs = []
+        all_rewards = []
+        all_iou = []
+        all_dice = []
+        all_kl = []
+        
+        # 生成 G 个候选 mask
+        # 改进的采样策略：使用温度采样和递增的噪声强度
+        for g in range(self.num_generations):
+            # 在相同的 logits 基础上生成不同的候选
+            if g == 0:
+                # 第一个候选使用确定性预测（模式，即阈值化）
+                probs = torch.sigmoid(pred_logits)
+                sampled_mask = (probs > 0.5).float()
+            else:
+                # 后续候选：使用更激进的采样策略以增加多样性
+                
+                # 策略1: 温度采样 - 温度从 0.5 递增到 2.0
+                # 更高的温度使得预测更加"平滑"，增加不确定性
+                temperature = 0.5 + 1.5 * (g / self.num_generations)
+                scaled_logits = pred_logits / temperature
+                
+                # 策略2: 添加更大的噪声 - 噪声强度从 1.0 递增到 3.0
+                # 这确保后面的候选与原始预测有显著差异
+                noise_scale = 1.0 + 2.0 * (g / self.num_generations)
+                noisy_logits = scaled_logits + torch.randn_like(pred_logits) * noise_scale
+                
+                # 策略3: 随机丢弃（类似 dropout）
+                # 对于奇数索引的候选，随机将一些 logits 设为 0
+                if g % 2 == 1:
+                    dropout_rate = 0.1  # 10% 的像素被随机丢弃
+                    dropout_mask = (torch.rand_like(noisy_logits) > dropout_rate).float()
+                    noisy_logits = noisy_logits * dropout_mask
+                
+                probs = torch.sigmoid(noisy_logits)
+                # 使用 Bernoulli 采样
+                sampled_mask = torch.bernoulli(probs)
+            
+            # 计算 reward（基于 GT）
+            # 注意：reward 计算不需要梯度
+            with torch.no_grad():
+                rewards_metric = compute_segmentation_reward(
+                    pred_masks=sampled_mask,
+                    gt_masks=label,
+                    reward_type=self.reward_type,
+                )
+                
+                # 记录单独的 IoU 和 Dice 用于监控
+                iou_vals = compute_segmentation_reward(sampled_mask, label, "iou")
+                dice_vals = compute_segmentation_reward(sampled_mask, label, "dice")
+                all_iou.append(iou_vals.mean().item())
+                all_dice.append(dice_vals.mean().item())
+                
+                # 计算采样多样性：当前候选的概率分布与第一个候选的差异
+                # 这可以用来监控采样的多样性
+                if g == 0:
+                    first_candidate_probs = torch.sigmoid(pred_logits)
+                    kl_div = 0.0
+                else:
+                    current_probs = torch.sigmoid(noisy_logits)
+                    # KL散度近似：衡量当前候选与第一个候选的差异
+                    kl_div = bernoulli_kl(noisy_logits, pred_logits).mean().item()
+                all_kl.append(kl_div)
+                
+                # 使用原始 reward（不加 KL 惩罚）
+                # 如果 beta > 0，我们可以在这里添加 KL 惩罚
+                rewards_total = rewards_metric
+            
+            # 计算 log π(M | logits)（需要梯度！）
+            log_p = mask_log_prob_from_logits(sampled_mask.detach(), pred_logits)
+            
+            all_log_probs.append(log_p)
+            all_rewards.append(rewards_total)
+        
+        # Stack 所有候选
+        log_probs = torch.stack(all_log_probs, dim=1)  # (B, G)
+        rewards = torch.stack(all_rewards, dim=1)  # (B, G)
+        
+        # 计算 RLOO loss（会有梯度）
+        loss = rloo_loss(log_probs=log_probs, rewards=rewards, normalize_advantage=True)
+        
+        # 构造监控指标
+        with torch.no_grad():
+            metrics = {
+                "mean_reward": rewards.mean().item(),
+                "mean_iou": sum(all_iou) / len(all_iou),
+                "mean_dice": sum(all_dice) / len(all_dice),
+                "mean_diversity": sum(all_kl) / len(all_kl),  # 候选的多样性
+            }
+        
+        # 记录额外指标
+        for key, value in metrics.items():
+            self.log(f"rloo_{key}", value, on_step=True, on_epoch=True, prog_bar=True)
+        
+        return loss
+    
+    def training_step(self, batch, batch_idx):
+        """
+        重写训练步骤以支持 RLOO 模式
+        """
+        if self.enable_rloo:
+            # RLOO 训练模式
+            loss = self._rloo_training_step(batch)
+            
+            if not self.automatic_optimization:
+                # 手动优化
+                optimizer = self.optimizers()
+                lr_scheduler = self.lr_schedulers()
+                loss = loss / self.hparams.accumulate_grad_batches
+                self.manual_backward(loss)
+                
+                if (batch_idx + 1) % self.hparams.accumulate_grad_batches == 0 or self.trainer.is_last_batch:
+                    optimizer.step()
+                    optimizer.zero_grad()
+                    lr_scheduler.step()
+            
+            self.log("train_loss", loss)
+            return loss
+        else:
+            # 标准监督训练模式
+            return super().training_step(batch, batch_idx)
+
+
+```
+
+```python
+"""
+RLOO-enabled SemanticSegmentationLitModule
+扩展 AutoGluon 的 SemanticSegmentationLitModule 以支持 RLOO 训练
+"""
+import logging
+from typing import Callable, Dict, Optional
+
+import torch
+import torchmetrics
+from transformers.models.mask2former.modeling_mask2former import Mask2FormerLoss
+
+from autogluon.multimodal.constants import CLASS_LOGITS, LOGITS, LABEL, MOE_LOSS, SEMANTIC_MASK, WEIGHT
+from autogluon.multimodal.models.utils import run_model
+from autogluon.multimodal.optim.lit_semantic_seg import SemanticSegmentationLitModule
+from autogluon.multimodal.optim.metrics.semantic_seg_metrics import Multiclass_IoU
+
+from rloo_utils import (
+    bernoulli_kl,
+    compute_segmentation_reward,
+    mask_log_prob_from_logits,
+    rloo_loss,
+)
+
+logger = logging.getLogger(__name__)
+
+
+class RLOOSemanticSegmentationLitModule(SemanticSegmentationLitModule):
+    """
+    扩展 SemanticSegmentationLitModule 以支持 RLOO 强化学习训练。
+    
+    在 RLOO 模式下，训练步骤会：
+    1. 对每个样本生成 G 个候选 mask
+    2. 基于 GT mask 计算每个候选的 reward（IoU/Dice）
+    3. 应用 KL 正则以避免偏离参考策略过远
+    4. 使用 leave-one-out baseline 计算 advantage
+    5. 通过 REINFORCE 风格的 loss 更新策略
+    """
+    
+    def __init__(
+        self,
+        model,
+        # RLOO 相关参数
+        enable_rloo: bool = False,
+        num_generations: int = 4,
+        beta: float = 0.05,
+        reward_type: str = "combo",
+        supervised_weight: float = 0.0,  # 混合训练：监督损失权重
+        ref_logits_cache: Optional[Dict] = None,
+        # 其他参数传递给父类
+        **kwargs
+    ):
+        """
+        Parameters
+        ----------
+        model
+            分割模型
+        enable_rloo
+            是否启用 RLOO 训练模式
+        num_generations
+            每个样本生成的候选 mask 数量 G
+        beta
+            KL 正则系数，控制偏离参考策略的程度
+        reward_type
+            reward 类型："iou", "dice", 或 "combo"
+        supervised_weight
+            混合训练中监督损失的权重（0-1之间）
+            total_loss = supervised_weight * supervised_loss + (1-supervised_weight) * rloo_loss
+            如果为 0，则纯 RLOO；如果为 1，则纯监督
+        ref_logits_cache
+            可选的参考 logits 缓存（用于 KL 计算）
+            如果为 None，则使用当前模型的第一次前向传播作为参考
+        **kwargs
+            传递给父类的其他参数
+        """
+        super().__init__(model=model, **kwargs)
+        
+        self.enable_rloo = enable_rloo
+        self.num_generations = num_generations
+        self.beta = beta
+        self.reward_type = reward_type
+        self.supervised_weight = supervised_weight
+        self.ref_logits_cache = ref_logits_cache if ref_logits_cache is not None else {}
+        
+    def _rloo_training_step(self, batch: Dict):
+        """
+        RLOO 训练步骤：生成多个候选并计算 REINFORCE loss
+        
+        关键改进：
+        1. 只进行一次前向传播获取 logits（保留梯度）
+        2. 通过在 logits 上采样生成 G 个候选 mask
+        3. 计算每个候选的 reward 和 log_prob
+        4. 使用 REINFORCE + leave-one-out baseline 更新策略
+        """
+        # 获取 GT label
+        label = batch[self.model.label_key]
+        B = label.shape[0]
+        device = label.device
+        
+        # 前向传播获取 logits（保留梯度！）
+        output = run_model(self.model, batch)
+        pred_logits = output[self.model.prefix][LOGITS]
+        
+        # 收集所有候选的 log_probs 和 rewards
+        all_log_probs = []
+        all_rewards = []
+        all_iou = []
+        all_dice = []
+        all_kl = []
+        
+        # 生成 G 个候选 mask
+        # 改进的采样策略：使用温度采样和递增的噪声强度
+        for g in range(self.num_generations):
+            # 在相同的 logits 基础上生成不同的候选
+            if g == 0:
+                # 第一个候选使用确定性预测（模式，即阈值化）
+                probs = torch.sigmoid(pred_logits)
+                sampled_mask = (probs > 0.5).float()
+            else:
+                # 后续候选：使用保守的采样策略
+                # 目标：生成高质量但略有差异的候选
+                
+                # 策略1: 固定温度（轻微平滑）
+                temperature = 1.0
+                scaled_logits = pred_logits / temperature
+                
+                # 策略2: 小噪声 - 从 0.1 递增到 0.5（保守）
+                # 确保候选仍然接近原始预测，避免生成低质量 mask
+                noise_scale = 0.1 + 0.4 * (g / self.num_generations)
+                noisy_logits = scaled_logits + torch.randn_like(pred_logits) * noise_scale
+                
+                probs = torch.sigmoid(noisy_logits)
+                # 使用 Bernoulli 采样
+                sampled_mask = torch.bernoulli(probs)
+            
+            # 计算 reward（基于 GT）
+            # 注意：reward 计算不需要梯度
+            with torch.no_grad():
+                rewards_metric = compute_segmentation_reward(
+                    pred_masks=sampled_mask,
+                    gt_masks=label,
+                    reward_type=self.reward_type,
+                )
+                
+                # 记录单独的 IoU 和 Dice 用于监控
+                iou_vals = compute_segmentation_reward(sampled_mask, label, "iou")
+                dice_vals = compute_segmentation_reward(sampled_mask, label, "dice")
+                all_iou.append(iou_vals.mean().item())
+                all_dice.append(dice_vals.mean().item())
+                
+                # 计算采样多样性：当前候选的概率分布与第一个候选的差异
+                # 这可以用来监控采样的多样性
+                if g == 0:
+                    first_candidate_probs = torch.sigmoid(pred_logits)
+                    kl_div = 0.0
+                else:
+                    current_probs = torch.sigmoid(noisy_logits)
+                    # KL散度近似：衡量当前候选与第一个候选的差异
+                    kl_div = bernoulli_kl(noisy_logits, pred_logits).mean().item()
+                all_kl.append(kl_div)
+                
+                # 使用原始 reward（不加 KL 惩罚）
+                # 如果 beta > 0，我们可以在这里添加 KL 惩罚
+                rewards_total = rewards_metric
+            
+            # 计算 log π(M | logits)（需要梯度！）
+            log_p = mask_log_prob_from_logits(sampled_mask.detach(), pred_logits)
+            
+            all_log_probs.append(log_p)
+            all_rewards.append(rewards_total)
+        
+        # Stack 所有候选
+        log_probs = torch.stack(all_log_probs, dim=1)  # (B, G)
+        rewards = torch.stack(all_rewards, dim=1)  # (B, G)
+        
+        # 计算 RLOO loss（会有梯度）
+        loss = rloo_loss(log_probs=log_probs, rewards=rewards, normalize_advantage=True)
+        
+        # 构造监控指标
+        with torch.no_grad():
+            metrics = {
+                "mean_reward": rewards.mean().item(),
+                "mean_iou": sum(all_iou) / len(all_iou),
+                "mean_dice": sum(all_dice) / len(all_dice),
+                "mean_diversity": sum(all_kl) / len(all_kl),  # 候选的多样性
+            }
+        
+        # 记录额外指标
+        for key, value in metrics.items():
+            self.log(f"rloo_{key}", value, on_step=True, on_epoch=True, prog_bar=True)
+        
+        return loss
+    
+    def training_step(self, batch, batch_idx):
+        """
+        重写训练步骤以支持 RLOO 模式
+        """
+        if self.enable_rloo:
+            # RLOO 训练模式
+            loss = self._rloo_training_step(batch)
+            
+            if not self.automatic_optimization:
+                # 手动优化
+                optimizer = self.optimizers()
+                lr_scheduler = self.lr_schedulers()
+                loss = loss / self.hparams.accumulate_grad_batches
+                self.manual_backward(loss)
+                
+                if (batch_idx + 1) % self.hparams.accumulate_grad_batches == 0 or self.trainer.is_last_batch:
+                    optimizer.step()
+                    optimizer.zero_grad()
+                    lr_scheduler.step()
+            
+            self.log("train_loss", loss)
+            return loss
+        else:
+            # 标准监督训练模式
+            return super().training_step(batch, batch_idx)
+
+
+```
+
+```python
+"""
+RLOO-enabled SemanticSegmentationLitModule
+扩展 AutoGluon 的 SemanticSegmentationLitModule 以支持 RLOO 训练
+"""
+import logging
+from typing import Callable, Dict, Optional
+
+import torch
+import torchmetrics
+from transformers.models.mask2former.modeling_mask2former import Mask2FormerLoss
+
+from autogluon.multimodal.constants import CLASS_LOGITS, LOGITS, LABEL, MOE_LOSS, SEMANTIC_MASK, WEIGHT
+from autogluon.multimodal.models.utils import run_model
+from autogluon.multimodal.optim.lit_semantic_seg import SemanticSegmentationLitModule
+from autogluon.multimodal.optim.metrics.semantic_seg_metrics import Multiclass_IoU
+
+from rloo_utils import (
+    bernoulli_kl,
+    compute_segmentation_reward,
+    mask_log_prob_from_logits,
+    rloo_loss,
+)
+
+logger = logging.getLogger(__name__)
+
+
+class RLOOSemanticSegmentationLitModule(SemanticSegmentationLitModule):
+    """
+    扩展 SemanticSegmentationLitModule 以支持 RLOO 强化学习训练。
+    
+    在 RLOO 模式下，训练步骤会：
+    1. 对每个样本生成 G 个候选 mask
+    2. 基于 GT mask 计算每个候选的 reward（IoU/Dice）
+    3. 应用 KL 正则以避免偏离参考策略过远
+    4. 使用 leave-one-out baseline 计算 advantage
+    5. 通过 REINFORCE 风格的 loss 更新策略
+    """
+    
+    def __init__(
+        self,
+        model,
+        # RLOO 相关参数
+        enable_rloo: bool = False,
+        num_generations: int = 4,
+        beta: float = 0.05,
+        reward_type: str = "combo",
+        supervised_weight: float = 0.0,  # 混合训练：监督损失权重
+        ref_logits_cache: Optional[Dict] = None,
+        # 其他参数传递给父类
+        **kwargs
+    ):
+        """
+        Parameters
+        ----------
+        model
+            分割模型
+        enable_rloo
+            是否启用 RLOO 训练模式
+        num_generations
+            每个样本生成的候选 mask 数量 G
+        beta
+            KL 正则系数，控制偏离参考策略的程度
+        reward_type
+            reward 类型："iou", "dice", 或 "combo"
+        supervised_weight
+            混合训练中监督损失的权重（0-1之间）
+            total_loss = supervised_weight * supervised_loss + (1-supervised_weight) * rloo_loss
+            如果为 0，则纯 RLOO；如果为 1，则纯监督
+        ref_logits_cache
+            可选的参考 logits 缓存（用于 KL 计算）
+            如果为 None，则使用当前模型的第一次前向传播作为参考
+        **kwargs
+            传递给父类的其他参数
+        """
+        super().__init__(model=model, **kwargs)
+        
+        self.enable_rloo = enable_rloo
+        self.num_generations = num_generations
+        self.beta = beta
+        self.reward_type = reward_type
+        self.supervised_weight = supervised_weight
+        self.ref_logits_cache = ref_logits_cache if ref_logits_cache is not None else {}
+        
+    def _rloo_training_step(self, batch: Dict):
+        """
+        RLOO 训练步骤：生成多个候选并计算 REINFORCE loss
+        
+        关键改进：
+        1. 只进行一次前向传播获取 logits（保留梯度）
+        2. 通过在 logits 上采样生成 G 个候选 mask
+        3. 计算每个候选的 reward 和 log_prob
+        4. 使用 REINFORCE + leave-one-out baseline 更新策略
+        """
+        # 获取 GT label
+        label = batch[self.model.label_key]
+        B = label.shape[0]
+        device = label.device
+        
+        # 前向传播获取 logits（保留梯度！）
+        output = run_model(self.model, batch)
+        pred_logits = output[self.model.prefix][LOGITS]
+        
+        # 收集所有候选的 log_probs 和 rewards
+        all_log_probs = []
+        all_rewards = []
+        all_iou = []
+        all_dice = []
+        all_kl = []
+        
+        # 生成 G 个候选 mask
+        # 改进的采样策略：使用温度采样和递增的噪声强度
+        for g in range(self.num_generations):
+            # 在相同的 logits 基础上生成不同的候选
+            if g == 0:
+                # 第一个候选使用确定性预测（模式，即阈值化）
+                probs = torch.sigmoid(pred_logits)
+                sampled_mask = (probs > 0.5).float()
+            else:
+                # 后续候选：使用保守的采样策略
+                # 目标：生成高质量但略有差异的候选
+                
+                # 策略1: 固定温度（轻微平滑）
+                temperature = 1.0
+                scaled_logits = pred_logits / temperature
+                
+                # 策略2: 小噪声 - 从 0.1 递增到 0.5（保守）
+                # 确保候选仍然接近原始预测，避免生成低质量 mask
+                noise_scale = 0.1 + 0.4 * (g / self.num_generations)
+                noisy_logits = scaled_logits + torch.randn_like(pred_logits) * noise_scale
+                
+                probs = torch.sigmoid(noisy_logits)
+                # 使用 Bernoulli 采样
+                sampled_mask = torch.bernoulli(probs)
+            
+            # 计算 reward（基于 GT）
+            # 注意：reward 计算不需要梯度
+            with torch.no_grad():
+                rewards_metric = compute_segmentation_reward(
+                    pred_masks=sampled_mask,
+                    gt_masks=label,
+                    reward_type=self.reward_type,
+                )
+                
+                # 记录单独的 IoU 和 Dice 用于监控
+                iou_vals = compute_segmentation_reward(sampled_mask, label, "iou")
+                dice_vals = compute_segmentation_reward(sampled_mask, label, "dice")
+                all_iou.append(iou_vals.mean().item())
+                all_dice.append(dice_vals.mean().item())
+                
+                # 计算采样多样性：当前候选的概率分布与第一个候选的差异
+                # 这可以用来监控采样的多样性
+                if g == 0:
+                    first_candidate_probs = torch.sigmoid(pred_logits)
+                    kl_div = 0.0
+                else:
+                    current_probs = torch.sigmoid(noisy_logits)
+                    # KL散度：衡量当前候选与第一个候选的差异
+                    # bernoulli_kl 返回每个样本的像素级KL总和，需要除以像素数得到平均值
+                    kl_sum = bernoulli_kl(noisy_logits, pred_logits).mean().item()
+                    num_pixels = pred_logits.numel() / pred_logits.shape[0]  # 每个样本的像素数
+                    kl_div = kl_sum / num_pixels  # 归一化到每个像素的平均KL
+                all_kl.append(kl_div)
+                
+                # 使用原始 reward（不加 KL 惩罚）
+                # 如果 beta > 0，我们可以在这里添加 KL 惩罚
+                rewards_total = rewards_metric
+            
+            # 计算 log π(M | logits)（需要梯度！）
+            log_p = mask_log_prob_from_logits(sampled_mask.detach(), pred_logits)
+            
+            all_log_probs.append(log_p)
+            all_rewards.append(rewards_total)
+        
+        # Stack 所有候选
+        log_probs = torch.stack(all_log_probs, dim=1)  # (B, G)
+        rewards = torch.stack(all_rewards, dim=1)  # (B, G)
+        
+        # 计算 RLOO loss（会有梯度）
+        loss = rloo_loss(log_probs=log_probs, rewards=rewards, normalize_advantage=True)
+        
+        # 构造监控指标
+        with torch.no_grad():
+            metrics = {
+                "mean_reward": rewards.mean().item(),
+                "mean_iou": sum(all_iou) / len(all_iou),
+                "mean_dice": sum(all_dice) / len(all_dice),
+                "mean_diversity": sum(all_kl) / len(all_kl),  # 候选的多样性
+            }
+        
+        # 记录额外指标
+        for key, value in metrics.items():
+            self.log(f"rloo_{key}", value, on_step=True, on_epoch=True, prog_bar=True)
+        
+        return loss
+    
+    def training_step(self, batch, batch_idx):
+        """
+        重写训练步骤以支持 RLOO 模式
+        """
+        if self.enable_rloo:
+            # RLOO 训练模式
+            loss = self._rloo_training_step(batch)
+            
+            if not self.automatic_optimization:
+                # 手动优化
+                optimizer = self.optimizers()
+                lr_scheduler = self.lr_schedulers()
+                loss = loss / self.hparams.accumulate_grad_batches
+                self.manual_backward(loss)
+                
+                if (batch_idx + 1) % self.hparams.accumulate_grad_batches == 0 or self.trainer.is_last_batch:
+                    optimizer.step()
+                    optimizer.zero_grad()
+                    lr_scheduler.step()
+            
+            self.log("train_loss", loss)
+            return loss
+        else:
+            # 标准监督训练模式
+            return super().training_step(batch, batch_idx)
+
+
+```
+
+```python
+"""
+RLOO-enabled SemanticSegmentationLitModule
+扩展 AutoGluon 的 SemanticSegmentationLitModule 以支持 RLOO 训练
+"""
+import logging
+from typing import Callable, Dict, Optional
+
+import torch
+import torchmetrics
+from transformers.models.mask2former.modeling_mask2former import Mask2FormerLoss
+
+from autogluon.multimodal.constants import CLASS_LOGITS, LOGITS, LABEL, MOE_LOSS, SEMANTIC_MASK, WEIGHT
+from autogluon.multimodal.models.utils import run_model
+from autogluon.multimodal.optim.lit_semantic_seg import SemanticSegmentationLitModule
+from autogluon.multimodal.optim.metrics.semantic_seg_metrics import Multiclass_IoU
+
+from rloo_utils import (
+    bernoulli_kl,
+    compute_segmentation_reward,
+    mask_log_prob_from_logits,
+    rloo_loss,
+)
+
+logger = logging.getLogger(__name__)
+
+
+class RLOOSemanticSegmentationLitModule(SemanticSegmentationLitModule):
+    """
+    扩展 SemanticSegmentationLitModule 以支持 RLOO 强化学习训练。
+    
+    在 RLOO 模式下，训练步骤会：
+    1. 对每个样本生成 G 个候选 mask
+    2. 基于 GT mask 计算每个候选的 reward（IoU/Dice）
+    3. 应用 KL 正则以避免偏离参考策略过远
+    4. 使用 leave-one-out baseline 计算 advantage
+    5. 通过 REINFORCE 风格的 loss 更新策略
+    """
+    
+    def __init__(
+        self,
+        model,
+        # RLOO 相关参数
+        enable_rloo: bool = False,
+        num_generations: int = 4,
+        beta: float = 0.05,
+        reward_type: str = "combo",
+        supervised_weight: float = 0.0,  # 混合训练：监督损失权重
+        ref_logits_cache: Optional[Dict] = None,
+        # 其他参数传递给父类
+        **kwargs
+    ):
+        """
+        Parameters
+        ----------
+        model
+            分割模型
+        enable_rloo
+            是否启用 RLOO 训练模式
+        num_generations
+            每个样本生成的候选 mask 数量 G
+        beta
+            KL 正则系数，控制偏离参考策略的程度
+        reward_type
+            reward 类型："iou", "dice", 或 "combo"
+        supervised_weight
+            混合训练中监督损失的权重（0-1之间）
+            total_loss = supervised_weight * supervised_loss + (1-supervised_weight) * rloo_loss
+            如果为 0，则纯 RLOO；如果为 1，则纯监督
+        ref_logits_cache
+            可选的参考 logits 缓存（用于 KL 计算）
+            如果为 None，则使用当前模型的第一次前向传播作为参考
+        **kwargs
+            传递给父类的其他参数
+        """
+        super().__init__(model=model, **kwargs)
+        
+        self.enable_rloo = enable_rloo
+        self.num_generations = num_generations
+        self.beta = beta
+        self.reward_type = reward_type
+        self.supervised_weight = supervised_weight
+        self.ref_logits_cache = ref_logits_cache if ref_logits_cache is not None else {}
+        
+    def _rloo_training_step(self, batch: Dict):
+        """
+        RLOO 训练步骤：生成多个候选并计算 REINFORCE loss
+        
+        关键改进：
+        1. 只进行一次前向传播获取 logits（保留梯度）
+        2. 通过在 logits 上采样生成 G 个候选 mask
+        3. 计算每个候选的 reward 和 log_prob
+        4. 使用 REINFORCE + leave-one-out baseline 更新策略
+        """
+        # 获取 GT label
+        label = batch[self.model.label_key]
+        B = label.shape[0]
+        device = label.device
+        
+        # 前向传播获取 logits（保留梯度！）
+        output = run_model(self.model, batch)
+        pred_logits = output[self.model.prefix][LOGITS]
+        
+        # 收集所有候选的 log_probs 和 rewards
+        all_log_probs = []
+        all_rewards = []
+        all_iou = []
+        all_dice = []
+        all_kl = []
+        
+        # 生成 G 个候选 mask
+        # 改进的采样策略：使用温度采样和递增的噪声强度
+        for g in range(self.num_generations):
+            # 在相同的 logits 基础上生成不同的候选
+            if g == 0:
+                # 第一个候选使用确定性预测（模式，即阈值化）
+                probs = torch.sigmoid(pred_logits)
+                sampled_mask = (probs > 0.5).float()
+            else:
+                # 后续候选：使用保守的采样策略
+                # 目标：生成高质量但略有差异的候选
+                
+                # 策略1: 固定温度（轻微平滑）
+                temperature = 1.0
+                scaled_logits = pred_logits / temperature
+                
+                # 策略2: 小噪声 - 从 0.1 递增到 0.5（保守）
+                # 确保候选仍然接近原始预测，避免生成低质量 mask
+                noise_scale = 0.1 + 0.4 * (g / self.num_generations)
+                noisy_logits = scaled_logits + torch.randn_like(pred_logits) * noise_scale
+                
+                probs = torch.sigmoid(noisy_logits)
+                # 使用 Bernoulli 采样
+                sampled_mask = torch.bernoulli(probs)
+            
+            # 计算 reward（基于 GT）
+            # 注意：reward 计算不需要梯度
+            with torch.no_grad():
+                rewards_metric = compute_segmentation_reward(
+                    pred_masks=sampled_mask,
+                    gt_masks=label,
+                    reward_type=self.reward_type,
+                )
+                
+                # 记录单独的 IoU 和 Dice 用于监控
+                iou_vals = compute_segmentation_reward(sampled_mask, label, "iou")
+                dice_vals = compute_segmentation_reward(sampled_mask, label, "dice")
+                all_iou.append(iou_vals.mean().item())
+                all_dice.append(dice_vals.mean().item())
+                
+                # 计算采样多样性：当前候选的概率分布与第一个候选的差异
+                # 这可以用来监控采样的多样性
+                if g == 0:
+                    first_candidate_probs = torch.sigmoid(pred_logits)
+                    kl_div = 0.0
+                else:
+                    current_probs = torch.sigmoid(noisy_logits)
+                    # KL散度：衡量当前候选与第一个候选的差异
+                    # bernoulli_kl 返回每个样本的像素级KL总和，需要除以像素数得到平均值
+                    kl_sum = bernoulli_kl(noisy_logits, pred_logits).mean().item()
+                    num_pixels = pred_logits.numel() / pred_logits.shape[0]  # 每个样本的像素数
+                    kl_div = kl_sum / num_pixels  # 归一化到每个像素的平均KL
+                all_kl.append(kl_div)
+                
+                # 使用原始 reward（不加 KL 惩罚）
+                # 如果 beta > 0，我们可以在这里添加 KL 惩罚
+                rewards_total = rewards_metric
+            
+            # 计算 log π(M | logits)（需要梯度！）
+            log_p = mask_log_prob_from_logits(sampled_mask.detach(), pred_logits)
+            
+            all_log_probs.append(log_p)
+            all_rewards.append(rewards_total)
+        
+        # Stack 所有候选
+        log_probs = torch.stack(all_log_probs, dim=1)  # (B, G)
+        rewards = torch.stack(all_rewards, dim=1)  # (B, G)
+        
+        # 计算 RLOO loss（会有梯度）
+        rloo_loss_value = rloo_loss(log_probs=log_probs, rewards=rewards, normalize_advantage=True)
+        
+        # 混合训练：添加监督损失
+        if self.supervised_weight > 0:
+            # 计算监督损失（标准的分割损失）
+            supervised_loss = self.loss_func(pred_logits, label)
+            # 组合损失
+            loss = self.supervised_weight * supervised_loss + (1 - self.supervised_weight) * rloo_loss_value
+        else:
+            # 纯 RLOO 训练
+            loss = rloo_loss_value
+        
+        # 构造监控指标
+        with torch.no_grad():
+            metrics = {
+                "mean_reward": rewards.mean().item(),
+                "mean_iou": sum(all_iou) / len(all_iou),
+                "mean_dice": sum(all_dice) / len(all_dice),
+                "mean_diversity": sum(all_kl) / len(all_kl),  # 候选的多样性
+            }
+        
+        # 记录额外指标
+        for key, value in metrics.items():
+            self.log(f"rloo_{key}", value, on_step=True, on_epoch=True, prog_bar=True)
+        
+        return loss
+    
+    def training_step(self, batch, batch_idx):
+        """
+        重写训练步骤以支持 RLOO 模式
+        """
+        if self.enable_rloo:
+            # RLOO 训练模式
+            loss = self._rloo_training_step(batch)
+            
+            if not self.automatic_optimization:
+                # 手动优化
+                optimizer = self.optimizers()
+                lr_scheduler = self.lr_schedulers()
+                loss = loss / self.hparams.accumulate_grad_batches
+                self.manual_backward(loss)
+                
+                if (batch_idx + 1) % self.hparams.accumulate_grad_batches == 0 or self.trainer.is_last_batch:
+                    optimizer.step()
+                    optimizer.zero_grad()
+                    lr_scheduler.step()
+            
+            self.log("train_loss", loss)
+            return loss
+        else:
+            # 标准监督训练模式
+            return super().training_step(batch, batch_idx)
+
+
+```
+
+```python
+"""
+RLOO-enabled SemanticSegmentationLitModule
+扩展 AutoGluon 的 SemanticSegmentationLitModule 以支持 RLOO 训练
+"""
+import logging
+from typing import Callable, Dict, Optional
+
+import torch
+import torchmetrics
+from transformers.models.mask2former.modeling_mask2former import Mask2FormerLoss
+
+from autogluon.multimodal.constants import CLASS_LOGITS, LOGITS, LABEL, MOE_LOSS, SEMANTIC_MASK, WEIGHT
+from autogluon.multimodal.models.utils import run_model
+from autogluon.multimodal.optim.lit_semantic_seg import SemanticSegmentationLitModule
+from autogluon.multimodal.optim.metrics.semantic_seg_metrics import Multiclass_IoU
+
+from rloo_utils import (
+    bernoulli_kl,
+    compute_segmentation_reward,
+    mask_log_prob_from_logits,
+    rloo_loss,
+)
+
+logger = logging.getLogger(__name__)
+
+
+class RLOOSemanticSegmentationLitModule(SemanticSegmentationLitModule):
+    """
+    扩展 SemanticSegmentationLitModule 以支持 RLOO 强化学习训练。
+    
+    在 RLOO 模式下，训练步骤会：
+    1. 对每个样本生成 G 个候选 mask
+    2. 基于 GT mask 计算每个候选的 reward（IoU/Dice）
+    3. 应用 KL 正则以避免偏离参考策略过远
+    4. 使用 leave-one-out baseline 计算 advantage
+    5. 通过 REINFORCE 风格的 loss 更新策略
+    """
+    
+    def __init__(
+        self,
+        model,
+        # RLOO 相关参数
+        enable_rloo: bool = False,
+        num_generations: int = 4,
+        beta: float = 0.05,
+        reward_type: str = "combo",
+        supervised_weight: float = 0.0,  # 混合训练：监督损失权重
+        ref_logits_cache: Optional[Dict] = None,
+        # 其他参数传递给父类
+        **kwargs
+    ):
+        """
+        Parameters
+        ----------
+        model
+            分割模型
+        enable_rloo
+            是否启用 RLOO 训练模式
+        num_generations
+            每个样本生成的候选 mask 数量 G
+        beta
+            KL 正则系数，控制偏离参考策略的程度
+        reward_type
+            reward 类型："iou", "dice", 或 "combo"
+        supervised_weight
+            混合训练中监督损失的权重（0-1之间）
+            total_loss = supervised_weight * supervised_loss + (1-supervised_weight) * rloo_loss
+            如果为 0，则纯 RLOO；如果为 1，则纯监督
+        ref_logits_cache
+            可选的参考 logits 缓存（用于 KL 计算）
+            如果为 None，则使用当前模型的第一次前向传播作为参考
+        **kwargs
+            传递给父类的其他参数
+        """
+        super().__init__(model=model, **kwargs)
+        
+        self.enable_rloo = enable_rloo
+        self.num_generations = num_generations
+        self.beta = beta
+        self.reward_type = reward_type
+        self.supervised_weight = supervised_weight
+        self.ref_logits_cache = ref_logits_cache if ref_logits_cache is not None else {}
+        
+    def _rloo_training_step(self, batch: Dict):
+        """
+        RLOO 训练步骤：生成多个候选并计算 REINFORCE loss
+        
+        关键改进：
+        1. 只进行一次前向传播获取 logits（保留梯度）
+        2. 通过在 logits 上采样生成 G 个候选 mask
+        3. 计算每个候选的 reward 和 log_prob
+        4. 使用 REINFORCE + leave-one-out baseline 更新策略
+        """
+        # 获取 GT label
+        label = batch[self.model.label_key]
+        B = label.shape[0]
+        device = label.device
+        
+        # 前向传播获取 logits（保留梯度！）
+        output = run_model(self.model, batch)
+        pred_logits = output[self.model.prefix][LOGITS]
+        
+        # 收集所有候选的 log_probs 和 rewards
+        all_log_probs = []
+        all_rewards = []
+        all_iou = []
+        all_dice = []
+        all_kl = []
+        
+        # 生成 G 个候选 mask
+        # 改进的采样策略：使用温度采样和递增的噪声强度
+        for g in range(self.num_generations):
+            # 在相同的 logits 基础上生成不同的候选
+            if g == 0:
+                # 第一个候选使用确定性预测（模式，即阈值化）
+                probs = torch.sigmoid(pred_logits)
+                sampled_mask = (probs > 0.5).float()
+            else:
+                # 后续候选：使用保守的采样策略
+                # 目标：生成高质量但略有差异的候选
+                
+                # 策略1: 固定温度（轻微平滑）
+                temperature = 1.0
+                scaled_logits = pred_logits / temperature
+                
+                # 策略2: 小噪声 - 从 0.1 递增到 0.5（保守）
+                # 确保候选仍然接近原始预测，避免生成低质量 mask
+                noise_scale = 0.1 + 0.4 * (g / self.num_generations)
+                noisy_logits = scaled_logits + torch.randn_like(pred_logits) * noise_scale
+                
+                probs = torch.sigmoid(noisy_logits)
+                # 使用 Bernoulli 采样
+                sampled_mask = torch.bernoulli(probs)
+            
+            # 计算 reward（基于 GT）
+            # 注意：reward 计算不需要梯度
+            with torch.no_grad():
+                rewards_metric = compute_segmentation_reward(
+                    pred_masks=sampled_mask,
+                    gt_masks=label,
+                    reward_type=self.reward_type,
+                )
+                
+                # 记录单独的 IoU 和 Dice 用于监控
+                iou_vals = compute_segmentation_reward(sampled_mask, label, "iou")
+                dice_vals = compute_segmentation_reward(sampled_mask, label, "dice")
+                all_iou.append(iou_vals.mean().item())
+                all_dice.append(dice_vals.mean().item())
+                
+                # 计算采样多样性：当前候选的概率分布与第一个候选的差异
+                # 这可以用来监控采样的多样性
+                if g == 0:
+                    first_candidate_probs = torch.sigmoid(pred_logits)
+                    kl_div = 0.0
+                else:
+                    current_probs = torch.sigmoid(noisy_logits)
+                    # KL散度：衡量当前候选与第一个候选的差异
+                    # bernoulli_kl 返回每个样本的像素级KL总和，需要除以像素数得到平均值
+                    kl_sum = bernoulli_kl(noisy_logits, pred_logits).mean().item()
+                    num_pixels = pred_logits.numel() / pred_logits.shape[0]  # 每个样本的像素数
+                    kl_div = kl_sum / num_pixels  # 归一化到每个像素的平均KL
+                all_kl.append(kl_div)
+                
+                # 使用原始 reward（不加 KL 惩罚）
+                # 如果 beta > 0，我们可以在这里添加 KL 惩罚
+                rewards_total = rewards_metric
+            
+            # 计算 log π(M | logits)（需要梯度！）
+            log_p = mask_log_prob_from_logits(sampled_mask.detach(), pred_logits)
+            
+            all_log_probs.append(log_p)
+            all_rewards.append(rewards_total)
+        
+        # Stack 所有候选
+        log_probs = torch.stack(all_log_probs, dim=1)  # (B, G)
+        rewards = torch.stack(all_rewards, dim=1)  # (B, G)
+        
+        # 计算 RLOO loss（会有梯度）
+        rloo_loss_value = rloo_loss(log_probs=log_probs, rewards=rewards, normalize_advantage=True)
+        
+        # 混合训练：添加监督损失
+        if self.supervised_weight > 0:
+            # 计算监督损失（标准的分割损失）
+            supervised_loss = self.loss_func(pred_logits, label)
+            # 组合损失
+            loss = self.supervised_weight * supervised_loss + (1 - self.supervised_weight) * rloo_loss_value
+        else:
+            # 纯 RLOO 训练
+            loss = rloo_loss_value
+        
+        # 构造监控指标
+        with torch.no_grad():
+            metrics = {
+                "mean_reward": rewards.mean().item(),
+                "mean_iou": sum(all_iou) / len(all_iou),
+                "mean_dice": sum(all_dice) / len(all_dice),
+                "mean_diversity": sum(all_kl) / len(all_kl),  # 候选的多样性（归一化后的KL）
+            }
+            
+            # 如果使用混合训练，记录额外指标
+            if self.supervised_weight > 0:
+                metrics["rloo_loss"] = rloo_loss_value.item()
+                metrics["supervised_loss"] = supervised_loss.item()
+        
+        # 记录额外指标
+        for key, value in metrics.items():
+            self.log(f"rloo_{key}", value, on_step=True, on_epoch=True, prog_bar=True)
+        
+        return loss
+    
+    def training_step(self, batch, batch_idx):
+        """
+        重写训练步骤以支持 RLOO 模式
+        """
+        if self.enable_rloo:
+            # RLOO 训练模式
+            loss = self._rloo_training_step(batch)
+            
+            if not self.automatic_optimization:
+                # 手动优化
+                optimizer = self.optimizers()
+                lr_scheduler = self.lr_schedulers()
+                loss = loss / self.hparams.accumulate_grad_batches
+                self.manual_backward(loss)
+                
+                if (batch_idx + 1) % self.hparams.accumulate_grad_batches == 0 or self.trainer.is_last_batch:
+                    optimizer.step()
+                    optimizer.zero_grad()
+                    lr_scheduler.step()
+            
+            self.log("train_loss", loss)
+            return loss
+        else:
+            # 标准监督训练模式
+            return super().training_step(batch, batch_idx)
+
+
+```
+
+```python
+"""
+真实的 RLOO 训练脚本 - 带梯度更新
+基于 AutoGluon 内部组件构建，直接使用 PyTorch Lightning Trainer
+"""
+import argparse
+import os
+from typing import Dict, List, Optional
+
+import pandas as pd
+import torch
+from torch import nn
+from torch.utils.data import DataLoader
+
+# 使用 lightning.pytorch 而不是 pytorch_lightning（与 AutoGluon 一致）
+from lightning.pytorch import Trainer, seed_everything
+from lightning.pytorch.callbacks import ModelCheckpoint
+
+from autogluon.multimodal import MultiModalPredictor
+from autogluon.multimodal.constants import LABEL
+
+from lit_semantic_seg_rloo import RLOOSemanticSegmentationLitModule
+
+
+def expand_path(df: pd.DataFrame, dataset_dir: str) -> pd.DataFrame:
+    """复用原脚本中的路径展开逻辑"""
+    for col in ["image", "label"]:
+        df[col] = df[col].apply(lambda ele: os.path.join(dataset_dir, ele))
+    return df
+
+
+class RLOOTrainer:
+    """
+    RLOO 训练器，管理真实的 RL 训练循环
+    """
+    
+    def __init__(
+        self,
+        ckpt_path: str,
+        output_dir: str,
+        num_generations: int = 4,
+        beta: float = 0.05,
+        reward_type: str = "combo",
+        supervised_weight: float = 0.0,
+        learning_rate: float = 1e-5,
+        epochs: int = 3,
+        batch_size: int = 2,
+        num_workers: int = 4,
+        seed: int = 42,
+    ):
+        """
+        Parameters
+        ----------
+        ckpt_path
+            阶段一 Conv-LoRA SAM checkpoint 路径
+        output_dir
+            输出目录
+        num_generations
+            每个样本生成的候选 mask 数量
+        beta
+            KL 正则系数
+        reward_type
+            reward 类型："iou", "dice", 或 "combo"
+        learning_rate
+            学习率
+        epochs
+            训练 epoch 数
+        batch_size
+            Batch size
+        num_workers
+            DataLoader workers 数量
+        seed
+            随机种子
+        """
+        self.ckpt_path = ckpt_path
+        self.output_dir = output_dir
+        self.num_generations = num_generations
+        self.beta = beta
+        self.reward_type = reward_type
+        self.learning_rate = learning_rate
+        self.epochs = epochs
+        self.batch_size = batch_size
+        self.num_workers = num_workers
+        self.seed = seed
+        
+        # 处理路径
+        if self.ckpt_path.endswith('.ckpt'):
+            self.ckpt_path = os.path.dirname(self.ckpt_path)
+        
+        if not os.path.isdir(self.ckpt_path):
+            raise ValueError(
+                f"Checkpoint path '{self.ckpt_path}' does not exist or is not a directory."
+            )
+        
+        os.makedirs(self.output_dir, exist_ok=True)
+        torch.manual_seed(self.seed)
+        seed_everything(self.seed)
+        
+    def load_train_data(self, task: str):
+        """
+        重新加载训练和验证数据集
+        """
+        dataset_name = task
+        dataset_dir = os.path.join(f"datasets/{dataset_name}", dataset_name)
+        train_csv = os.path.join(dataset_dir, "train.csv")
+        val_csv = os.path.join(dataset_dir, "val.csv")
+        
+        if not os.path.exists(train_csv):
+            raise FileNotFoundError(f"Training data not found: {train_csv}")
+        
+        train_df = pd.read_csv(train_csv)
+        
+        # 展开路径（与原始训练脚本一致）
+        for col in ["image", "label"]:
+            if col in train_df.columns:
+                train_df[col] = train_df[col].apply(lambda ele: os.path.join(dataset_dir, ele))
+        
+        # 加载验证集（如果存在）
+        val_df = None
+        if os.path.exists(val_csv):
+            val_df = pd.read_csv(val_csv)
+            for col in ["image", "label"]:
+                if col in val_df.columns:
+                    val_df[col] = val_df[col].apply(lambda ele: os.path.join(dataset_dir, ele))
+        
+        return train_df, val_df
+    
+    def setup_model_and_datamodule(self, predictor: MultiModalPredictor, task: str):
+        """
+        从 AutoGluon Predictor 中提取模型和 DataModule
+        """
+        learner = predictor._learner
+        
+        # 获取模型
+        model = learner._model
+        
+        # 重新加载训练和验证数据
+        train_data, val_data = self.load_train_data(task)
+        
+        # 手动设置数据到 learner（因为 get_datamodule_per_run 依赖这些属性）
+        learner._train_data = train_data
+        learner._tuning_data = val_data  # 设置验证数据，DataModule 需要它
+        
+        # 创建 DataModule
+        datamodule = learner.get_datamodule_per_run(
+            df_preprocessor=learner._df_preprocessor,
+            data_processors=learner._data_processors,
+            per_gpu_batch_size=self.batch_size,  # 使用我们指定的 batch_size
+            num_workers=self.num_workers,
+            is_train=True,
+        )
+        
+        return model, datamodule
+    
+    def freeze_non_conv_lora_params(self, model: nn.Module):
+        """
+        冻结非 Conv-LoRA 参数，只训练 Conv-LoRA
+        """
+        trainable_count = 0
+        frozen_count = 0
+        
+        for name, param in model.named_parameters():
+            # 只保持 Conv-LoRA 参数可训练
+            if 'lora_A' in name or 'lora_B' in name:
+                param.requires_grad = True
+                trainable_count += param.numel()
+            else:
+                param.requires_grad = False
+                frozen_count += param.numel()
+        
+        print(f"\n参数统计:")
+        print(f"  可训练参数: {trainable_count:,}")
+        print(f"  冻结参数: {frozen_count:,}")
+        print(f"  总参数: {trainable_count + frozen_count:,}\n")
+        
+        return trainable_count
+    
+    def get_trainable_param_names(self, model: nn.Module) -> List[str]:
+        """
+        获取 Conv-LoRA 参数名称列表
+        """
+        trainable_names = []
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                trainable_names.append(name)
+        return trainable_names
+    
+    def create_lit_module(
+        self,
+        model: nn.Module,
+        optim_kwargs: Dict,
+    ) -> RLOOSemanticSegmentationLitModule:
+        """
+        创建 RLOO LitModule
+        """
+        # 获取可训练参数名称
+        trainable_param_names = self.get_trainable_param_names(model)
+        
+        # 创建 LitModule
+        lit_module = RLOOSemanticSegmentationLitModule(
+            model=model,
+            enable_rloo=True,
+            num_generations=self.num_generations,
+            beta=self.beta,
+            reward_type=self.reward_type,
+            trainable_param_names=trainable_param_names,
+            **optim_kwargs,
+        )
+        
+        return lit_module
+    
+    def train(self, predictor: MultiModalPredictor, task: str):
+        """
+        执行 RLOO 训练
+        """
+        print("="*80)
+        print("开始真实的 RLOO 训练")
+        print("="*80)
+        print(f"配置:")
+        print(f"  Checkpoint: {self.ckpt_path}")
+        print(f"  输出目录: {self.output_dir}")
+        print(f"  任务: {task}")
+        print(f"  候选数量 (G): {self.num_generations}")
+        print(f"  KL 系数 (β): {self.beta}")
+        print(f"  Reward 类型: {self.reward_type}")
+        print(f"  学习率: {self.learning_rate}")
+        print(f"  Epochs: {self.epochs}")
+        print(f"  Batch size: {self.batch_size}")
+        print("="*80 + "\n")
+        
+        # 设置模型和数据
+        model, datamodule = self.setup_model_and_datamodule(predictor, task)
+        
+        # 冻结非 Conv-LoRA 参数
+        trainable_params = self.freeze_non_conv_lora_params(model)
+        
+        if trainable_params == 0:
+            raise RuntimeError(
+                "没有找到可训练参数！请检查模型是否使用 Conv-LoRA 训练。"
+            )
+        
+        # 获取优化器配置
+        learner = predictor._learner
+        
+        # 获取验证指标（不需要参数，使用 learner 内部的 _output_shape）
+        validation_metric, custom_metric_func = learner.get_validation_metric_per_run()
+        
+        # 获取 loss 函数
+        loss_func, aug_loss_func = learner.get_loss_func_per_run(learner._config)
+        
+        # 构建优化器配置
+        optim_config = learner._config.optim
+        optim_kwargs = dict(
+            optim_type=optim_config.optim_type,
+            lr_choice=optim_config.lr_choice,
+            lr_schedule=optim_config.lr_schedule,
+            lr=self.learning_rate,  # 使用我们指定的学习率
+            lr_decay=optim_config.lr_decay,
+            end_lr=optim_config.end_lr,
+            lr_mult=optim_config.lr_mult,
+            weight_decay=optim_config.weight_decay,
+            warmup_steps=optim_config.warmup_steps,
+            loss_func=loss_func,
+            validation_metric=validation_metric,
+            validation_metric_name=learner._validation_metric_name,
+            custom_metric_func=custom_metric_func,
+        )
+        
+        # 创建 LitModule
+        lit_module = self.create_lit_module(model, optim_kwargs)
+        
+        # 创建 checkpoint callback
+        checkpoint_callback = ModelCheckpoint(
+            dirpath=os.path.join(self.output_dir, 'checkpoints'),
+            filename='rloo-{epoch:02d}-{rloo_mean_reward:.4f}',
+            monitor='rloo_mean_reward',
+            mode='max',
+            save_top_k=3,
+            save_last=True,
+        )
+        
+        # 创建 PyTorch Lightning Trainer
+        trainer = Trainer(
+            max_epochs=self.epochs,
+            accelerator='auto',
+            devices=1,
+            default_root_dir=self.output_dir,
+            enable_progress_bar=True,
+            log_every_n_steps=10,
+            callbacks=[checkpoint_callback],
+            logger=True,
+        )
+        
+        # 开始训练
+        print("\n开始训练循环...\n")
+        trainer.fit(lit_module, datamodule=datamodule)
+        
+        print("\n" + "="*80)
+        print("RLOO 训练完成！")
+        print("="*80)
+        print(f"\n模型已保存到: {self.output_dir}")
+        print("\n训练统计:")
+        print(f"  总 epochs: {self.epochs}")
+        if checkpoint_callback.best_model_path:
+            print(f"  最佳 checkpoint: {checkpoint_callback.best_model_path}")
+        if checkpoint_callback.last_model_path:
+            print(f"  最后 checkpoint: {checkpoint_callback.last_model_path}")
+        print("="*80 + "\n")
+        
+        return trainer, lit_module
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="真实的 RLOO 微调 - 带梯度更新的完整实现"
+    )
+    
+    # 数据和模型
+    parser.add_argument(
+        "--task",
+        type=str,
+        default="leaf_disease_segmentation",
+        choices=[
+            "polyp",
+            "leaf_disease_segmentation",
+            "camo_sem_seg",
+            "isic2017",
+            "road_segmentation",
+            "SBU-shadow"
+        ],
+    )
+    parser.add_argument(
+        "--ckpt_path",
+        type=str,
+        required=True,
+        help="阶段一 Conv-LoRA SAM checkpoint 目录"
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default="outputs_rloo_real",
+        help="输出目录"
+    )
+    
+    # RLOO 超参数
+    parser.add_argument(
+        "--num_generations",
+        type=int,
+        default=4,
+        help="每个样本生成的候选 mask 数量 G"
+    )
+    parser.add_argument(
+        "--beta",
+        type=float,
+        default=0.05,
+        help="KL 正则系数"
+    )
+    parser.add_argument(
+        "--reward_type",
+        type=str,
+        default="combo",
+        choices=["iou", "dice", "combo"],
+        help="reward 类型"
+    )
+    
+    # 训练参数
+    parser.add_argument(
+        "--learning_rate",
+        type=float,
+        default=1e-5,
+        help="学习率"
+    )
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=3,
+        help="训练 epoch 数"
+    )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=2,
+        help="Batch size"
+    )
+    parser.add_argument(
+        "--num_workers",
+        type=int,
+        default=4,
+        help="DataLoader workers"
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="随机种子"
+    )
+    
+    args = parser.parse_args()
+    
+    # 加载 AutoGluon Predictor
+    print(f"\n加载模型: {args.ckpt_path}")
+    predictor = MultiModalPredictor.load(args.ckpt_path)
+    
+    # 创建 RLOO Trainer
+    rloo_trainer = RLOOTrainer(
+        ckpt_path=args.ckpt_path,
+        output_dir=args.output_dir,
+        num_generations=args.num_generations,
+        beta=args.beta,
+        reward_type=args.reward_type,
+        learning_rate=args.learning_rate,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        seed=args.seed,
+    )
+    
+    # 训练
+    trainer, lit_module = rloo_trainer.train(predictor, args.task)
+    
+    print("\n✓ 训练完成！")
+    print(f"✓ 输出目录: {args.output_dir}")
+
+
+if __name__ == "__main__":
+    main()
+
+
+```
+
+```python
+"""
+真实的 RLOO 训练脚本 - 带梯度更新
+基于 AutoGluon 内部组件构建，直接使用 PyTorch Lightning Trainer
+"""
+import argparse
+import os
+from typing import Dict, List, Optional
+
+import pandas as pd
+import torch
+from torch import nn
+from torch.utils.data import DataLoader
+
+# 使用 lightning.pytorch 而不是 pytorch_lightning（与 AutoGluon 一致）
+from lightning.pytorch import Trainer, seed_everything
+from lightning.pytorch.callbacks import ModelCheckpoint
+
+from autogluon.multimodal import MultiModalPredictor
+from autogluon.multimodal.constants import LABEL
+
+from lit_semantic_seg_rloo import RLOOSemanticSegmentationLitModule
+
+
+def expand_path(df: pd.DataFrame, dataset_dir: str) -> pd.DataFrame:
+    """复用原脚本中的路径展开逻辑"""
+    for col in ["image", "label"]:
+        df[col] = df[col].apply(lambda ele: os.path.join(dataset_dir, ele))
+    return df
+
+
+class RLOOTrainer:
+    """
+    RLOO 训练器，管理真实的 RL 训练循环
+    """
+    
+    def __init__(
+        self,
+        ckpt_path: str,
+        output_dir: str,
+        num_generations: int = 4,
+        beta: float = 0.05,
+        reward_type: str = "combo",
+        supervised_weight: float = 0.0,
+        learning_rate: float = 1e-5,
+        epochs: int = 3,
+        batch_size: int = 2,
+        num_workers: int = 4,
+        seed: int = 42,
+    ):
+        """
+        Parameters
+        ----------
+        ckpt_path
+            阶段一 Conv-LoRA SAM checkpoint 路径
+        output_dir
+            输出目录
+        num_generations
+            每个样本生成的候选 mask 数量
+        beta
+            KL 正则系数
+        reward_type
+            reward 类型："iou", "dice", 或 "combo"
+        supervised_weight
+            混合训练中监督损失的权重（0-1之间）
+            0 = 纯RLOO，1 = 纯监督
+        learning_rate
+            学习率
+        epochs
+            训练 epoch 数
+        batch_size
+            Batch size
+        num_workers
+            DataLoader workers 数量
+        seed
+            随机种子
+        """
+        self.ckpt_path = ckpt_path
+        self.output_dir = output_dir
+        self.num_generations = num_generations
+        self.beta = beta
+        self.reward_type = reward_type
+        self.supervised_weight = supervised_weight
+        self.learning_rate = learning_rate
+        self.epochs = epochs
+        self.batch_size = batch_size
+        self.num_workers = num_workers
+        self.seed = seed
+        
+        # 处理路径
+        if self.ckpt_path.endswith('.ckpt'):
+            self.ckpt_path = os.path.dirname(self.ckpt_path)
+        
+        if not os.path.isdir(self.ckpt_path):
+            raise ValueError(
+                f"Checkpoint path '{self.ckpt_path}' does not exist or is not a directory."
+            )
+        
+        os.makedirs(self.output_dir, exist_ok=True)
+        torch.manual_seed(self.seed)
+        seed_everything(self.seed)
+        
+    def load_train_data(self, task: str):
+        """
+        重新加载训练和验证数据集
+        """
+        dataset_name = task
+        dataset_dir = os.path.join(f"datasets/{dataset_name}", dataset_name)
+        train_csv = os.path.join(dataset_dir, "train.csv")
+        val_csv = os.path.join(dataset_dir, "val.csv")
+        
+        if not os.path.exists(train_csv):
+            raise FileNotFoundError(f"Training data not found: {train_csv}")
+        
+        train_df = pd.read_csv(train_csv)
+        
+        # 展开路径（与原始训练脚本一致）
+        for col in ["image", "label"]:
+            if col in train_df.columns:
+                train_df[col] = train_df[col].apply(lambda ele: os.path.join(dataset_dir, ele))
+        
+        # 加载验证集（如果存在）
+        val_df = None
+        if os.path.exists(val_csv):
+            val_df = pd.read_csv(val_csv)
+            for col in ["image", "label"]:
+                if col in val_df.columns:
+                    val_df[col] = val_df[col].apply(lambda ele: os.path.join(dataset_dir, ele))
+        
+        return train_df, val_df
+    
+    def setup_model_and_datamodule(self, predictor: MultiModalPredictor, task: str):
+        """
+        从 AutoGluon Predictor 中提取模型和 DataModule
+        """
+        learner = predictor._learner
+        
+        # 获取模型
+        model = learner._model
+        
+        # 重新加载训练和验证数据
+        train_data, val_data = self.load_train_data(task)
+        
+        # 手动设置数据到 learner（因为 get_datamodule_per_run 依赖这些属性）
+        learner._train_data = train_data
+        learner._tuning_data = val_data  # 设置验证数据，DataModule 需要它
+        
+        # 创建 DataModule
+        datamodule = learner.get_datamodule_per_run(
+            df_preprocessor=learner._df_preprocessor,
+            data_processors=learner._data_processors,
+            per_gpu_batch_size=self.batch_size,  # 使用我们指定的 batch_size
+            num_workers=self.num_workers,
+            is_train=True,
+        )
+        
+        return model, datamodule
+    
+    def freeze_non_conv_lora_params(self, model: nn.Module):
+        """
+        冻结非 Conv-LoRA 参数，只训练 Conv-LoRA
+        """
+        trainable_count = 0
+        frozen_count = 0
+        
+        for name, param in model.named_parameters():
+            # 只保持 Conv-LoRA 参数可训练
+            if 'lora_A' in name or 'lora_B' in name:
+                param.requires_grad = True
+                trainable_count += param.numel()
+            else:
+                param.requires_grad = False
+                frozen_count += param.numel()
+        
+        print(f"\n参数统计:")
+        print(f"  可训练参数: {trainable_count:,}")
+        print(f"  冻结参数: {frozen_count:,}")
+        print(f"  总参数: {trainable_count + frozen_count:,}\n")
+        
+        return trainable_count
+    
+    def get_trainable_param_names(self, model: nn.Module) -> List[str]:
+        """
+        获取 Conv-LoRA 参数名称列表
+        """
+        trainable_names = []
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                trainable_names.append(name)
+        return trainable_names
+    
+    def create_lit_module(
+        self,
+        model: nn.Module,
+        optim_kwargs: Dict,
+    ) -> RLOOSemanticSegmentationLitModule:
+        """
+        创建 RLOO LitModule
+        """
+        # 获取可训练参数名称
+        trainable_param_names = self.get_trainable_param_names(model)
+        
+        # 创建 LitModule
+        lit_module = RLOOSemanticSegmentationLitModule(
+            model=model,
+            enable_rloo=True,
+            num_generations=self.num_generations,
+            beta=self.beta,
+            reward_type=self.reward_type,
+            trainable_param_names=trainable_param_names,
+            **optim_kwargs,
+        )
+        
+        return lit_module
+    
+    def train(self, predictor: MultiModalPredictor, task: str):
+        """
+        执行 RLOO 训练
+        """
+        print("="*80)
+        print("开始真实的 RLOO 训练")
+        print("="*80)
+        print(f"配置:")
+        print(f"  Checkpoint: {self.ckpt_path}")
+        print(f"  输出目录: {self.output_dir}")
+        print(f"  任务: {task}")
+        print(f"  候选数量 (G): {self.num_generations}")
+        print(f"  KL 系数 (β): {self.beta}")
+        print(f"  Reward 类型: {self.reward_type}")
+        print(f"  学习率: {self.learning_rate}")
+        print(f"  Epochs: {self.epochs}")
+        print(f"  Batch size: {self.batch_size}")
+        print("="*80 + "\n")
+        
+        # 设置模型和数据
+        model, datamodule = self.setup_model_and_datamodule(predictor, task)
+        
+        # 冻结非 Conv-LoRA 参数
+        trainable_params = self.freeze_non_conv_lora_params(model)
+        
+        if trainable_params == 0:
+            raise RuntimeError(
+                "没有找到可训练参数！请检查模型是否使用 Conv-LoRA 训练。"
+            )
+        
+        # 获取优化器配置
+        learner = predictor._learner
+        
+        # 获取验证指标（不需要参数，使用 learner 内部的 _output_shape）
+        validation_metric, custom_metric_func = learner.get_validation_metric_per_run()
+        
+        # 获取 loss 函数
+        loss_func, aug_loss_func = learner.get_loss_func_per_run(learner._config)
+        
+        # 构建优化器配置
+        optim_config = learner._config.optim
+        optim_kwargs = dict(
+            optim_type=optim_config.optim_type,
+            lr_choice=optim_config.lr_choice,
+            lr_schedule=optim_config.lr_schedule,
+            lr=self.learning_rate,  # 使用我们指定的学习率
+            lr_decay=optim_config.lr_decay,
+            end_lr=optim_config.end_lr,
+            lr_mult=optim_config.lr_mult,
+            weight_decay=optim_config.weight_decay,
+            warmup_steps=optim_config.warmup_steps,
+            loss_func=loss_func,
+            validation_metric=validation_metric,
+            validation_metric_name=learner._validation_metric_name,
+            custom_metric_func=custom_metric_func,
+        )
+        
+        # 创建 LitModule
+        lit_module = self.create_lit_module(model, optim_kwargs)
+        
+        # 创建 checkpoint callback
+        checkpoint_callback = ModelCheckpoint(
+            dirpath=os.path.join(self.output_dir, 'checkpoints'),
+            filename='rloo-{epoch:02d}-{rloo_mean_reward:.4f}',
+            monitor='rloo_mean_reward',
+            mode='max',
+            save_top_k=3,
+            save_last=True,
+        )
+        
+        # 创建 PyTorch Lightning Trainer
+        trainer = Trainer(
+            max_epochs=self.epochs,
+            accelerator='auto',
+            devices=1,
+            default_root_dir=self.output_dir,
+            enable_progress_bar=True,
+            log_every_n_steps=10,
+            callbacks=[checkpoint_callback],
+            logger=True,
+        )
+        
+        # 开始训练
+        print("\n开始训练循环...\n")
+        trainer.fit(lit_module, datamodule=datamodule)
+        
+        print("\n" + "="*80)
+        print("RLOO 训练完成！")
+        print("="*80)
+        print(f"\n模型已保存到: {self.output_dir}")
+        print("\n训练统计:")
+        print(f"  总 epochs: {self.epochs}")
+        if checkpoint_callback.best_model_path:
+            print(f"  最佳 checkpoint: {checkpoint_callback.best_model_path}")
+        if checkpoint_callback.last_model_path:
+            print(f"  最后 checkpoint: {checkpoint_callback.last_model_path}")
+        print("="*80 + "\n")
+        
+        return trainer, lit_module
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="真实的 RLOO 微调 - 带梯度更新的完整实现"
+    )
+    
+    # 数据和模型
+    parser.add_argument(
+        "--task",
+        type=str,
+        default="leaf_disease_segmentation",
+        choices=[
+            "polyp",
+            "leaf_disease_segmentation",
+            "camo_sem_seg",
+            "isic2017",
+            "road_segmentation",
+            "SBU-shadow"
+        ],
+    )
+    parser.add_argument(
+        "--ckpt_path",
+        type=str,
+        required=True,
+        help="阶段一 Conv-LoRA SAM checkpoint 目录"
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default="outputs_rloo_real",
+        help="输出目录"
+    )
+    
+    # RLOO 超参数
+    parser.add_argument(
+        "--num_generations",
+        type=int,
+        default=4,
+        help="每个样本生成的候选 mask 数量 G"
+    )
+    parser.add_argument(
+        "--beta",
+        type=float,
+        default=0.05,
+        help="KL 正则系数"
+    )
+    parser.add_argument(
+        "--reward_type",
+        type=str,
+        default="combo",
+        choices=["iou", "dice", "combo"],
+        help="reward 类型"
+    )
+    
+    # 训练参数
+    parser.add_argument(
+        "--learning_rate",
+        type=float,
+        default=1e-5,
+        help="学习率"
+    )
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=3,
+        help="训练 epoch 数"
+    )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=2,
+        help="Batch size"
+    )
+    parser.add_argument(
+        "--num_workers",
+        type=int,
+        default=4,
+        help="DataLoader workers"
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="随机种子"
+    )
+    
+    args = parser.parse_args()
+    
+    # 加载 AutoGluon Predictor
+    print(f"\n加载模型: {args.ckpt_path}")
+    predictor = MultiModalPredictor.load(args.ckpt_path)
+    
+    # 创建 RLOO Trainer
+    rloo_trainer = RLOOTrainer(
+        ckpt_path=args.ckpt_path,
+        output_dir=args.output_dir,
+        num_generations=args.num_generations,
+        beta=args.beta,
+        reward_type=args.reward_type,
+        learning_rate=args.learning_rate,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        seed=args.seed,
+    )
+    
+    # 训练
+    trainer, lit_module = rloo_trainer.train(predictor, args.task)
+    
+    print("\n✓ 训练完成！")
+    print(f"✓ 输出目录: {args.output_dir}")
+
+
+if __name__ == "__main__":
+    main()
+
+
+```
+
+```python
+"""
+真实的 RLOO 训练脚本 - 带梯度更新
+基于 AutoGluon 内部组件构建，直接使用 PyTorch Lightning Trainer
+"""
+import argparse
+import os
+from typing import Dict, List, Optional
+
+import pandas as pd
+import torch
+from torch import nn
+from torch.utils.data import DataLoader
+
+# 使用 lightning.pytorch 而不是 pytorch_lightning（与 AutoGluon 一致）
+from lightning.pytorch import Trainer, seed_everything
+from lightning.pytorch.callbacks import ModelCheckpoint
+
+from autogluon.multimodal import MultiModalPredictor
+from autogluon.multimodal.constants import LABEL
+
+from lit_semantic_seg_rloo import RLOOSemanticSegmentationLitModule
+
+
+def expand_path(df: pd.DataFrame, dataset_dir: str) -> pd.DataFrame:
+    """复用原脚本中的路径展开逻辑"""
+    for col in ["image", "label"]:
+        df[col] = df[col].apply(lambda ele: os.path.join(dataset_dir, ele))
+    return df
+
+
+class RLOOTrainer:
+    """
+    RLOO 训练器，管理真实的 RL 训练循环
+    """
+    
+    def __init__(
+        self,
+        ckpt_path: str,
+        output_dir: str,
+        num_generations: int = 4,
+        beta: float = 0.05,
+        reward_type: str = "combo",
+        supervised_weight: float = 0.0,
+        learning_rate: float = 1e-5,
+        epochs: int = 3,
+        batch_size: int = 2,
+        num_workers: int = 4,
+        seed: int = 42,
+    ):
+        """
+        Parameters
+        ----------
+        ckpt_path
+            阶段一 Conv-LoRA SAM checkpoint 路径
+        output_dir
+            输出目录
+        num_generations
+            每个样本生成的候选 mask 数量
+        beta
+            KL 正则系数
+        reward_type
+            reward 类型："iou", "dice", 或 "combo"
+        supervised_weight
+            混合训练中监督损失的权重（0-1之间）
+            0 = 纯RLOO，1 = 纯监督
+        learning_rate
+            学习率
+        epochs
+            训练 epoch 数
+        batch_size
+            Batch size
+        num_workers
+            DataLoader workers 数量
+        seed
+            随机种子
+        """
+        self.ckpt_path = ckpt_path
+        self.output_dir = output_dir
+        self.num_generations = num_generations
+        self.beta = beta
+        self.reward_type = reward_type
+        self.supervised_weight = supervised_weight
+        self.learning_rate = learning_rate
+        self.epochs = epochs
+        self.batch_size = batch_size
+        self.num_workers = num_workers
+        self.seed = seed
+        
+        # 处理路径
+        if self.ckpt_path.endswith('.ckpt'):
+            self.ckpt_path = os.path.dirname(self.ckpt_path)
+        
+        if not os.path.isdir(self.ckpt_path):
+            raise ValueError(
+                f"Checkpoint path '{self.ckpt_path}' does not exist or is not a directory."
+            )
+        
+        os.makedirs(self.output_dir, exist_ok=True)
+        torch.manual_seed(self.seed)
+        seed_everything(self.seed)
+        
+    def load_train_data(self, task: str):
+        """
+        重新加载训练和验证数据集
+        """
+        dataset_name = task
+        dataset_dir = os.path.join(f"datasets/{dataset_name}", dataset_name)
+        train_csv = os.path.join(dataset_dir, "train.csv")
+        val_csv = os.path.join(dataset_dir, "val.csv")
+        
+        if not os.path.exists(train_csv):
+            raise FileNotFoundError(f"Training data not found: {train_csv}")
+        
+        train_df = pd.read_csv(train_csv)
+        
+        # 展开路径（与原始训练脚本一致）
+        for col in ["image", "label"]:
+            if col in train_df.columns:
+                train_df[col] = train_df[col].apply(lambda ele: os.path.join(dataset_dir, ele))
+        
+        # 加载验证集（如果存在）
+        val_df = None
+        if os.path.exists(val_csv):
+            val_df = pd.read_csv(val_csv)
+            for col in ["image", "label"]:
+                if col in val_df.columns:
+                    val_df[col] = val_df[col].apply(lambda ele: os.path.join(dataset_dir, ele))
+        
+        return train_df, val_df
+    
+    def setup_model_and_datamodule(self, predictor: MultiModalPredictor, task: str):
+        """
+        从 AutoGluon Predictor 中提取模型和 DataModule
+        """
+        learner = predictor._learner
+        
+        # 获取模型
+        model = learner._model
+        
+        # 重新加载训练和验证数据
+        train_data, val_data = self.load_train_data(task)
+        
+        # 手动设置数据到 learner（因为 get_datamodule_per_run 依赖这些属性）
+        learner._train_data = train_data
+        learner._tuning_data = val_data  # 设置验证数据，DataModule 需要它
+        
+        # 创建 DataModule
+        datamodule = learner.get_datamodule_per_run(
+            df_preprocessor=learner._df_preprocessor,
+            data_processors=learner._data_processors,
+            per_gpu_batch_size=self.batch_size,  # 使用我们指定的 batch_size
+            num_workers=self.num_workers,
+            is_train=True,
+        )
+        
+        return model, datamodule
+    
+    def freeze_non_conv_lora_params(self, model: nn.Module):
+        """
+        冻结非 Conv-LoRA 参数，只训练 Conv-LoRA
+        """
+        trainable_count = 0
+        frozen_count = 0
+        
+        for name, param in model.named_parameters():
+            # 只保持 Conv-LoRA 参数可训练
+            if 'lora_A' in name or 'lora_B' in name:
+                param.requires_grad = True
+                trainable_count += param.numel()
+            else:
+                param.requires_grad = False
+                frozen_count += param.numel()
+        
+        print(f"\n参数统计:")
+        print(f"  可训练参数: {trainable_count:,}")
+        print(f"  冻结参数: {frozen_count:,}")
+        print(f"  总参数: {trainable_count + frozen_count:,}\n")
+        
+        return trainable_count
+    
+    def get_trainable_param_names(self, model: nn.Module) -> List[str]:
+        """
+        获取 Conv-LoRA 参数名称列表
+        """
+        trainable_names = []
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                trainable_names.append(name)
+        return trainable_names
+    
+    def create_lit_module(
+        self,
+        model: nn.Module,
+        optim_kwargs: Dict,
+    ) -> RLOOSemanticSegmentationLitModule:
+        """
+        创建 RLOO LitModule
+        """
+        # 获取可训练参数名称
+        trainable_param_names = self.get_trainable_param_names(model)
+        
+        # 创建 LitModule
+        lit_module = RLOOSemanticSegmentationLitModule(
+            model=model,
+            enable_rloo=True,
+            num_generations=self.num_generations,
+            beta=self.beta,
+            reward_type=self.reward_type,
+            supervised_weight=self.supervised_weight,
+            trainable_param_names=trainable_param_names,
+            **optim_kwargs,
+        )
+        
+        return lit_module
+    
+    def train(self, predictor: MultiModalPredictor, task: str):
+        """
+        执行 RLOO 训练
+        """
+        print("="*80)
+        print("开始真实的 RLOO 训练")
+        print("="*80)
+        print(f"配置:")
+        print(f"  Checkpoint: {self.ckpt_path}")
+        print(f"  输出目录: {self.output_dir}")
+        print(f"  任务: {task}")
+        print(f"  候选数量 (G): {self.num_generations}")
+        print(f"  KL 系数 (β): {self.beta}")
+        print(f"  Reward 类型: {self.reward_type}")
+        print(f"  学习率: {self.learning_rate}")
+        print(f"  Epochs: {self.epochs}")
+        print(f"  Batch size: {self.batch_size}")
+        print("="*80 + "\n")
+        
+        # 设置模型和数据
+        model, datamodule = self.setup_model_and_datamodule(predictor, task)
+        
+        # 冻结非 Conv-LoRA 参数
+        trainable_params = self.freeze_non_conv_lora_params(model)
+        
+        if trainable_params == 0:
+            raise RuntimeError(
+                "没有找到可训练参数！请检查模型是否使用 Conv-LoRA 训练。"
+            )
+        
+        # 获取优化器配置
+        learner = predictor._learner
+        
+        # 获取验证指标（不需要参数，使用 learner 内部的 _output_shape）
+        validation_metric, custom_metric_func = learner.get_validation_metric_per_run()
+        
+        # 获取 loss 函数
+        loss_func, aug_loss_func = learner.get_loss_func_per_run(learner._config)
+        
+        # 构建优化器配置
+        optim_config = learner._config.optim
+        optim_kwargs = dict(
+            optim_type=optim_config.optim_type,
+            lr_choice=optim_config.lr_choice,
+            lr_schedule=optim_config.lr_schedule,
+            lr=self.learning_rate,  # 使用我们指定的学习率
+            lr_decay=optim_config.lr_decay,
+            end_lr=optim_config.end_lr,
+            lr_mult=optim_config.lr_mult,
+            weight_decay=optim_config.weight_decay,
+            warmup_steps=optim_config.warmup_steps,
+            loss_func=loss_func,
+            validation_metric=validation_metric,
+            validation_metric_name=learner._validation_metric_name,
+            custom_metric_func=custom_metric_func,
+        )
+        
+        # 创建 LitModule
+        lit_module = self.create_lit_module(model, optim_kwargs)
+        
+        # 创建 checkpoint callback
+        checkpoint_callback = ModelCheckpoint(
+            dirpath=os.path.join(self.output_dir, 'checkpoints'),
+            filename='rloo-{epoch:02d}-{rloo_mean_reward:.4f}',
+            monitor='rloo_mean_reward',
+            mode='max',
+            save_top_k=3,
+            save_last=True,
+        )
+        
+        # 创建 PyTorch Lightning Trainer
+        trainer = Trainer(
+            max_epochs=self.epochs,
+            accelerator='auto',
+            devices=1,
+            default_root_dir=self.output_dir,
+            enable_progress_bar=True,
+            log_every_n_steps=10,
+            callbacks=[checkpoint_callback],
+            logger=True,
+        )
+        
+        # 开始训练
+        print("\n开始训练循环...\n")
+        trainer.fit(lit_module, datamodule=datamodule)
+        
+        print("\n" + "="*80)
+        print("RLOO 训练完成！")
+        print("="*80)
+        print(f"\n模型已保存到: {self.output_dir}")
+        print("\n训练统计:")
+        print(f"  总 epochs: {self.epochs}")
+        if checkpoint_callback.best_model_path:
+            print(f"  最佳 checkpoint: {checkpoint_callback.best_model_path}")
+        if checkpoint_callback.last_model_path:
+            print(f"  最后 checkpoint: {checkpoint_callback.last_model_path}")
+        print("="*80 + "\n")
+        
+        return trainer, lit_module
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="真实的 RLOO 微调 - 带梯度更新的完整实现"
+    )
+    
+    # 数据和模型
+    parser.add_argument(
+        "--task",
+        type=str,
+        default="leaf_disease_segmentation",
+        choices=[
+            "polyp",
+            "leaf_disease_segmentation",
+            "camo_sem_seg",
+            "isic2017",
+            "road_segmentation",
+            "SBU-shadow"
+        ],
+    )
+    parser.add_argument(
+        "--ckpt_path",
+        type=str,
+        required=True,
+        help="阶段一 Conv-LoRA SAM checkpoint 目录"
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default="outputs_rloo_real",
+        help="输出目录"
+    )
+    
+    # RLOO 超参数
+    parser.add_argument(
+        "--num_generations",
+        type=int,
+        default=4,
+        help="每个样本生成的候选 mask 数量 G"
+    )
+    parser.add_argument(
+        "--beta",
+        type=float,
+        default=0.05,
+        help="KL 正则系数"
+    )
+    parser.add_argument(
+        "--reward_type",
+        type=str,
+        default="combo",
+        choices=["iou", "dice", "combo"],
+        help="reward 类型"
+    )
+    
+    # 训练参数
+    parser.add_argument(
+        "--learning_rate",
+        type=float,
+        default=1e-5,
+        help="学习率"
+    )
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=3,
+        help="训练 epoch 数"
+    )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=2,
+        help="Batch size"
+    )
+    parser.add_argument(
+        "--num_workers",
+        type=int,
+        default=4,
+        help="DataLoader workers"
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="随机种子"
+    )
+    
+    args = parser.parse_args()
+    
+    # 加载 AutoGluon Predictor
+    print(f"\n加载模型: {args.ckpt_path}")
+    predictor = MultiModalPredictor.load(args.ckpt_path)
+    
+    # 创建 RLOO Trainer
+    rloo_trainer = RLOOTrainer(
+        ckpt_path=args.ckpt_path,
+        output_dir=args.output_dir,
+        num_generations=args.num_generations,
+        beta=args.beta,
+        reward_type=args.reward_type,
+        learning_rate=args.learning_rate,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        seed=args.seed,
+    )
+    
+    # 训练
+    trainer, lit_module = rloo_trainer.train(predictor, args.task)
+    
+    print("\n✓ 训练完成！")
+    print(f"✓ 输出目录: {args.output_dir}")
+
+
+if __name__ == "__main__":
+    main()
+
+
+```
+
+```python
+"""
+真实的 RLOO 训练脚本 - 带梯度更新
+基于 AutoGluon 内部组件构建，直接使用 PyTorch Lightning Trainer
+"""
+import argparse
+import os
+from typing import Dict, List, Optional
+
+import pandas as pd
+import torch
+from torch import nn
+from torch.utils.data import DataLoader
+
+# 使用 lightning.pytorch 而不是 pytorch_lightning（与 AutoGluon 一致）
+from lightning.pytorch import Trainer, seed_everything
+from lightning.pytorch.callbacks import ModelCheckpoint
+
+from autogluon.multimodal import MultiModalPredictor
+from autogluon.multimodal.constants import LABEL
+
+from lit_semantic_seg_rloo import RLOOSemanticSegmentationLitModule
+
+
+def expand_path(df: pd.DataFrame, dataset_dir: str) -> pd.DataFrame:
+    """复用原脚本中的路径展开逻辑"""
+    for col in ["image", "label"]:
+        df[col] = df[col].apply(lambda ele: os.path.join(dataset_dir, ele))
+    return df
+
+
+class RLOOTrainer:
+    """
+    RLOO 训练器，管理真实的 RL 训练循环
+    """
+    
+    def __init__(
+        self,
+        ckpt_path: str,
+        output_dir: str,
+        num_generations: int = 4,
+        beta: float = 0.05,
+        reward_type: str = "combo",
+        supervised_weight: float = 0.0,
+        learning_rate: float = 1e-5,
+        epochs: int = 3,
+        batch_size: int = 2,
+        num_workers: int = 4,
+        seed: int = 42,
+    ):
+        """
+        Parameters
+        ----------
+        ckpt_path
+            阶段一 Conv-LoRA SAM checkpoint 路径
+        output_dir
+            输出目录
+        num_generations
+            每个样本生成的候选 mask 数量
+        beta
+            KL 正则系数
+        reward_type
+            reward 类型："iou", "dice", 或 "combo"
+        supervised_weight
+            混合训练中监督损失的权重（0-1之间）
+            0 = 纯RLOO，1 = 纯监督
+        learning_rate
+            学习率
+        epochs
+            训练 epoch 数
+        batch_size
+            Batch size
+        num_workers
+            DataLoader workers 数量
+        seed
+            随机种子
+        """
+        self.ckpt_path = ckpt_path
+        self.output_dir = output_dir
+        self.num_generations = num_generations
+        self.beta = beta
+        self.reward_type = reward_type
+        self.supervised_weight = supervised_weight
+        self.learning_rate = learning_rate
+        self.epochs = epochs
+        self.batch_size = batch_size
+        self.num_workers = num_workers
+        self.seed = seed
+        
+        # 处理路径
+        if self.ckpt_path.endswith('.ckpt'):
+            self.ckpt_path = os.path.dirname(self.ckpt_path)
+        
+        if not os.path.isdir(self.ckpt_path):
+            raise ValueError(
+                f"Checkpoint path '{self.ckpt_path}' does not exist or is not a directory."
+            )
+        
+        os.makedirs(self.output_dir, exist_ok=True)
+        torch.manual_seed(self.seed)
+        seed_everything(self.seed)
+        
+    def load_train_data(self, task: str):
+        """
+        重新加载训练和验证数据集
+        """
+        dataset_name = task
+        dataset_dir = os.path.join(f"datasets/{dataset_name}", dataset_name)
+        train_csv = os.path.join(dataset_dir, "train.csv")
+        val_csv = os.path.join(dataset_dir, "val.csv")
+        
+        if not os.path.exists(train_csv):
+            raise FileNotFoundError(f"Training data not found: {train_csv}")
+        
+        train_df = pd.read_csv(train_csv)
+        
+        # 展开路径（与原始训练脚本一致）
+        for col in ["image", "label"]:
+            if col in train_df.columns:
+                train_df[col] = train_df[col].apply(lambda ele: os.path.join(dataset_dir, ele))
+        
+        # 加载验证集（如果存在）
+        val_df = None
+        if os.path.exists(val_csv):
+            val_df = pd.read_csv(val_csv)
+            for col in ["image", "label"]:
+                if col in val_df.columns:
+                    val_df[col] = val_df[col].apply(lambda ele: os.path.join(dataset_dir, ele))
+        
+        return train_df, val_df
+    
+    def setup_model_and_datamodule(self, predictor: MultiModalPredictor, task: str):
+        """
+        从 AutoGluon Predictor 中提取模型和 DataModule
+        """
+        learner = predictor._learner
+        
+        # 获取模型
+        model = learner._model
+        
+        # 重新加载训练和验证数据
+        train_data, val_data = self.load_train_data(task)
+        
+        # 手动设置数据到 learner（因为 get_datamodule_per_run 依赖这些属性）
+        learner._train_data = train_data
+        learner._tuning_data = val_data  # 设置验证数据，DataModule 需要它
+        
+        # 创建 DataModule
+        datamodule = learner.get_datamodule_per_run(
+            df_preprocessor=learner._df_preprocessor,
+            data_processors=learner._data_processors,
+            per_gpu_batch_size=self.batch_size,  # 使用我们指定的 batch_size
+            num_workers=self.num_workers,
+            is_train=True,
+        )
+        
+        return model, datamodule
+    
+    def freeze_non_conv_lora_params(self, model: nn.Module):
+        """
+        冻结非 Conv-LoRA 参数，只训练 Conv-LoRA
+        """
+        trainable_count = 0
+        frozen_count = 0
+        
+        for name, param in model.named_parameters():
+            # 只保持 Conv-LoRA 参数可训练
+            if 'lora_A' in name or 'lora_B' in name:
+                param.requires_grad = True
+                trainable_count += param.numel()
+            else:
+                param.requires_grad = False
+                frozen_count += param.numel()
+        
+        print(f"\n参数统计:")
+        print(f"  可训练参数: {trainable_count:,}")
+        print(f"  冻结参数: {frozen_count:,}")
+        print(f"  总参数: {trainable_count + frozen_count:,}\n")
+        
+        return trainable_count
+    
+    def get_trainable_param_names(self, model: nn.Module) -> List[str]:
+        """
+        获取 Conv-LoRA 参数名称列表
+        """
+        trainable_names = []
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                trainable_names.append(name)
+        return trainable_names
+    
+    def create_lit_module(
+        self,
+        model: nn.Module,
+        optim_kwargs: Dict,
+    ) -> RLOOSemanticSegmentationLitModule:
+        """
+        创建 RLOO LitModule
+        """
+        # 获取可训练参数名称
+        trainable_param_names = self.get_trainable_param_names(model)
+        
+        # 创建 LitModule
+        lit_module = RLOOSemanticSegmentationLitModule(
+            model=model,
+            enable_rloo=True,
+            num_generations=self.num_generations,
+            beta=self.beta,
+            reward_type=self.reward_type,
+            supervised_weight=self.supervised_weight,
+            trainable_param_names=trainable_param_names,
+            **optim_kwargs,
+        )
+        
+        return lit_module
+    
+    def train(self, predictor: MultiModalPredictor, task: str):
+        """
+        执行 RLOO 训练
+        """
+        print("="*80)
+        print("开始真实的 RLOO 训练")
+        print("="*80)
+        print(f"配置:")
+        print(f"  Checkpoint: {self.ckpt_path}")
+        print(f"  输出目录: {self.output_dir}")
+        print(f"  任务: {task}")
+        print(f"  候选数量 (G): {self.num_generations}")
+        print(f"  KL 系数 (β): {self.beta}")
+        print(f"  Reward 类型: {self.reward_type}")
+        print(f"  监督权重: {self.supervised_weight}")
+        if self.supervised_weight > 0:
+            print(f"  训练模式: 混合 (监督: {self.supervised_weight:.1%}, RLOO: {(1-self.supervised_weight):.1%})")
+        else:
+            print(f"  训练模式: 纯 RLOO")
+        print(f"  学习率: {self.learning_rate}")
+        print(f"  Epochs: {self.epochs}")
+        print(f"  Batch size: {self.batch_size}")
+        print("="*80 + "\n")
+        
+        # 设置模型和数据
+        model, datamodule = self.setup_model_and_datamodule(predictor, task)
+        
+        # 冻结非 Conv-LoRA 参数
+        trainable_params = self.freeze_non_conv_lora_params(model)
+        
+        if trainable_params == 0:
+            raise RuntimeError(
+                "没有找到可训练参数！请检查模型是否使用 Conv-LoRA 训练。"
+            )
+        
+        # 获取优化器配置
+        learner = predictor._learner
+        
+        # 获取验证指标（不需要参数，使用 learner 内部的 _output_shape）
+        validation_metric, custom_metric_func = learner.get_validation_metric_per_run()
+        
+        # 获取 loss 函数
+        loss_func, aug_loss_func = learner.get_loss_func_per_run(learner._config)
+        
+        # 构建优化器配置
+        optim_config = learner._config.optim
+        optim_kwargs = dict(
+            optim_type=optim_config.optim_type,
+            lr_choice=optim_config.lr_choice,
+            lr_schedule=optim_config.lr_schedule,
+            lr=self.learning_rate,  # 使用我们指定的学习率
+            lr_decay=optim_config.lr_decay,
+            end_lr=optim_config.end_lr,
+            lr_mult=optim_config.lr_mult,
+            weight_decay=optim_config.weight_decay,
+            warmup_steps=optim_config.warmup_steps,
+            loss_func=loss_func,
+            validation_metric=validation_metric,
+            validation_metric_name=learner._validation_metric_name,
+            custom_metric_func=custom_metric_func,
+        )
+        
+        # 创建 LitModule
+        lit_module = self.create_lit_module(model, optim_kwargs)
+        
+        # 创建 checkpoint callback
+        checkpoint_callback = ModelCheckpoint(
+            dirpath=os.path.join(self.output_dir, 'checkpoints'),
+            filename='rloo-{epoch:02d}-{rloo_mean_reward:.4f}',
+            monitor='rloo_mean_reward',
+            mode='max',
+            save_top_k=3,
+            save_last=True,
+        )
+        
+        # 创建 PyTorch Lightning Trainer
+        trainer = Trainer(
+            max_epochs=self.epochs,
+            accelerator='auto',
+            devices=1,
+            default_root_dir=self.output_dir,
+            enable_progress_bar=True,
+            log_every_n_steps=10,
+            callbacks=[checkpoint_callback],
+            logger=True,
+        )
+        
+        # 开始训练
+        print("\n开始训练循环...\n")
+        trainer.fit(lit_module, datamodule=datamodule)
+        
+        print("\n" + "="*80)
+        print("RLOO 训练完成！")
+        print("="*80)
+        print(f"\n模型已保存到: {self.output_dir}")
+        print("\n训练统计:")
+        print(f"  总 epochs: {self.epochs}")
+        if checkpoint_callback.best_model_path:
+            print(f"  最佳 checkpoint: {checkpoint_callback.best_model_path}")
+        if checkpoint_callback.last_model_path:
+            print(f"  最后 checkpoint: {checkpoint_callback.last_model_path}")
+        print("="*80 + "\n")
+        
+        return trainer, lit_module
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="真实的 RLOO 微调 - 带梯度更新的完整实现"
+    )
+    
+    # 数据和模型
+    parser.add_argument(
+        "--task",
+        type=str,
+        default="leaf_disease_segmentation",
+        choices=[
+            "polyp",
+            "leaf_disease_segmentation",
+            "camo_sem_seg",
+            "isic2017",
+            "road_segmentation",
+            "SBU-shadow"
+        ],
+    )
+    parser.add_argument(
+        "--ckpt_path",
+        type=str,
+        required=True,
+        help="阶段一 Conv-LoRA SAM checkpoint 目录"
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default="outputs_rloo_real",
+        help="输出目录"
+    )
+    
+    # RLOO 超参数
+    parser.add_argument(
+        "--num_generations",
+        type=int,
+        default=4,
+        help="每个样本生成的候选 mask 数量 G"
+    )
+    parser.add_argument(
+        "--beta",
+        type=float,
+        default=0.05,
+        help="KL 正则系数"
+    )
+    parser.add_argument(
+        "--reward_type",
+        type=str,
+        default="combo",
+        choices=["iou", "dice", "combo"],
+        help="reward 类型"
+    )
+    
+    # 训练参数
+    parser.add_argument(
+        "--learning_rate",
+        type=float,
+        default=1e-5,
+        help="学习率"
+    )
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=3,
+        help="训练 epoch 数"
+    )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=2,
+        help="Batch size"
+    )
+    parser.add_argument(
+        "--num_workers",
+        type=int,
+        default=4,
+        help="DataLoader workers"
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="随机种子"
+    )
+    
+    args = parser.parse_args()
+    
+    # 加载 AutoGluon Predictor
+    print(f"\n加载模型: {args.ckpt_path}")
+    predictor = MultiModalPredictor.load(args.ckpt_path)
+    
+    # 创建 RLOO Trainer
+    rloo_trainer = RLOOTrainer(
+        ckpt_path=args.ckpt_path,
+        output_dir=args.output_dir,
+        num_generations=args.num_generations,
+        beta=args.beta,
+        reward_type=args.reward_type,
+        learning_rate=args.learning_rate,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        seed=args.seed,
+    )
+    
+    # 训练
+    trainer, lit_module = rloo_trainer.train(predictor, args.task)
+    
+    print("\n✓ 训练完成！")
+    print(f"✓ 输出目录: {args.output_dir}")
+
+
+if __name__ == "__main__":
+    main()
+
+
+```
+
+```python
+"""
+真实的 RLOO 训练脚本 - 带梯度更新
+基于 AutoGluon 内部组件构建，直接使用 PyTorch Lightning Trainer
+"""
+import argparse
+import os
+from typing import Dict, List, Optional
+
+import pandas as pd
+import torch
+from torch import nn
+from torch.utils.data import DataLoader
+
+# 使用 lightning.pytorch 而不是 pytorch_lightning（与 AutoGluon 一致）
+from lightning.pytorch import Trainer, seed_everything
+from lightning.pytorch.callbacks import ModelCheckpoint
+
+from autogluon.multimodal import MultiModalPredictor
+from autogluon.multimodal.constants import LABEL
+
+from lit_semantic_seg_rloo import RLOOSemanticSegmentationLitModule
+
+
+def expand_path(df: pd.DataFrame, dataset_dir: str) -> pd.DataFrame:
+    """复用原脚本中的路径展开逻辑"""
+    for col in ["image", "label"]:
+        df[col] = df[col].apply(lambda ele: os.path.join(dataset_dir, ele))
+    return df
+
+
+class RLOOTrainer:
+    """
+    RLOO 训练器，管理真实的 RL 训练循环
+    """
+    
+    def __init__(
+        self,
+        ckpt_path: str,
+        output_dir: str,
+        num_generations: int = 4,
+        beta: float = 0.05,
+        reward_type: str = "combo",
+        supervised_weight: float = 0.0,
+        learning_rate: float = 1e-5,
+        epochs: int = 3,
+        batch_size: int = 2,
+        num_workers: int = 4,
+        seed: int = 42,
+    ):
+        """
+        Parameters
+        ----------
+        ckpt_path
+            阶段一 Conv-LoRA SAM checkpoint 路径
+        output_dir
+            输出目录
+        num_generations
+            每个样本生成的候选 mask 数量
+        beta
+            KL 正则系数
+        reward_type
+            reward 类型："iou", "dice", 或 "combo"
+        supervised_weight
+            混合训练中监督损失的权重（0-1之间）
+            0 = 纯RLOO，1 = 纯监督
+        learning_rate
+            学习率
+        epochs
+            训练 epoch 数
+        batch_size
+            Batch size
+        num_workers
+            DataLoader workers 数量
+        seed
+            随机种子
+        """
+        self.ckpt_path = ckpt_path
+        self.output_dir = output_dir
+        self.num_generations = num_generations
+        self.beta = beta
+        self.reward_type = reward_type
+        self.supervised_weight = supervised_weight
+        self.learning_rate = learning_rate
+        self.epochs = epochs
+        self.batch_size = batch_size
+        self.num_workers = num_workers
+        self.seed = seed
+        
+        # 处理路径
+        if self.ckpt_path.endswith('.ckpt'):
+            self.ckpt_path = os.path.dirname(self.ckpt_path)
+        
+        if not os.path.isdir(self.ckpt_path):
+            raise ValueError(
+                f"Checkpoint path '{self.ckpt_path}' does not exist or is not a directory."
+            )
+        
+        os.makedirs(self.output_dir, exist_ok=True)
+        torch.manual_seed(self.seed)
+        seed_everything(self.seed)
+        
+    def load_train_data(self, task: str):
+        """
+        重新加载训练和验证数据集
+        """
+        dataset_name = task
+        dataset_dir = os.path.join(f"datasets/{dataset_name}", dataset_name)
+        train_csv = os.path.join(dataset_dir, "train.csv")
+        val_csv = os.path.join(dataset_dir, "val.csv")
+        
+        if not os.path.exists(train_csv):
+            raise FileNotFoundError(f"Training data not found: {train_csv}")
+        
+        train_df = pd.read_csv(train_csv)
+        
+        # 展开路径（与原始训练脚本一致）
+        for col in ["image", "label"]:
+            if col in train_df.columns:
+                train_df[col] = train_df[col].apply(lambda ele: os.path.join(dataset_dir, ele))
+        
+        # 加载验证集（如果存在）
+        val_df = None
+        if os.path.exists(val_csv):
+            val_df = pd.read_csv(val_csv)
+            for col in ["image", "label"]:
+                if col in val_df.columns:
+                    val_df[col] = val_df[col].apply(lambda ele: os.path.join(dataset_dir, ele))
+        
+        return train_df, val_df
+    
+    def setup_model_and_datamodule(self, predictor: MultiModalPredictor, task: str):
+        """
+        从 AutoGluon Predictor 中提取模型和 DataModule
+        """
+        learner = predictor._learner
+        
+        # 获取模型
+        model = learner._model
+        
+        # 重新加载训练和验证数据
+        train_data, val_data = self.load_train_data(task)
+        
+        # 手动设置数据到 learner（因为 get_datamodule_per_run 依赖这些属性）
+        learner._train_data = train_data
+        learner._tuning_data = val_data  # 设置验证数据，DataModule 需要它
+        
+        # 创建 DataModule
+        datamodule = learner.get_datamodule_per_run(
+            df_preprocessor=learner._df_preprocessor,
+            data_processors=learner._data_processors,
+            per_gpu_batch_size=self.batch_size,  # 使用我们指定的 batch_size
+            num_workers=self.num_workers,
+            is_train=True,
+        )
+        
+        return model, datamodule
+    
+    def freeze_non_conv_lora_params(self, model: nn.Module):
+        """
+        冻结非 Conv-LoRA 参数，只训练 Conv-LoRA
+        """
+        trainable_count = 0
+        frozen_count = 0
+        
+        for name, param in model.named_parameters():
+            # 只保持 Conv-LoRA 参数可训练
+            if 'lora_A' in name or 'lora_B' in name:
+                param.requires_grad = True
+                trainable_count += param.numel()
+            else:
+                param.requires_grad = False
+                frozen_count += param.numel()
+        
+        print(f"\n参数统计:")
+        print(f"  可训练参数: {trainable_count:,}")
+        print(f"  冻结参数: {frozen_count:,}")
+        print(f"  总参数: {trainable_count + frozen_count:,}\n")
+        
+        return trainable_count
+    
+    def get_trainable_param_names(self, model: nn.Module) -> List[str]:
+        """
+        获取 Conv-LoRA 参数名称列表
+        """
+        trainable_names = []
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                trainable_names.append(name)
+        return trainable_names
+    
+    def create_lit_module(
+        self,
+        model: nn.Module,
+        optim_kwargs: Dict,
+    ) -> RLOOSemanticSegmentationLitModule:
+        """
+        创建 RLOO LitModule
+        """
+        # 获取可训练参数名称
+        trainable_param_names = self.get_trainable_param_names(model)
+        
+        # 创建 LitModule
+        lit_module = RLOOSemanticSegmentationLitModule(
+            model=model,
+            enable_rloo=True,
+            num_generations=self.num_generations,
+            beta=self.beta,
+            reward_type=self.reward_type,
+            supervised_weight=self.supervised_weight,
+            trainable_param_names=trainable_param_names,
+            **optim_kwargs,
+        )
+        
+        return lit_module
+    
+    def train(self, predictor: MultiModalPredictor, task: str):
+        """
+        执行 RLOO 训练
+        """
+        print("="*80)
+        print("开始真实的 RLOO 训练")
+        print("="*80)
+        print(f"配置:")
+        print(f"  Checkpoint: {self.ckpt_path}")
+        print(f"  输出目录: {self.output_dir}")
+        print(f"  任务: {task}")
+        print(f"  候选数量 (G): {self.num_generations}")
+        print(f"  KL 系数 (β): {self.beta}")
+        print(f"  Reward 类型: {self.reward_type}")
+        print(f"  监督权重: {self.supervised_weight}")
+        if self.supervised_weight > 0:
+            print(f"  训练模式: 混合 (监督: {self.supervised_weight:.1%}, RLOO: {(1-self.supervised_weight):.1%})")
+        else:
+            print(f"  训练模式: 纯 RLOO")
+        print(f"  学习率: {self.learning_rate}")
+        print(f"  Epochs: {self.epochs}")
+        print(f"  Batch size: {self.batch_size}")
+        print("="*80 + "\n")
+        
+        # 设置模型和数据
+        model, datamodule = self.setup_model_and_datamodule(predictor, task)
+        
+        # 冻结非 Conv-LoRA 参数
+        trainable_params = self.freeze_non_conv_lora_params(model)
+        
+        if trainable_params == 0:
+            raise RuntimeError(
+                "没有找到可训练参数！请检查模型是否使用 Conv-LoRA 训练。"
+            )
+        
+        # 获取优化器配置
+        learner = predictor._learner
+        
+        # 获取验证指标（不需要参数，使用 learner 内部的 _output_shape）
+        validation_metric, custom_metric_func = learner.get_validation_metric_per_run()
+        
+        # 获取 loss 函数
+        loss_func, aug_loss_func = learner.get_loss_func_per_run(learner._config)
+        
+        # 构建优化器配置
+        optim_config = learner._config.optim
+        optim_kwargs = dict(
+            optim_type=optim_config.optim_type,
+            lr_choice=optim_config.lr_choice,
+            lr_schedule=optim_config.lr_schedule,
+            lr=self.learning_rate,  # 使用我们指定的学习率
+            lr_decay=optim_config.lr_decay,
+            end_lr=optim_config.end_lr,
+            lr_mult=optim_config.lr_mult,
+            weight_decay=optim_config.weight_decay,
+            warmup_steps=optim_config.warmup_steps,
+            loss_func=loss_func,
+            validation_metric=validation_metric,
+            validation_metric_name=learner._validation_metric_name,
+            custom_metric_func=custom_metric_func,
+        )
+        
+        # 创建 LitModule
+        lit_module = self.create_lit_module(model, optim_kwargs)
+        
+        # 创建 checkpoint callback
+        checkpoint_callback = ModelCheckpoint(
+            dirpath=os.path.join(self.output_dir, 'checkpoints'),
+            filename='rloo-{epoch:02d}-{rloo_mean_reward:.4f}',
+            monitor='rloo_mean_reward',
+            mode='max',
+            save_top_k=3,
+            save_last=True,
+        )
+        
+        # 创建 PyTorch Lightning Trainer
+        trainer = Trainer(
+            max_epochs=self.epochs,
+            accelerator='auto',
+            devices=1,
+            default_root_dir=self.output_dir,
+            enable_progress_bar=True,
+            log_every_n_steps=10,
+            callbacks=[checkpoint_callback],
+            logger=True,
+        )
+        
+        # 开始训练
+        print("\n开始训练循环...\n")
+        trainer.fit(lit_module, datamodule=datamodule)
+        
+        print("\n" + "="*80)
+        print("RLOO 训练完成！")
+        print("="*80)
+        print(f"\n模型已保存到: {self.output_dir}")
+        print("\n训练统计:")
+        print(f"  总 epochs: {self.epochs}")
+        if checkpoint_callback.best_model_path:
+            print(f"  最佳 checkpoint: {checkpoint_callback.best_model_path}")
+        if checkpoint_callback.last_model_path:
+            print(f"  最后 checkpoint: {checkpoint_callback.last_model_path}")
+        print("="*80 + "\n")
+        
+        return trainer, lit_module
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="真实的 RLOO 微调 - 带梯度更新的完整实现"
+    )
+    
+    # 数据和模型
+    parser.add_argument(
+        "--task",
+        type=str,
+        default="leaf_disease_segmentation",
+        choices=[
+            "polyp",
+            "leaf_disease_segmentation",
+            "camo_sem_seg",
+            "isic2017",
+            "road_segmentation",
+            "SBU-shadow"
+        ],
+    )
+    parser.add_argument(
+        "--ckpt_path",
+        type=str,
+        required=True,
+        help="阶段一 Conv-LoRA SAM checkpoint 目录"
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default="outputs_rloo_real",
+        help="输出目录"
+    )
+    
+    # RLOO 超参数
+    parser.add_argument(
+        "--num_generations",
+        type=int,
+        default=4,
+        help="每个样本生成的候选 mask 数量 G"
+    )
+    parser.add_argument(
+        "--beta",
+        type=float,
+        default=0.05,
+        help="KL 正则系数"
+    )
+    parser.add_argument(
+        "--reward_type",
+        type=str,
+        default="combo",
+        choices=["iou", "dice", "combo"],
+        help="reward 类型"
+    )
+    parser.add_argument(
+        "--supervised_weight",
+        type=float,
+        default=0.0,
+        help="混合训练中监督损失的权重 (0-1)，0=纯RLOO，1=纯监督"
+    )
+    
+    # 训练参数
+    parser.add_argument(
+        "--learning_rate",
+        type=float,
+        default=1e-5,
+        help="学习率"
+    )
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=3,
+        help="训练 epoch 数"
+    )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=2,
+        help="Batch size"
+    )
+    parser.add_argument(
+        "--num_workers",
+        type=int,
+        default=4,
+        help="DataLoader workers"
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="随机种子"
+    )
+    
+    args = parser.parse_args()
+    
+    # 加载 AutoGluon Predictor
+    print(f"\n加载模型: {args.ckpt_path}")
+    predictor = MultiModalPredictor.load(args.ckpt_path)
+    
+    # 创建 RLOO Trainer
+    rloo_trainer = RLOOTrainer(
+        ckpt_path=args.ckpt_path,
+        output_dir=args.output_dir,
+        num_generations=args.num_generations,
+        beta=args.beta,
+        reward_type=args.reward_type,
+        learning_rate=args.learning_rate,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        seed=args.seed,
+    )
+    
+    # 训练
+    trainer, lit_module = rloo_trainer.train(predictor, args.task)
+    
+    print("\n✓ 训练完成！")
+    print(f"✓ 输出目录: {args.output_dir}")
+
+
+if __name__ == "__main__":
+    main()
+
+
+```
+
+```python
+"""
+真实的 RLOO 训练脚本 - 带梯度更新
+基于 AutoGluon 内部组件构建，直接使用 PyTorch Lightning Trainer
+"""
+import argparse
+import os
+from typing import Dict, List, Optional
+
+import pandas as pd
+import torch
+from torch import nn
+from torch.utils.data import DataLoader
+
+# 使用 lightning.pytorch 而不是 pytorch_lightning（与 AutoGluon 一致）
+from lightning.pytorch import Trainer, seed_everything
+from lightning.pytorch.callbacks import ModelCheckpoint
+
+from autogluon.multimodal import MultiModalPredictor
+from autogluon.multimodal.constants import LABEL
+
+from lit_semantic_seg_rloo import RLOOSemanticSegmentationLitModule
+
+
+def expand_path(df: pd.DataFrame, dataset_dir: str) -> pd.DataFrame:
+    """复用原脚本中的路径展开逻辑"""
+    for col in ["image", "label"]:
+        df[col] = df[col].apply(lambda ele: os.path.join(dataset_dir, ele))
+    return df
+
+
+class RLOOTrainer:
+    """
+    RLOO 训练器，管理真实的 RL 训练循环
+    """
+    
+    def __init__(
+        self,
+        ckpt_path: str,
+        output_dir: str,
+        num_generations: int = 4,
+        beta: float = 0.05,
+        reward_type: str = "combo",
+        supervised_weight: float = 0.0,
+        learning_rate: float = 1e-5,
+        epochs: int = 3,
+        batch_size: int = 2,
+        num_workers: int = 4,
+        seed: int = 42,
+    ):
+        """
+        Parameters
+        ----------
+        ckpt_path
+            阶段一 Conv-LoRA SAM checkpoint 路径
+        output_dir
+            输出目录
+        num_generations
+            每个样本生成的候选 mask 数量
+        beta
+            KL 正则系数
+        reward_type
+            reward 类型："iou", "dice", 或 "combo"
+        supervised_weight
+            混合训练中监督损失的权重（0-1之间）
+            0 = 纯RLOO，1 = 纯监督
+        learning_rate
+            学习率
+        epochs
+            训练 epoch 数
+        batch_size
+            Batch size
+        num_workers
+            DataLoader workers 数量
+        seed
+            随机种子
+        """
+        self.ckpt_path = ckpt_path
+        self.output_dir = output_dir
+        self.num_generations = num_generations
+        self.beta = beta
+        self.reward_type = reward_type
+        self.supervised_weight = supervised_weight
+        self.learning_rate = learning_rate
+        self.epochs = epochs
+        self.batch_size = batch_size
+        self.num_workers = num_workers
+        self.seed = seed
+        
+        # 处理路径
+        if self.ckpt_path.endswith('.ckpt'):
+            self.ckpt_path = os.path.dirname(self.ckpt_path)
+        
+        if not os.path.isdir(self.ckpt_path):
+            raise ValueError(
+                f"Checkpoint path '{self.ckpt_path}' does not exist or is not a directory."
+            )
+        
+        os.makedirs(self.output_dir, exist_ok=True)
+        torch.manual_seed(self.seed)
+        seed_everything(self.seed)
+        
+    def load_train_data(self, task: str):
+        """
+        重新加载训练和验证数据集
+        """
+        dataset_name = task
+        dataset_dir = os.path.join(f"datasets/{dataset_name}", dataset_name)
+        train_csv = os.path.join(dataset_dir, "train.csv")
+        val_csv = os.path.join(dataset_dir, "val.csv")
+        
+        if not os.path.exists(train_csv):
+            raise FileNotFoundError(f"Training data not found: {train_csv}")
+        
+        train_df = pd.read_csv(train_csv)
+        
+        # 展开路径（与原始训练脚本一致）
+        for col in ["image", "label"]:
+            if col in train_df.columns:
+                train_df[col] = train_df[col].apply(lambda ele: os.path.join(dataset_dir, ele))
+        
+        # 加载验证集（如果存在）
+        val_df = None
+        if os.path.exists(val_csv):
+            val_df = pd.read_csv(val_csv)
+            for col in ["image", "label"]:
+                if col in val_df.columns:
+                    val_df[col] = val_df[col].apply(lambda ele: os.path.join(dataset_dir, ele))
+        
+        return train_df, val_df
+    
+    def setup_model_and_datamodule(self, predictor: MultiModalPredictor, task: str):
+        """
+        从 AutoGluon Predictor 中提取模型和 DataModule
+        """
+        learner = predictor._learner
+        
+        # 获取模型
+        model = learner._model
+        
+        # 重新加载训练和验证数据
+        train_data, val_data = self.load_train_data(task)
+        
+        # 手动设置数据到 learner（因为 get_datamodule_per_run 依赖这些属性）
+        learner._train_data = train_data
+        learner._tuning_data = val_data  # 设置验证数据，DataModule 需要它
+        
+        # 创建 DataModule
+        datamodule = learner.get_datamodule_per_run(
+            df_preprocessor=learner._df_preprocessor,
+            data_processors=learner._data_processors,
+            per_gpu_batch_size=self.batch_size,  # 使用我们指定的 batch_size
+            num_workers=self.num_workers,
+            is_train=True,
+        )
+        
+        return model, datamodule
+    
+    def freeze_non_conv_lora_params(self, model: nn.Module):
+        """
+        冻结非 Conv-LoRA 参数，只训练 Conv-LoRA
+        """
+        trainable_count = 0
+        frozen_count = 0
+        
+        for name, param in model.named_parameters():
+            # 只保持 Conv-LoRA 参数可训练
+            if 'lora_A' in name or 'lora_B' in name:
+                param.requires_grad = True
+                trainable_count += param.numel()
+            else:
+                param.requires_grad = False
+                frozen_count += param.numel()
+        
+        print(f"\n参数统计:")
+        print(f"  可训练参数: {trainable_count:,}")
+        print(f"  冻结参数: {frozen_count:,}")
+        print(f"  总参数: {trainable_count + frozen_count:,}\n")
+        
+        return trainable_count
+    
+    def get_trainable_param_names(self, model: nn.Module) -> List[str]:
+        """
+        获取 Conv-LoRA 参数名称列表
+        """
+        trainable_names = []
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                trainable_names.append(name)
+        return trainable_names
+    
+    def create_lit_module(
+        self,
+        model: nn.Module,
+        optim_kwargs: Dict,
+    ) -> RLOOSemanticSegmentationLitModule:
+        """
+        创建 RLOO LitModule
+        """
+        # 获取可训练参数名称
+        trainable_param_names = self.get_trainable_param_names(model)
+        
+        # 创建 LitModule
+        lit_module = RLOOSemanticSegmentationLitModule(
+            model=model,
+            enable_rloo=True,
+            num_generations=self.num_generations,
+            beta=self.beta,
+            reward_type=self.reward_type,
+            supervised_weight=self.supervised_weight,
+            trainable_param_names=trainable_param_names,
+            **optim_kwargs,
+        )
+        
+        return lit_module
+    
+    def train(self, predictor: MultiModalPredictor, task: str):
+        """
+        执行 RLOO 训练
+        """
+        print("="*80)
+        print("开始真实的 RLOO 训练")
+        print("="*80)
+        print(f"配置:")
+        print(f"  Checkpoint: {self.ckpt_path}")
+        print(f"  输出目录: {self.output_dir}")
+        print(f"  任务: {task}")
+        print(f"  候选数量 (G): {self.num_generations}")
+        print(f"  KL 系数 (β): {self.beta}")
+        print(f"  Reward 类型: {self.reward_type}")
+        print(f"  监督权重: {self.supervised_weight}")
+        if self.supervised_weight > 0:
+            print(f"  训练模式: 混合 (监督: {self.supervised_weight:.1%}, RLOO: {(1-self.supervised_weight):.1%})")
+        else:
+            print(f"  训练模式: 纯 RLOO")
+        print(f"  学习率: {self.learning_rate}")
+        print(f"  Epochs: {self.epochs}")
+        print(f"  Batch size: {self.batch_size}")
+        print("="*80 + "\n")
+        
+        # 设置模型和数据
+        model, datamodule = self.setup_model_and_datamodule(predictor, task)
+        
+        # 冻结非 Conv-LoRA 参数
+        trainable_params = self.freeze_non_conv_lora_params(model)
+        
+        if trainable_params == 0:
+            raise RuntimeError(
+                "没有找到可训练参数！请检查模型是否使用 Conv-LoRA 训练。"
+            )
+        
+        # 获取优化器配置
+        learner = predictor._learner
+        
+        # 获取验证指标（不需要参数，使用 learner 内部的 _output_shape）
+        validation_metric, custom_metric_func = learner.get_validation_metric_per_run()
+        
+        # 获取 loss 函数
+        loss_func, aug_loss_func = learner.get_loss_func_per_run(learner._config)
+        
+        # 构建优化器配置
+        optim_config = learner._config.optim
+        optim_kwargs = dict(
+            optim_type=optim_config.optim_type,
+            lr_choice=optim_config.lr_choice,
+            lr_schedule=optim_config.lr_schedule,
+            lr=self.learning_rate,  # 使用我们指定的学习率
+            lr_decay=optim_config.lr_decay,
+            end_lr=optim_config.end_lr,
+            lr_mult=optim_config.lr_mult,
+            weight_decay=optim_config.weight_decay,
+            warmup_steps=optim_config.warmup_steps,
+            loss_func=loss_func,
+            validation_metric=validation_metric,
+            validation_metric_name=learner._validation_metric_name,
+            custom_metric_func=custom_metric_func,
+        )
+        
+        # 创建 LitModule
+        lit_module = self.create_lit_module(model, optim_kwargs)
+        
+        # 创建 checkpoint callback
+        checkpoint_callback = ModelCheckpoint(
+            dirpath=os.path.join(self.output_dir, 'checkpoints'),
+            filename='rloo-{epoch:02d}-{rloo_mean_reward:.4f}',
+            monitor='rloo_mean_reward',
+            mode='max',
+            save_top_k=3,
+            save_last=True,
+        )
+        
+        # 创建 PyTorch Lightning Trainer
+        trainer = Trainer(
+            max_epochs=self.epochs,
+            accelerator='auto',
+            devices=1,
+            default_root_dir=self.output_dir,
+            enable_progress_bar=True,
+            log_every_n_steps=10,
+            callbacks=[checkpoint_callback],
+            logger=True,
+        )
+        
+        # 开始训练
+        print("\n开始训练循环...\n")
+        trainer.fit(lit_module, datamodule=datamodule)
+        
+        print("\n" + "="*80)
+        print("RLOO 训练完成！")
+        print("="*80)
+        print(f"\n模型已保存到: {self.output_dir}")
+        print("\n训练统计:")
+        print(f"  总 epochs: {self.epochs}")
+        if checkpoint_callback.best_model_path:
+            print(f"  最佳 checkpoint: {checkpoint_callback.best_model_path}")
+        if checkpoint_callback.last_model_path:
+            print(f"  最后 checkpoint: {checkpoint_callback.last_model_path}")
+        print("="*80 + "\n")
+        
+        return trainer, lit_module
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="真实的 RLOO 微调 - 带梯度更新的完整实现"
+    )
+    
+    # 数据和模型
+    parser.add_argument(
+        "--task",
+        type=str,
+        default="leaf_disease_segmentation",
+        choices=[
+            "polyp",
+            "leaf_disease_segmentation",
+            "camo_sem_seg",
+            "isic2017",
+            "road_segmentation",
+            "SBU-shadow"
+        ],
+    )
+    parser.add_argument(
+        "--ckpt_path",
+        type=str,
+        required=True,
+        help="阶段一 Conv-LoRA SAM checkpoint 目录"
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default="outputs_rloo_real",
+        help="输出目录"
+    )
+    
+    # RLOO 超参数
+    parser.add_argument(
+        "--num_generations",
+        type=int,
+        default=4,
+        help="每个样本生成的候选 mask 数量 G"
+    )
+    parser.add_argument(
+        "--beta",
+        type=float,
+        default=0.05,
+        help="KL 正则系数"
+    )
+    parser.add_argument(
+        "--reward_type",
+        type=str,
+        default="combo",
+        choices=["iou", "dice", "combo"],
+        help="reward 类型"
+    )
+    parser.add_argument(
+        "--supervised_weight",
+        type=float,
+        default=0.0,
+        help="混合训练中监督损失的权重 (0-1)，0=纯RLOO，1=纯监督"
+    )
+    
+    # 训练参数
+    parser.add_argument(
+        "--learning_rate",
+        type=float,
+        default=1e-5,
+        help="学习率"
+    )
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=3,
+        help="训练 epoch 数"
+    )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=2,
+        help="Batch size"
+    )
+    parser.add_argument(
+        "--num_workers",
+        type=int,
+        default=4,
+        help="DataLoader workers"
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="随机种子"
+    )
+    
+    args = parser.parse_args()
+    
+    # 加载 AutoGluon Predictor
+    print(f"\n加载模型: {args.ckpt_path}")
+    predictor = MultiModalPredictor.load(args.ckpt_path)
+    
+    # 创建 RLOO Trainer
+    rloo_trainer = RLOOTrainer(
+        ckpt_path=args.ckpt_path,
+        output_dir=args.output_dir,
+        num_generations=args.num_generations,
+        beta=args.beta,
+        reward_type=args.reward_type,
+        supervised_weight=args.supervised_weight,
+        learning_rate=args.learning_rate,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        seed=args.seed,
+    )
+    
+    # 训练
+    trainer, lit_module = rloo_trainer.train(predictor, args.task)
+    
+    print("\n✓ 训练完成！")
+    print(f"✓ 输出目录: {args.output_dir}")
+
+
+if __name__ == "__main__":
+    main()
+
+
+```
+
+现在让我创建一个详细的实验指南：
+
+```markdown
+# 实验 4：混合训练 (RLOO + 监督) 使用指南
+
+## 🎯 目标
+
+通过混合 RLOO 和监督学习，避免纯 RLOO 导致的性能下降问题。
+
+## 📊 问题回顾
+
+| 实验 | 策略 | 测试 IoU | 问题 |
+|------|------|----------|------|
+| 基线 | 监督 | 0.7707 | - |
+| Exp1 | RLOO (beta=0.01) | 0.7624 | 略微下降 |
+| Exp3 | RLOO (大噪声) | 0.6568 ↓↓ | 严重下降 |
+
+**根本问题**：纯 RLOO 容易学到低质量策略
+
+## ✅ 改进方案
+
+### 三大改进
+
+1. **保守采样**：噪声从 1.0-3.0 降低到 0.1-0.5
+2. **混合训练**：添加 30-50% 监督损失
+3. **修复 Diversity**：除以像素数，显示真实的 KL 散度
+
+### 混合训练公式
+
+```python
+total_loss = supervised_weight * supervised_loss + (1 - supervised_weight) * rloo_loss
+```
+
+- `supervised_weight = 0.4`：40% 监督 + 60% RLOO
+- 监督信号提供稳定性，RLOO 提供探索
+
+## 🚀 运行实验
+
+### 实验 4A：混合训练（推荐）
+
+```bash
+cd /root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA
+
+nohup python run_semantic_segmentation_rloo_real.py \
+  --task isic2017 \
+  --ckpt_path AutogluonModels/ag-20251126_062717 \
+  --output_dir outputs/rloo/isic2017/exp4a_hybrid \
+  --num_generations 4 \
+  --beta 0.0 \
+  --reward_type combo \
+  --supervised_weight 0.4 \
+  --learning_rate 1e-5 \
+  --epochs 3 \
+  --batch_size 2 \
+  > exp4a-hybrid-251127.log 2>&1 &
+
+# 查看日志
+tail -f exp4a-hybrid-251127.log
+```
+
+**参数解释**：
+- `--supervised_weight 0.4`：**关键参数**，40% 监督 + 60% RLOO
+- `--num_generations 4`：生成 4 个候选
+- `--beta 0.0`：无 KL 惩罚
+- `--epochs 3`：3 个 epochs（避免过拟合）
+
+### 实验 4B：更保守的混合
+
+如果 4A 效果不佳，尝试更高的监督权重：
+
+```bash
+nohup python run_semantic_segmentation_rloo_real.py \
+  --task isic2017 \
+  --ckpt_path AutogluonModels/ag-20251126_062717 \
+  --output_dir outputs/rloo/isic2017/exp4b_hybrid_conservative \
+  --num_generations 4 \
+  --beta 0.0 \
+  --reward_type combo \
+  --supervised_weight 0.6 \
+  --learning_rate 1e-5 \
+  --epochs 3 \
+  --batch_size 2 \
+  > exp4b-hybrid_conservative-251127.log 2>&1 &
+```
+
+**参数解释**：
+- `--supervised_weight 0.6`：60% 监督 + 40% RLOO（更保守）
+
+### 实验 4C：纯 RLOO with 小噪声（对比）
+
+测试是否只是噪声太大导致的问题：
+
+```bash
+nohup python run_semantic_segmentation_rloo_real.py \
+  --task isic2017 \
+  --ckpt_path AutogluonModels/ag-20251126_062717 \
+  --output_dir outputs/rloo/isic2017/exp4c_pure_rloo_tiny_noise \
+  --num_generations 4 \
+  --beta 0.0 \
+  --reward_type combo \
+  --supervised_weight 0.0 \
+  --learning_rate 5e-6 \
+  --epochs 2 \
+  --batch_size 2 \
+  > exp4c-pure_rloo_tiny_noise-251127.log 2>&1 &
+```
+
+**参数解释**：
+- `--supervised_weight 0.0`：纯 RLOO（但使用小噪声）
+- `--learning_rate 5e-6`：更小的学习率
+- `--epochs 2`：只训练 2 个 epochs
+
+## 📊 监控指标
+
+训练时关注以下指标：
+
+### 必看指标
+
+| 指标 | 预期值 (Exp4A) | 说明 |
+|------|----------------|------|
+| `rloo_mean_diversity_step` | **0.001-0.01** | 真实的 KL 散度（归一化后） |
+| `rloo_mean_reward_step` | 1.6-1.8 | 应该逐渐上升 |
+| `rloo_mean_iou_step` | 0.75-0.85 | 训练集 IoU |
+| `rloo_mean_dice_step` | 0.85-0.92 | 训练集 Dice |
+
+### 混合训练特有指标
+
+| 指标 | 说明 |
+|------|------|
+| `rloo_rloo_loss_step` | RLOO 损失分量 |
+| `rloo_supervised_loss_step` | 监督损失分量 |
+
+### 对比（预期改进）
+
+| 训练类型 | Diversity | 训练 IoU | 测试 IoU（预期） |
+|----------|-----------|----------|-----------------|
+| **Exp3 (大噪声)** | ~3e+5 (错误) | 0.52-0.88 | 0.66 ↓↓ |
+| **Exp4A (混合)** | 0.001-0.01 ✓ | 0.75-0.85 ✓ | **≥ 0.77** ✓ |
+
+## ✅ 评估模型
+
+训练完成后评估：
+
+```bash
+cd /root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA
+
+# 找到最佳 checkpoint
+# 假设是 rloo-epoch=XX-rloo_mean_reward=Y.YYYY.ckpt
+
+python evaluate_rloo_lightning.py \
+  --checkpoint_path outputs/rloo/isic2017/exp4a_hybrid/checkpoints/rloo-epoch=XX-rloo_mean_reward=Y.YYYY.ckpt \
+  --base_predictor_path AutogluonModels/ag-20251126_062717 \
+  --task isic2017 \
+  --batch_size 4 \
+  --output_file results_exp4a_hybrid.json
+```
+
+## 🎯 成功标准
+
+### 最低要求（必须达到）
+- ✅ 测试 IoU ≥ 0.77（不比基线差）
+- ✅ Diversity 在合理范围（0.001-0.01）
+- ✅ 训练稳定，不崩溃
+
+### 理想目标
+- 🎯 测试 IoU > 0.78（超过基线 1%）
+- 🎯 训练-测试差距 < 10%
+
+### 放弃标准
+如果 Exp4A/B/C 都无法达到最低要求：
+- 放弃 RLOO 方法
+- 转而改进监督学习
+- 考虑其他技术（TTA、模型集成等）
+
+## 📝 代码改动
+
+### 1. `lit_semantic_seg_rloo.py`
+
+**采样策略（保守）**：
+```python
+# 旧代码（Exp3）：
+noise_scale = 1.0 + 2.0 * (g / num_generations)  # 1.0 → 3.0
+
+# 新代码（Exp4）：
+noise_scale = 0.1 + 0.4 * (g / num_generations)  # 0.1 → 0.5
+```
+
+**Diversity 计算（修复）**：
+```python
+# 除以像素数得到真实的平均 KL
+kl_sum = bernoulli_kl(noisy_logits, pred_logits).mean().item()
+num_pixels = pred_logits.numel() / pred_logits.shape[0]
+kl_div = kl_sum / num_pixels  # 归一化
+```
+
+**混合训练**：
+```python
+if self.supervised_weight > 0:
+    supervised_loss = self.loss_func(pred_logits, label)
+    loss = self.supervised_weight * supervised_loss + \
+           (1 - self.supervised_weight) * rloo_loss
+else:
+    loss = rloo_loss
+```
+
+### 2. `run_semantic_segmentation_rloo_real.py`
+
+**新参数**：
+```python
+parser.add_argument(
+    "--supervised_weight",
+    type=float,
+    default=0.0,
+    help="监督损失权重 (0-1)"
+)
+```
+
+## 🔍 调试技巧
+
+### 检查 Diversity 是否合理
+
+```bash
+# 在训练日志中搜索 diversity
+grep "rloo_mean_diversity_step" exp4a-hybrid-251127.log | head -20
+```
+
+**预期**：0.001-0.01（不再是 3e+5）
+
+### 检查混合训练是否生效
+
+```bash
+# 搜索混合训练特有的指标
+grep "rloo_rloo_loss_step\|rloo_supervised_loss_step" exp4a-hybrid-251127.log | head -10
+```
+
+**预期**：能看到两个 loss 分量
+
+### 检查训练稳定性
+
+```bash
+# 查看最后 50 行
+tail -50 exp4a-hybrid-251127.log
+```
+
+**预期**：IoU 稳定在 0.75-0.85，没有 NaN 或崩溃
+
+## 💡 理论分析
+
+### 为什么混合训练可能有效？
+
+1. **监督损失提供稳定基础**
+   - 避免模型偏离太远
+   - 保证基本分割质量
+
+2. **RLOO 提供探索和微调**
+   - 在监督基础上探索更好的策略
+   - 通过 reward 信号优化特定指标（IoU/Dice）
+
+3. **小噪声保证高质量候选**
+   - 候选仍然接近监督学习的结果
+   - 不会学到低质量策略
+
+### 权重如何选择？
+
+| Supervised Weight | 特点 | 适用场景 |
+|-------------------|------|----------|
+| **0.0** | 纯 RLOO | 如果对 RL 有信心 |
+| **0.3-0.5** | 平衡 | 一般推荐，探索与稳定兼顾 |
+| **0.6-0.8** | 保守 | 担心性能下降时 |
+| **1.0** | 纯监督 | 退化为监督学习 |
+
+**推荐**：先试 0.4，如果效果不好再增加到 0.6
+
+## 📈 预期结果
+
+### 乐观情况
+- 测试 IoU: 0.78-0.79（+1-2%）
+- 训练稳定，diversity 合理
+- RLOO 确实有帮助
+
+### 现实情况
+- 测试 IoU: 0.77-0.78（持平或略有提升）
+- 混合训练避免了性能下降
+- RLOO 贡献有限但不有害
+
+### 悲观情况
+- 测试 IoU: 0.76-0.77（略有下降）
+- 需要考虑放弃 RLOO
+- 转而改进其他方面
+
+---
+
+## 🚀 快速开始
+
+**立即运行 Exp4A**：
+
+```bash
+cd /root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA && \
+nohup python run_semantic_segmentation_rloo_real.py \
+  --task isic2017 \
+  --ckpt_path AutogluonModels/ag-20251126_062717 \
+  --output_dir outputs/rloo/isic2017/exp4a_hybrid \
+  --num_generations 4 \
+  --beta 0.0 \
+  --reward_type combo \
+  --supervised_weight 0.4 \
+  --learning_rate 1e-5 \
+  --epochs 3 \
+  --batch_size 2 \
+  > exp4a-hybrid-251127.log 2>&1 &
+
+# 监控
+tail -f exp4a-hybrid-251127.log
+```
+
+**祝实验顺利！** 🎉
+
+```
+
+完美！✅ 我已经实现了**方案 A：混合训练 + 保守采样**。
+
+## 📊 完成的改进
+
+### 1. **降低采样噪声**（lit_semantic_seg_rloo.py）
+- ❌ 旧：noise_scale = 1.0 → 3.0（太激进）
+- ✅ 新：noise_scale = 0.1 → 0.5（保守）
+- 移除了随机丢弃策略
+
+### 2. **修复 Diversity 计算**
+- ❌ 旧：显示 3e+5（像素总和）
+- ✅ 新：除以像素数，显示 0.001-0.01（真实平均 KL）
+
+### 3. **添加混合训练**
+- 新参数：`--supervised_weight`（0-1 之间）
+- 损失公式：`total_loss = α * supervised_loss + (1-α) * rloo_loss`
+- 同时记录两个损失分量
+
+### 4. **更新训练脚本**
+- 添加 `--supervised_weight` 参数
+- 更新打印信息显示训练模式
+
+## 🚀 推荐的下一步实验
+
+### **实验 4A：混合训练（优先推荐）**
+
+```bash
+cd /root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA
+
+nohup python run_semantic_segmentation_rloo_real.py \
+  --task isic2017 \
+  --ckpt_path AutogluonModels/ag-20251126_062717 \
+  --output_dir outputs/rloo/isic2017/exp4a_hybrid \
+  --num_generations 4 \
+  --beta 0.0 \
+  --reward_type combo \
+  --supervised_weight 0.4 \
+  --learning_rate 1e-5 \
+  --epochs 3 \
+  --batch_size 2 \
+  > exp4a-hybrid-251127.log 2>&1 &
+
+tail -f exp4a-hybrid-251127.log
+```
+
+**关键参数**：
+- `--supervised_weight 0.4`：**核心改进**，40% 监督 + 60% RLOO
+- 小噪声（代码中已修改为 0.1-0.5）
+- 只训练 3 个 epochs
+
+## 📊 预期结果
+
+### 监控指标（训练时）
+
+| 指标 | Exp3（失败） | Exp4A（预期） |
+|------|-------------|--------------|
+| `rloo_mean_diversity_step` | ~3e+5 ❌ | 0.001-0.01 ✅ |
+| `rloo_mean_iou_step` | 0.52-0.88 | **0.75-0.85** ✅ |
+| `rloo_mean_dice_step` | 0.65-0.92 | **0.85-0.92** ✅ |
+
+### 测试集性能（评估后）
+
+| 实验 | 测试 IoU | 测试 Dice |
+|------|----------|-----------|
+| 基线 | 0.7707 | 0.8521 |
+| Exp3 | 0.6568 ↓↓ | 0.7678 ↓↓ |
+| **Exp4A（目标）** | **≥ 0.77** ✅ | **≥ 0.85** ✅ |
+
+## 🎯 成功标准
+
+### 最低要求
+- ✅ 测试 IoU ≥ 0.77（不比基线差）
+- ✅ Diversity 合理（0.001-0.01，不再是 3e+5）
+- ✅ 训练稳定
+
+### 理想目标
+- 🎯 测试 IoU > 0.78（超过基线）
+
+### 如果失败
+如果 Exp4A 仍然无法达到最低要求：
+1. 尝试更高的 `--supervised_weight 0.6`（更保守）
+2. 考虑放弃 RLOO
+3. 转而改进监督学习（数据增强、loss 函数等）
+
+## 📝 创建的文档
+
+1. **`EXPERIMENT_ANALYSIS.md`**：详细的问题分析
+2. **`EXPERIMENT4_HYBRID_TRAINING_GUIDE.md`**：完整的实验 4 指南
+
+## 💡 关键洞察
+
+**Exp3 失败的根本原因**：
+1. ❌ 采样噪声太大（1.0-3.0）→ 生成低质量候选
+2. ❌ 训练集 IoU 就很低（0.52-0.88）→ 学到错误策略
+3. ❌ Diversity 显示错误（3e+5）→ 无法有效监控
+
+**Exp4 的改进策略**：
+1. ✅ 保守采样（0.1-0.5）→ 高质量候选
+2. ✅ 混合训练（40% 监督）→ 稳定基础
+3. ✅ 修复 Diversity → 真实监控
+
+---
+
+**请运行 Exp4A 命令，我们一起看看混合训练是否能解决问题！** 🚀
+
+```shellscript
+cd /root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA
+
+nohup python run_semantic_segmentation_rloo_real.py \
+  --task isic2017 \
+  --ckpt_path AutogluonModels/ag-20251126_062717 \
+  --output_dir outputs/rloo/isic2017/exp4a_hybrid \
+  --num_generations 4 \
+  --beta 0.0 \
+  --reward_type combo \
+  --supervised_weight 0.4 \
+  --learning_rate 1e-5 \
+  --epochs 3 \
+  --batch_size 2 \
+  > exp4a-hybrid-251127.log 2>&1 &
+
+tail -f exp4a-hybrid-251127.log
+```
+
+---
+
+**User**
+
+训练完成：Epoch 2: 100%|██████████| 1000/1000 [26:02<00:00,  0.64it/s, v_num=0, rloo_mean_reward_step=1.810, rloo_mean_iou_step=0.880, rloo_mean_dice_step=0.933, rloo_mean_diversity_step=4.25e-5, rloo_rloo_loss_step=-279., rloo_supervised_loss_step=0.412, rloo_mean_reward_epoch=1.850, rloo_mean_iou_epoch=0.904, rloo_mean_dice_epoch=0.948, rloo_mean_diversity_epoch=3.4e-5, rloo_rloo_loss_epoch=-428., rloo_supervised_loss_epoch=0.332]
+
+================================================================================
+
+RLOO 训练完成！
+
+================================================================================
+
+模型已保存到: outputs/rloo/isic2017/exp4a_hybrid
+
+训练统计:
+
+  总 epochs: 3
+
+  最佳 checkpoint: /root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA/outputs/rloo/isic2017/exp4a_hybrid/checkpoints/rloo-epoch=00-rloo_mean_reward=1.8521.ckpt
+
+  最后 checkpoint: /root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA/outputs/rloo/isic2017/exp4a_hybrid/checkpoints/last.ckpt
+
+================================================================================
+
+✓ 训练完成！
+
+✓ 输出目录: outputs/rloo/isic2017/exp4a_hybrid   接下来如何评估其训练出的最好模型在测试集上的性能？
+
+---
+
+**Cursor**
+
+太好了！训练完成了！让我先看一下训练指标：
+
+太好了！训练完成且看起来很稳定！让我分析一下训练指标：
+
+## 📊 训练结果分析
+
+### 关键观察
+
+**✅ 好消息**：
+1. **Diversity 修复成功**：`3.4e-5` 到 `0.00038`（合理范围，不再是 3e+5）
+2. **训练稳定**：
+   - 最终 IoU: 0.904（训练集）
+   - 最终 Dice: 0.948（训练集）
+3. **混合训练生效**：同时显示了 `rloo_loss` 和 `supervised_loss`
+
+**对比 Exp3**：
+- Exp3：训练 IoU 0.52-0.88（不稳定）
+- **Exp4A：训练 IoU 0.904**（稳定且高） ✅
+
+## 🎯 评估最佳模型
+
+使用以下命令在测试集上评估：
+
+```bash
+cd /root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA
+
+python evaluate_rloo_lightning.py \
+  --checkpoint_path outputs/rloo/isic2017/exp4a_hybrid/checkpoints/rloo-epoch=00-rloo_mean_reward=1.8521.ckpt \
+  --base_predictor_path AutogluonModels/ag-20251126_062717 \
+  --task isic2017 \
+  --batch_size 4 \
+  --output_file results_exp4a_hybrid.json
+```
+
+## 📈 结果对比表
+
+| 实验 | 训练 IoU | 测试 IoU | 测试 Dice | 状态 |
+|------|----------|----------|-----------|------|
+| **基线** | ~0.93 | 0.7707 | 0.8521 | ✓ |
+| **Exp1 (beta=0.01, 10ep)** | ~0.93 | 0.7624 ↓ | 0.8466 ↓ | 略降 |
+| **Exp3 (大噪声)** | 0.52-0.88 | 0.6568 ↓↓ | 0.7678 ↓↓ | 大幅下降 |
+| **Exp4A (混合训练)** | **0.904** ✓ | **待评估** | **待评估** | 训练稳定 |
+
+## 🎯 预期结果
+
+基于稳定的训练指标：
+- **乐观预期**：测试 IoU ≥ 0.77，持平或超过基线
+- **保守预期**：测试 IoU ≥ 0.75，至少比 Exp3 (0.66) 好很多
+
+## ⚡ 快速评估命令（一行）
+
+```bash
+cd /root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA && python evaluate_rloo_lightning.py --checkpoint_path outputs/rloo/isic2017/exp4a_hybrid/checkpoints/rloo-epoch=00-rloo_mean_reward=1.8521.ckpt --base_predictor_path AutogluonModels/ag-20251126_062717 --task isic2017 --batch_size 4
+```
+
+## 💡 关键改进总结
+
+Exp4A 相比 Exp3 的改进：
+1. ✅ **保守采样**：噪声 0.1-0.5（vs 1.0-3.0）→ 高质量候选
+2. ✅ **混合训练**：40% 监督损失 → 稳定基础
+3. ✅ **修复 Diversity**：真实的 KL 散度监控
+
+请运行评估命令，让我们看看测试集性能如何！🚀
+
+```shellscript
+cd /root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA
+
+python evaluate_rloo_lightning.py \
+  --checkpoint_path outputs/rloo/isic2017/exp4a_hybrid/checkpoints/rloo-epoch=00-rloo_mean_reward=1.8521.ckpt \
+  --base_predictor_path AutogluonModels/ag-20251126_062717 \
+  --task isic2017 \
+  --batch_size 4 \
+  --output_file results_exp4a_hybrid.json
+```
+
+```shellscript
+cd /root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA && python evaluate_rloo_lightning.py --checkpoint_path outputs/rloo/isic2017/exp4a_hybrid/checkpoints/rloo-epoch=00-rloo_mean_reward=1.8521.ckpt --base_predictor_path AutogluonModels/ag-20251126_062717 --task isic2017 --batch_size 4
+```
+
+---
+
+**User**
+
+这个结果还是不如基线：@bash (597-605)  下一步还可以尝试什么有可能使性能超过基线的？
+
+---
+
+**Cursor**
+
+看到结果了。让我做一个全面的分析：
+
+## 📊 所有实验结果总结
+
+| 实验 | 策略 | 训练IoU | 测试IoU | 测试Dice | vs基线 |
+|------|------|---------|---------|----------|--------|
+| **基线** | 监督（3ep, beta=0.05） | ~0.93 | **0.7707** | **0.8521** | - |
+| **Exp1** | RLOO（10ep, beta=0.01） | ~0.93 | 0.7624 | 0.8466 | -0.8% |
+| **Exp3** | RLOO（大噪声, beta=0） | 0.52-0.88 | 0.6568 | 0.7678 | -11.4% ❌ |
+| **Exp4A** | 混合（40%监督+60%RLOO） | 0.904 | 0.7497 | 0.8377 | **-2.1%** |
+
+## 🔍 关键发现
+
+### 1️⃣ **RLOO 在此任务上无法超越监督学习**
+- 4次实验全部低于基线
+- 即使混合训练（Exp4A）也低了2.1个百分点
+- **RLOO 可能根本不适合密集像素预测任务**
+
+### 2️⃣ **训练集-测试集差距分析**
+| 实验 | 训练IoU | 测试IoU | 差距 |
+|------|---------|---------|------|
+| 基线 | ~0.93 | 0.7707 | **15.3%** |
+| Exp4A | 0.904 | 0.7497 | **15.4%** |
+
+两者过拟合程度相似，说明：
+- 问题不在RLOO本身
+- **基础模型泛化能力是瓶颈**
+
+## 💡 下一步建议
+
+### 🥇 **优先级1：放弃RLOO，改进监督学习**
+
+既然RLOO无法带来提升，应该改进基础训练：
+
+#### 1.1 增强数据增强
+```python
+# 在监督训练中添加
+hyperparameters = {
+    "data.augmentation": {
+        "random_flip": 0.5,
+        "random_rotation": 15,
+        "color_jitter": 0.2,
+        "random_scale": (0.8, 1.2),
+    }
+}
+```
+
+#### 1.2 改进Loss函数
+```python
+# 尝试Focal Loss或Boundary Loss
+from segmentation_models_pytorch.losses import FocalLoss, DiceLoss
+
+# 组合loss
+loss = 0.5 * FocalLoss() + 0.5 * DiceLoss()
+```
+
+#### 1.3 延长训练时间
+```python
+# 基线只训练了3个epochs
+# 尝试10-20 epochs with early stopping
+predictor.fit(
+    max_epochs=20,
+    early_stopping_patience=5,
+)
+```
+
+### 🥈 **优先级2：测试时增强（TTA）**
+
+最简单且有效的方法：
+
+```python
+def predict_with_tta(predictor, image_path, num_augmentations=5):
+    """使用测试时增强"""
+    predictions = []
+    
+    # 原始预测
+    pred = predictor.predict(image_path)
+    predictions.append(pred)
+    
+    # 水平翻转
+    pred_flip = predictor.predict(flip_horizontal(image_path))
+    predictions.append(flip_back(pred_flip))
+    
+    # 多尺度
+    for scale in [0.9, 1.0, 1.1]:
+        pred_scale = predictor.predict(rescale(image_path, scale))
+        predictions.append(rescale_back(pred_scale))
+    
+    # 平均
+    return np.mean(predictions, axis=0)
+```
+
+**预期提升**：+1-3% IoU
+
+### 🥉 **优先级3：如果一定要尝试RL**
+
+#### 3.1 更保守的混合训练
+```bash
+# 增加监督权重到70-80%
+python run_semantic_segmentation_rloo_real.py \
+  --task isic2017 \
+  --ckpt_path AutogluonModels/ag-20251126_062717 \
+  --output_dir outputs/rloo/isic2017/exp4b_very_conservative \
+  --num_generations 4 \
+  --beta 0.0 \
+  --reward_type combo \
+  --supervised_weight 0.7 \
+  --learning_rate 5e-6 \
+  --epochs 2 \
+  --batch_size 2
+```
+
+#### 3.2 只训练1个epoch
+```bash
+# 微调式RLOO：只在监督基础上轻微调整
+python run_semantic_segmentation_rloo_real.py \
+  --supervised_weight 0.5 \
+  --learning_rate 5e-6 \
+  --epochs 1 \
+  --batch_size 2
+```
+
+#### 3.3 改用PPO（需要实现）
+- 更稳定的策略更新
+- Clip机制防止过大变化
+- 但实现成本高
+
+### 🎯 **优先级4：模型集成**
+
+```python
+# 集成多个checkpoint
+checkpoints = [
+    "AutogluonModels/ag-20251126_062717/model.ckpt",  # 基线
+    "outputs/rloo/isic2017/exp4a_hybrid/checkpoints/best.ckpt",  # RLOO
+]
+
+predictions = []
+for ckpt in checkpoints:
+    pred = MultiModalPredictor.load(ckpt).predict(test_data)
+    predictions.append(pred)
+
+# 投票或平均
+final_pred = np.mean(predictions, axis=0) > 0.5
+```
+
+**预期提升**：+0.5-2% IoU
+
+## 📋 推荐实验计划
+
+### 实验5A：TTA（最简单有效）
+
+```python
+# 创建 evaluate_with_tta.py
+import numpy as np
+from autogluon.multimodal import MultiModalPredictor
+
+predictor = MultiModalPredictor.load("AutogluonModels/ag-20251126_062717")
+
+# 对每个测试样本
+for img in test_images:
+    preds = []
+    
+    # 原始
+    preds.append(predictor.predict(img))
+    
+    # 水平翻转
+    preds.append(predictor.predict(flip_h(img)))
+    
+    # 垂直翻转  
+    preds.append(predictor.predict(flip_v(img)))
+    
+    # 旋转
+    for angle in [90, 180, 270]:
+        preds.append(predictor.predict(rotate(img, angle)))
+    
+    # 平均
+    final_pred = np.mean(preds, axis=0)
+```
+
+### 实验5B：重新训练监督模型（改进设置）
+
+```python
+from autogluon.multimodal import MultiModalPredictor
+
+predictor = MultiModalPredictor(
+    label="label",
+    problem_type="semantic_segmentation"
+)
+
+predictor.fit(
+    train_data="data/isic2017/train.csv",
+    hyperparameters={
+        "optimization.learning_rate": 1e-5,
+        "optimization.max_epochs": 15,  # 更多epochs
+        "optimization.warmup_steps": 100,
+        "optimization.patience": 5,  # early stopping
+        "data.augmentation": "strong",  # 强数据增强
+        "model.sam.freeze_image_encoder": False,  # 解冻更多层
+    }
+)
+```
+
+### 实验5C：最后一次RLOO尝试（极保守）
+
+```bash
+python run_semantic_segmentation_rloo_real.py \
+  --task isic2017 \
+  --ckpt_path AutogluonModels/ag-20251126_062717 \
+  --output_dir outputs/rloo/isic2017/exp5c_last_try \
+  --num_generations 4 \
+  --beta 0.0 \
+  --reward_type combo \
+  --supervised_weight 0.8 \
+  --learning_rate 2e-6 \
+  --epochs 1 \
+  --batch_size 2
+```
+
+## 🎯 现实评估
+
+### RLOO的局限性
+
+经过4次实验，可以得出结论：
+
+**RLOO 不适合此任务，因为：**
+1. ✅ 密集监督信号已经很强（每个像素都有GT）
+2. ✅ 监督学习已经达到较好效果（IoU 0.77）
+3. ✅ 采样空间过大（2^65536种可能的mask）
+4. ✅ Reward信号相对稀疏（全局IoU/Dice）
+5. ✅ 4次实验全部低于基线
+
+### 建议的行动方案
+
+**如果目标是超过基线0.7707：**
+1. **立即尝试TTA**（最快，有效）
+2. **重新训练监督模型**（更多epochs + 数据增强）
+3. **模型集成**（基线 + Exp4A）
+
+**如果想继续探索RL：**
+1. 先确认是否值得（成本vs收益）
+2. 考虑切换到PPO或SAC
+3. 或者承认RLOO在此任务上的局限性
+
+## 💬 我的诚实建议
+
+基于所有实验结果，我建议：
+
+1. **放弃纯RLOO训练**
+2. **专注于改进监督学习**（TTA + 数据增强 + 更多epochs）
+3. **接受现实**：不是所有任务都适合RL
+
+如果一定要尝试，建议：
+- Exp5C（极保守混合训练，1 epoch）
+- 如果还是失败，就彻底放弃RLOO
+
+**预期最佳结果**：TTA + 模型集成 → IoU ~0.78-0.79
+
+想尝试哪个方向？🤔
+
+```python
+# 在监督训练中添加
+hyperparameters = {
+    "data.augmentation": {
+        "random_flip": 0.5,
+        "random_rotation": 15,
+        "color_jitter": 0.2,
+        "random_scale": (0.8, 1.2),
+    }
+}
+```
+
+```python
+# 尝试Focal Loss或Boundary Loss
+from segmentation_models_pytorch.losses import FocalLoss, DiceLoss
+
+# 组合loss
+loss = 0.5 * FocalLoss() + 0.5 * DiceLoss()
+```
+
+```python
+# 基线只训练了3个epochs
+# 尝试10-20 epochs with early stopping
+predictor.fit(
+    max_epochs=20,
+    early_stopping_patience=5,
+)
+```
+
+```python
+def predict_with_tta(predictor, image_path, num_augmentations=5):
+    """使用测试时增强"""
+    predictions = []
+    
+    # 原始预测
+    pred = predictor.predict(image_path)
+    predictions.append(pred)
+    
+    # 水平翻转
+    pred_flip = predictor.predict(flip_horizontal(image_path))
+    predictions.append(flip_back(pred_flip))
+    
+    # 多尺度
+    for scale in [0.9, 1.0, 1.1]:
+        pred_scale = predictor.predict(rescale(image_path, scale))
+        predictions.append(rescale_back(pred_scale))
+    
+    # 平均
+    return np.mean(predictions, axis=0)
+```
+
+```shellscript
+# 增加监督权重到70-80%
+python run_semantic_segmentation_rloo_real.py \
+  --task isic2017 \
+  --ckpt_path AutogluonModels/ag-20251126_062717 \
+  --output_dir outputs/rloo/isic2017/exp4b_very_conservative \
+  --num_generations 4 \
+  --beta 0.0 \
+  --reward_type combo \
+  --supervised_weight 0.7 \
+  --learning_rate 5e-6 \
+  --epochs 2 \
+  --batch_size 2
+```
+
+```shellscript
+# 微调式RLOO：只在监督基础上轻微调整
+python run_semantic_segmentation_rloo_real.py \
+  --supervised_weight 0.5 \
+  --learning_rate 5e-6 \
+  --epochs 1 \
+  --batch_size 2
+```
+
+```python
+# 集成多个checkpoint
+checkpoints = [
+    "AutogluonModels/ag-20251126_062717/model.ckpt",  # 基线
+    "outputs/rloo/isic2017/exp4a_hybrid/checkpoints/best.ckpt",  # RLOO
+]
+
+predictions = []
+for ckpt in checkpoints:
+    pred = MultiModalPredictor.load(ckpt).predict(test_data)
+    predictions.append(pred)
+
+# 投票或平均
+final_pred = np.mean(predictions, axis=0) > 0.5
+```
+
+```python
+# 创建 evaluate_with_tta.py
+import numpy as np
+from autogluon.multimodal import MultiModalPredictor
+
+predictor = MultiModalPredictor.load("AutogluonModels/ag-20251126_062717")
+
+# 对每个测试样本
+for img in test_images:
+    preds = []
+    
+    # 原始
+    preds.append(predictor.predict(img))
+    
+    # 水平翻转
+    preds.append(predictor.predict(flip_h(img)))
+    
+    # 垂直翻转  
+    preds.append(predictor.predict(flip_v(img)))
+    
+    # 旋转
+    for angle in [90, 180, 270]:
+        preds.append(predictor.predict(rotate(img, angle)))
+    
+    # 平均
+    final_pred = np.mean(preds, axis=0)
+```
+
+```python
+from autogluon.multimodal import MultiModalPredictor
+
+predictor = MultiModalPredictor(
+    label="label",
+    problem_type="semantic_segmentation"
+)
+
+predictor.fit(
+    train_data="data/isic2017/train.csv",
+    hyperparameters={
+        "optimization.learning_rate": 1e-5,
+        "optimization.max_epochs": 15,  # 更多epochs
+        "optimization.warmup_steps": 100,
+        "optimization.patience": 5,  # early stopping
+        "data.augmentation": "strong",  # 强数据增强
+        "model.sam.freeze_image_encoder": False,  # 解冻更多层
+    }
+)
+```
+
+```shellscript
+python run_semantic_segmentation_rloo_real.py \
+  --task isic2017 \
+  --ckpt_path AutogluonModels/ag-20251126_062717 \
+  --output_dir outputs/rloo/isic2017/exp5c_last_try \
+  --num_generations 4 \
+  --beta 0.0 \
+  --reward_type combo \
+  --supervised_weight 0.8 \
+  --learning_rate 2e-6 \
+  --epochs 1 \
+  --batch_size 2
 ```
 
