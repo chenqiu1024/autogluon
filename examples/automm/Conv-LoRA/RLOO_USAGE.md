@@ -36,11 +36,10 @@ python3 run_rloo_sam.py \
     --per_gpu_batch_size 1 \
     --batch_size 4 \
     --output_dir outputs_rloo \
-    --rloo_k 4 \
-    --rloo_weight 1.0 \
-    --structure_weight 1.0 \
     --seed 42686693
 ```
+
+**注意：** RLOO 的超参数（k=4, rloo_weight=1.0, structure_weight=1.0）已经在配置文件中设置好了。如果需要调整，可以修改 `multimodal/src/autogluon/multimodal/configs/optim/default.yaml` 文件中的 `rloo` 部分。
 
 **参数说明：**
 - `--task`: 数据集名称，可选 `polyp`, `leaf_disease_segmentation`, `camo_sem_seg`, `isic2017`, `road_segmentation`, `SBU-shadow`
@@ -49,9 +48,15 @@ python3 run_rloo_sam.py \
 - `--num_gpus`: 使用的 GPU 数量
 - `--batch_size`: 有效批大小（会自动使用梯度累积）
 - `--per_gpu_batch_size`: 每个 GPU 的批大小
-- `--rloo_k`: RLOO 采样数量（每个图像采样 k 个 mask）
-- `--rloo_weight`: RLOO loss 的权重
-- `--structure_weight`: Structure loss 的权重（监督学习部分）
+
+**如需自定义 RLOO 超参数：**
+编辑 `multimodal/src/autogluon/multimodal/configs/optim/default.yaml`:
+```yaml
+rloo:
+  k: 4  # 每个图像采样的 mask 数量
+  weight: 1.0  # RLOO loss 权重
+  structure_weight: 1.0  # Structure loss 权重
+```
 
 ### 2.3 其他数据集训练示例
 
@@ -61,9 +66,7 @@ python3 run_rloo_sam.py \
     --task polyp \
     --rank 3 \
     --expert_num 8 \
-    --output_dir outputs_polyp_rloo \
-    --rloo_k 6 \
-    --rloo_weight 1.5
+    --output_dir outputs_polyp_rloo
 ```
 
 **Road Segmentation:**
@@ -72,8 +75,7 @@ python3 run_rloo_sam.py \
     --task road_segmentation \
     --rank 3 \
     --expert_num 8 \
-    --output_dir outputs_road_rloo \
-    --rloo_k 4
+    --output_dir outputs_road_rloo
 ```
 
 ## 3. 仅评估命令（使用已训练模型）

@@ -65,11 +65,6 @@ if __name__ == "__main__":
     )
     parser.add_argument("--eval", action="store_true", help="Evaluation mode (skip training)")
     
-    # RLOO specific arguments
-    parser.add_argument("--rloo_k", type=int, default=4, help="Number of samples for RLOO baseline")
-    parser.add_argument("--rloo_weight", type=float, default=1.0, help="Weight for RLOO loss")
-    parser.add_argument("--structure_weight", type=float, default=1.0, help="Weight for Structure loss")
-    
     args = parser.parse_args()
 
     dataset_name = args.task
@@ -95,9 +90,11 @@ if __name__ == "__main__":
             "optim.lr": lr,
             "env.per_gpu_batch_size": args.per_gpu_batch_size,
             "env.batch_size": args.batch_size,
-            # RLOO specific hyperparameters
-            "optim.rloo.k": args.rloo_k,
-            "optim.rloo.weight": args.rloo_weight,
+            # RLOO hyperparameters are now in config/optim/default.yaml
+            # You can still override them here if needed:
+            # "optim.rloo.k": 4,
+            # "optim.rloo.weight": 1.0,
+            # "optim.rloo.structure_weight": 1.0,
         }
     )
 
