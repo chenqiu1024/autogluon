@@ -15,8 +15,38 @@ import torch.nn.functional as F
 from torch.distributions.normal import Normal
 
 
+
 def identity(x):
     return x
+
+
+class AdapterLayer(nn.Module):
+    """
+    Standard Bottleneck Adapter Layer.
+    Structure: Linear(d, r) -> Activation -> Linear(r, d) -> Scale
+    """
+    def __init__(self, in_features, adapter_dim, scale=1.0, dropout=0.0):
+        super().__init__()
+        self.down_proj = nn.Linear(in_features, adapter_dim)
+        self.activation = nn.GELU()
+        self.up_proj = nn.Linear(adapter_dim, in_features)
+        self.scale = nn.Parameter(torch.tensor(scale))
+        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+        
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        nn.init.kaiming_uniform_(self.down_proj.weight, a=math.sqrt(5))
+        nn.init.zeros_(self.up_proj.weight)
+        nn.init.zeros_(self.down_proj.bias)
+        nn.init.zeros_(self.up_proj.bias)
+
+    def forward(self, x):
+        down = self.down_proj(x)
+        act = self.activation(down)
+        up = self.up_proj(act)
+        return self.dropout(up) * self.scale
+
 
 
 class LoRALayer:

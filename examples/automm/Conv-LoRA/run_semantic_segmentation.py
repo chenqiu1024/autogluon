@@ -70,7 +70,12 @@ if __name__ == "__main__":
     parser.add_argument("--gspo_group_size", type=int, default=4, help="Number of predictions per group in GSPO")
     parser.add_argument("--gspo_warmup_epochs", type=int, default=5, help="Number of epochs before enabling GSPO")
     parser.add_argument("--gspo_contrastive_weight", type=float, default=0.1, help="Weight for contrastive loss in GSPO")
+    parser.add_argument("--gspo_contrastive_weight", type=float, default=0.1, help="Weight for contrastive loss in GSPO")
     parser.add_argument("--gspo_quality_momentum", type=float, default=0.9, help="Momentum for expert quality history")
+    
+    # Adapter parameters
+    parser.add_argument("--adapter_enable", action="store_true", help="Enable standard Adapter modules")
+    parser.add_argument("--adapter_dim", type=int, default=64, help="Dimension of the adapter bottleneck")
     args = parser.parse_args()
 
     dataset_name = args.task
@@ -111,7 +116,16 @@ if __name__ == "__main__":
             "optim.lora.gspo_group_size": args.gspo_group_size,
             "optim.lora.gspo_quality_momentum": args.gspo_quality_momentum,
             "optim.lora.gspo_warmup_epochs": args.gspo_warmup_epochs,
+            "optim.lora.gspo_warmup_epochs": args.gspo_warmup_epochs,
             "optim.lora.gspo_contrastive_weight": args.gspo_contrastive_weight,
+        })
+
+    # Adapter configuration
+    if args.adapter_enable:
+        print(f"Enabling Standard Adapters with dim={args.adapter_dim}")
+        hyperparameters.update({
+            "model.sam.adapter_enabled": True,
+            "model.sam.adapter_dim": args.adapter_dim,
         })
 
     if args.eval:  # load a checkpoint for evaluation

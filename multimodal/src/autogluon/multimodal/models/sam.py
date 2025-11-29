@@ -7,7 +7,7 @@ from torch import nn
 from transformers import SamConfig
 
 from ..constants import CLASS_LABEL, CLASS_LOGITS, COLUMN, IMAGE, IMAGE_VALID_NUM, LABEL, LOGITS, MASK_LABEL, MOE_LOSS
-from .adaptation_layers import ConvLoRALinear
+from .adaptation_layers import ConvLoRALinear, AdapterLayer
 from .custom_hf_models.modeling_sam_for_conv_lora import SamImageSegmentationOutput, SamModel
 from .utils import assign_layer_ids, freeze_model_layers, image_mean_std
 
@@ -272,6 +272,8 @@ class SAMForSemanticSegmentation(nn.Module):
         frozen_layers: Optional[list] = None,
         num_mask_tokens: int = 1,
         image_norm: Optional[str] = None,
+        adapter_enabled: bool = False,
+        adapter_dim: int = 64,
     ):
         """
         Load a pretrained Segment Anything Model (SAM).
@@ -299,6 +301,10 @@ class SAMForSemanticSegmentation(nn.Module):
             - clip
                 Normalize image by mean (0.48145466, 0.4578275, 0.40821073) and
                 std (0.26862954, 0.26130258, 0.27577711), used for CLIP.
+        adapter_enabled
+            Whether to enable standard Adapter modules in the vision encoder.
+        adapter_dim
+            The dimension of the adapter bottleneck.
         """
 
         super().__init__()
@@ -318,6 +324,14 @@ class SAMForSemanticSegmentation(nn.Module):
         self.image_size = self.model.vision_encoder.image_size
         self.config = self.model.config
         self.image_mean, self.image_std = image_mean_std(image_norm)
+
+        # Inject Adapters if enabled
+        if adapter_enabled:
+            logger.info(f"Injecting Adapters with dim={adapter_dim} into Vision Encoder")
+            for layer in self.model.vision_encoder.layers:
+                # Manually create and assign adapter since config didn't have it at init time
+                layer.adapter = AdapterLayer(self.config.hidden_size, adapter_dim)
+
 
         self.model.mask_decoder.num_mask_tokens = num_mask_tokens
         mask_token_data = self.model.mask_decoder.mask_tokens.weight.data[0]
