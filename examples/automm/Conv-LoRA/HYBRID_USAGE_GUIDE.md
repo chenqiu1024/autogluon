@@ -99,13 +99,13 @@ python3 run_semantic_segmentation.py \
 
 ```bash
 python3 run_semantic_segmentation.py \
-    --task leaf_disease_segmentation \
+    --task isic2017 \
     --rank 3 \
     --expert_num 8 \
     --num_gpus 1 \
     --per_gpu_batch_size 1 \
     --batch_size 4 \
-    --output_dir outputs/hybrid_full \
+    --output_dir outputs/gspo_hybrid_full-251129 \
     --gspo_enable \
     --gspo_group_size 4 \
     --gspo_warmup_epochs 5 \
