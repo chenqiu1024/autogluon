@@ -263,6 +263,8 @@ model:
     frozen_layers: ["mask_decoder.iou_prediction_head", "prompt_encoder"]
     num_mask_tokens: 1
     ignore_label: 255
+    adapter_enabled: False
+    adapter_dim: 64
 
   meta_transformer:
     data_types:

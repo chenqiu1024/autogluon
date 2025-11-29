@@ -70,7 +70,6 @@ if __name__ == "__main__":
     parser.add_argument("--gspo_group_size", type=int, default=4, help="Number of predictions per group in GSPO")
     parser.add_argument("--gspo_warmup_epochs", type=int, default=5, help="Number of epochs before enabling GSPO")
     parser.add_argument("--gspo_contrastive_weight", type=float, default=0.1, help="Weight for contrastive loss in GSPO")
-    parser.add_argument("--gspo_contrastive_weight", type=float, default=0.1, help="Weight for contrastive loss in GSPO")
     parser.add_argument("--gspo_quality_momentum", type=float, default=0.9, help="Momentum for expert quality history")
     
     # Adapter parameters
@@ -115,7 +114,6 @@ if __name__ == "__main__":
             "optim.lora.gspo_enabled": True,
             "optim.lora.gspo_group_size": args.gspo_group_size,
             "optim.lora.gspo_quality_momentum": args.gspo_quality_momentum,
-            "optim.lora.gspo_warmup_epochs": args.gspo_warmup_epochs,
             "optim.lora.gspo_warmup_epochs": args.gspo_warmup_epochs,
             "optim.lora.gspo_contrastive_weight": args.gspo_contrastive_weight,
         })
