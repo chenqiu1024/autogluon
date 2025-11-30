@@ -10,7 +10,7 @@ The installation may take a while since AutoGluon Multimodal has multiple depend
   pip install -U pip
   pip install -U setuptools wheel
   git clone https://github.com/autogluon/autogluon
-  cd autogluon && pip install -e multimodal/[tests]
+  cd autogluon && pip install -e "multimodal/[tests]"
   ```
 
 ## 2. Dataset
