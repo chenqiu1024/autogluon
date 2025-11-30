@@ -359,6 +359,12 @@ class SAMForSemanticSegmentation(nn.Module):
 
     def _load_checkpoint(self, checkpoint_name):
         if self.pretrained:
+            # Try to load from local cache first to avoid network issues
+            try:
+                self.model = SamModel.from_pretrained(checkpoint_name, local_files_only=True)
+                logger.info(f"Loaded model from local cache: {checkpoint_name}")
+            except Exception as e:
+                logger.info(f"Local cache not found, downloading from Hugging Face: {checkpoint_name}")
             self.model = SamModel.from_pretrained(checkpoint_name)
         else:
             configuration = SamConfig(name_or_path=checkpoint_name)
