@@ -265,6 +265,8 @@ model:
     ignore_label: 255
     adapter_enabled: False
     adapter_dim: 64
+    decoder_adapter_enabled: False
+    decoder_adapter_dim: 64
 
   meta_transformer:
     data_types:

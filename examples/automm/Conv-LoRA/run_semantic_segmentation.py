@@ -72,9 +72,13 @@ if __name__ == "__main__":
     parser.add_argument("--gspo_contrastive_weight", type=float, default=0.1, help="Weight for contrastive loss in GSPO")
     parser.add_argument("--gspo_quality_momentum", type=float, default=0.9, help="Momentum for expert quality history")
     
-    # Adapter parameters
-    parser.add_argument("--adapter_enable", action="store_true", help="Enable standard Adapter modules")
-    parser.add_argument("--adapter_dim", type=int, default=64, help="Dimension of the adapter bottleneck")
+    # Encoder Adapter parameters
+    parser.add_argument("--adapter_enable", action="store_true", help="Enable standard Adapter modules in the vision encoder")
+    parser.add_argument("--adapter_dim", type=int, default=64, help="Dimension of the encoder adapter bottleneck")
+    
+    # Decoder Adapter parameters
+    parser.add_argument("--decoder_adapter_enable", action="store_true", help="Enable MLP-Adapter modules in the mask decoder")
+    parser.add_argument("--decoder_adapter_dim", type=int, default=64, help="Dimension of the decoder adapter bottleneck")
     args = parser.parse_args()
 
     dataset_name = args.task
@@ -120,10 +124,18 @@ if __name__ == "__main__":
 
     # Adapter configuration
     if args.adapter_enable:
-        print(f"Enabling Standard Adapters with dim={args.adapter_dim}")
+        print(f"Enabling Standard Encoder Adapters with dim={args.adapter_dim}")
         hyperparameters.update({
             "model.sam.adapter_enabled": True,
             "model.sam.adapter_dim": args.adapter_dim,
+        })
+    
+    # Decoder Adapter configuration
+    if args.decoder_adapter_enable:
+        print(f"Enabling Decoder MLP-Adapters with dim={args.decoder_adapter_dim}")
+        hyperparameters.update({
+            "model.sam.decoder_adapter_enabled": True,
+            "model.sam.decoder_adapter_dim": args.decoder_adapter_dim,
         })
 
     if args.eval:  # load a checkpoint for evaluation

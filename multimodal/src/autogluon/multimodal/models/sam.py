@@ -274,6 +274,8 @@ class SAMForSemanticSegmentation(nn.Module):
         image_norm: Optional[str] = None,
         adapter_enabled: bool = False,
         adapter_dim: int = 64,
+        decoder_adapter_enabled: bool = False,
+        decoder_adapter_dim: int = 64,
     ):
         """
         Load a pretrained Segment Anything Model (SAM).
@@ -317,6 +319,12 @@ class SAMForSemanticSegmentation(nn.Module):
         self.device = None
         self.name_to_id = {}
 
+        # Store adapter configs
+        self.adapter_enabled = adapter_enabled
+        self.adapter_dim = adapter_dim
+        self.decoder_adapter_enabled = decoder_adapter_enabled
+        self.decoder_adapter_dim = decoder_adapter_dim
+
         self._load_checkpoint(checkpoint_name)
 
         freeze_model_layers(self.model, self.frozen_layers)
@@ -325,12 +333,12 @@ class SAMForSemanticSegmentation(nn.Module):
         self.config = self.model.config
         self.image_mean, self.image_std = image_mean_std(image_norm)
 
-        # Inject Adapters if enabled
-        if adapter_enabled:
-            logger.info(f"Injecting Adapters with dim={adapter_dim} into Vision Encoder")
+        # Inject Adapters into vision encoder if enabled
+        if self.adapter_enabled:
+            logger.info(f"Injecting Adapters with dim={self.adapter_dim} into Vision Encoder")
             for layer in self.model.vision_encoder.layers:
                 # Manually create and assign adapter since config didn't have it at init time
-                layer.adapter = AdapterLayer(self.config.hidden_size, adapter_dim)
+                layer.adapter = AdapterLayer(self.config.hidden_size, self.adapter_dim)
 
 
         self.model.mask_decoder.num_mask_tokens = num_mask_tokens
@@ -359,15 +367,24 @@ class SAMForSemanticSegmentation(nn.Module):
 
     def _load_checkpoint(self, checkpoint_name):
         if self.pretrained:
+            # Prepare configuration so that decoder adapter flags are available during model construction
+            configuration = SamConfig.from_pretrained(checkpoint_name)
+            # Propagate decoder adapter settings into mask decoder config (if present)
+            if hasattr(configuration, "mask_decoder_config") and configuration.mask_decoder_config is not None:
+                configuration.mask_decoder_config.decoder_adapter_enabled = self.decoder_adapter_enabled
+                configuration.mask_decoder_config.decoder_adapter_dim = self.decoder_adapter_dim
             # Try to load from local cache first to avoid network issues
             try:
-                self.model = SamModel.from_pretrained(checkpoint_name, local_files_only=True)
-                logger.info(f"Loaded model from local cache: {checkpoint_name}")
+                self.model = SamModel.from_pretrained(checkpoint_name, config=configuration, local_files_only=True)
+                logger.info(f"Loaded model from local cache with custom config: {checkpoint_name}")
             except Exception as e:
-                logger.info(f"Local cache not found, downloading from Hugging Face: {checkpoint_name}")
-            self.model = SamModel.from_pretrained(checkpoint_name)
+                logger.info(f"Local cache not found, downloading from Hugging Face with custom config: {checkpoint_name}")
+                self.model = SamModel.from_pretrained(checkpoint_name, config=configuration)
         else:
             configuration = SamConfig(name_or_path=checkpoint_name)
+            if hasattr(configuration, "mask_decoder_config") and configuration.mask_decoder_config is not None:
+                configuration.mask_decoder_config.decoder_adapter_enabled = self.decoder_adapter_enabled
+                configuration.mask_decoder_config.decoder_adapter_dim = self.decoder_adapter_dim
             self.model = SamModel(configuration)
 
     def save(self, save_path: str = "./"):
