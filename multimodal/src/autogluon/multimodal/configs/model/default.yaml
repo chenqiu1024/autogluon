@@ -265,6 +265,11 @@ model:
     ignore_label: 255
     adapter_enabled: False
     adapter_dim: 64
+    decoder_adapter_enabled: False
+    decoder_adapter_dim: 64
+    # S-SAM SVD fine-tuning configuration
+    svd_enabled: False
+    svd_rank: null  # null=use all singular values, or specify int like 256 for low-rank approximation
 
   meta_transformer:
     data_types:

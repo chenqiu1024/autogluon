@@ -48,6 +48,96 @@ class AdapterLayer(nn.Module):
         return self.dropout(up) * self.scale
 
 
+class SVDLinear(nn.Module):
+    """
+    S-SAM style SVD-based fine-tuning layer.
+    
+    Decomposes a frozen linear layer's weight via SVD and introduces
+    learnable scale (A) and bias (B) parameters on singular values.
+    
+    Paper alignment (S-SAM):
+    - Performs SVD on pretrained weight: W = U Σ V^T
+    - Introduces trainable parameters A (scale) and B (bias) on singular values
+    - Reconstructs weight dynamically: W' = U · ReLU(A ⊙ Σ + B) · V^T
+    - Only ~0.4% parameters are trainable while preserving model capacity
+    """
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        base_weight: torch.Tensor,  # Pretrained weight matrix
+        svd_rank: Optional[int] = None,  # Number of singular values to keep, None=all
+        init_scale: float = 1.0,
+        init_bias: float = 0.0,
+    ):
+        """
+        Initialize SVD-based fine-tuning layer.
+        
+        Args:
+            in_features: Input dimension
+            out_features: Output dimension
+            base_weight: Pretrained weight matrix to decompose (out_features, in_features)
+            svd_rank: Optional rank for low-rank approximation (None=use all singular values)
+            init_scale: Initial value for scale parameter A (default: 1.0 for identity)
+            init_bias: Initial value for bias parameter B (default: 0.0)
+        """
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        
+        # SVD decomposition of pretrained weight
+        # base_weight shape: (out_features, in_features)
+        U, S, Vt = torch.linalg.svd(base_weight.float(), full_matrices=False)
+        
+        # Optional: keep only top svd_rank singular values for low-rank approximation
+        if svd_rank is not None and svd_rank < len(S):
+            U = U[:, :svd_rank]
+            S = S[:svd_rank]
+            Vt = Vt[:svd_rank, :]
+        
+        # Freeze U and V^T as buffers (not trainable)
+        self.register_buffer('U', U)
+        self.register_buffer('Vt', Vt)
+        self.register_buffer('S_orig', S)  # Original singular values for monitoring
+        
+        # Trainable parameters: scale A and bias B
+        # Initialize A=1, B=0 to ensure W' ≈ W at training start (stable initialization)
+        self.A_scale = nn.Parameter(torch.full_like(S, init_scale))
+        self.B_bias = nn.Parameter(torch.full_like(S, init_bias))
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass with dynamic weight reconstruction.
+        
+        Computes: output = x @ W'^T where W' = U @ ReLU(A ⊙ Σ + B) @ V^T
+        
+        Efficient implementation:
+        x @ W'^T = x @ (V @ diag(S') @ U^T)
+                 = ((x @ V^T) * S') @ U^T
+        
+        Args:
+            x: Input tensor of shape (*, in_features)
+            
+        Returns:
+            Output tensor of shape (*, out_features)
+        """
+        # Adjust singular values: Σ' = ReLU(A ⊙ Σ + B)
+        # ReLU ensures non-negative singular values to maintain valid weight matrix
+        S_adjusted = torch.relu(self.A_scale * self.S_orig + self.B_bias)
+        
+        # Efficient computation without explicitly forming W'
+        # Step 1: x @ V^T  (project to right singular vector space)
+        out = x @ self.Vt.T  # (*, in_features) @ (in_features, rank) = (*, rank)
+        
+        # Step 2: Scale by adjusted singular values
+        out = out * S_adjusted.unsqueeze(0)  # (*, rank) * (1, rank) = (*, rank)
+        
+        # Step 3: @ U^T  (project to left singular vector space)
+        out = out @ self.U.T  # (*, rank) @ (rank, out_features) = (*, out_features)
+        
+        return out
+
+
 
 class LoRALayer:
     """

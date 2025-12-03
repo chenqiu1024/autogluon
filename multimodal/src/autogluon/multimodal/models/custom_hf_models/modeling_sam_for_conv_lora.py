@@ -34,7 +34,7 @@ from transformers.models.sam.configuration_sam import (
     SamVisionConfig,
 )
 from transformers.utils import ModelOutput, add_start_docstrings, add_start_docstrings_to_model_forward, logging
-from ..adaptation_layers import AdapterLayer
+from ..adaptation_layers import AdapterLayer, SVDLinear
 
 logger = logging.get_logger(__name__)
 
@@ -156,11 +156,49 @@ class SamMLPBlock(nn.Module):
         self.lin1 = nn.Linear(config.hidden_size, config.mlp_dim)
         self.lin2 = nn.Linear(config.mlp_dim, config.hidden_size)
         self.act = ACT2FN[config.hidden_act]
+        
+        # S-SAM SVD fine-tuning (optional, config-driven)
+        self.svd_lin1 = None
+        self.svd_lin2 = None
+        if getattr(config, 'svd_enabled', False):
+            svd_rank = getattr(config, 'svd_rank', None)
+            # Create SVD layers with cloned pretrained weights
+            self.svd_lin1 = SVDLinear(
+                config.hidden_size, 
+                config.mlp_dim,
+                self.lin1.weight.data.clone(),
+                svd_rank=svd_rank
+            )
+            self.svd_lin2 = SVDLinear(
+                config.mlp_dim, 
+                config.hidden_size,
+                self.lin2.weight.data.clone(),
+                svd_rank=svd_rank
+            )
+            # Freeze original linear layers when using SVD
+            self.lin1.weight.requires_grad = False
+            self.lin2.weight.requires_grad = False
+            if self.lin1.bias is not None:
+                self.lin1.bias.requires_grad = False
+            if self.lin2.bias is not None:
+                self.lin2.bias.requires_grad = False
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        hidden_states = self.lin1(hidden_states)
-        hidden_states = self.act(hidden_states)
-        hidden_states = self.lin2(hidden_states)
+        if self.svd_lin1 is not None:
+            # Use SVD fine-tuning path
+            hidden_states = self.svd_lin1(hidden_states)
+            # Add bias if original layer had it
+            if self.lin1.bias is not None:
+                hidden_states = hidden_states + self.lin1.bias
+            hidden_states = self.act(hidden_states)
+            hidden_states = self.svd_lin2(hidden_states)
+            if self.lin2.bias is not None:
+                hidden_states = hidden_states + self.lin2.bias
+        else:
+            # Original path (backward compatible)
+            hidden_states = self.lin1(hidden_states)
+            hidden_states = self.act(hidden_states)
+            hidden_states = self.lin2(hidden_states)
         return hidden_states
 
 

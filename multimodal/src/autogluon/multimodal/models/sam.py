@@ -274,6 +274,8 @@ class SAMForSemanticSegmentation(nn.Module):
         image_norm: Optional[str] = None,
         adapter_enabled: bool = False,
         adapter_dim: int = 64,
+        svd_enabled: bool = False,
+        svd_rank: Optional[int] = None,
     ):
         """
         Load a pretrained Segment Anything Model (SAM).
@@ -305,6 +307,10 @@ class SAMForSemanticSegmentation(nn.Module):
             Whether to enable standard Adapter modules in the vision encoder.
         adapter_dim
             The dimension of the adapter bottleneck.
+        svd_enabled
+            Whether to enable S-SAM SVD fine-tuning on MLP layers.
+        svd_rank
+            SVD rank for low-rank approximation (None=use all singular values).
         """
 
         super().__init__()
@@ -313,6 +319,8 @@ class SAMForSemanticSegmentation(nn.Module):
         self.checkpoint_name = checkpoint_name
         self.num_classes = num_classes
         self.frozen_layers = frozen_layers
+        self.svd_enabled = svd_enabled
+        self.svd_rank = svd_rank
 
         self.device = None
         self.name_to_id = {}
@@ -359,15 +367,28 @@ class SAMForSemanticSegmentation(nn.Module):
 
     def _load_checkpoint(self, checkpoint_name):
         if self.pretrained:
+            # Load configuration and inject SVD settings into vision_config
+            configuration = SamConfig.from_pretrained(checkpoint_name)
+            if hasattr(configuration, 'vision_config'):
+                configuration.vision_config.svd_enabled = self.svd_enabled
+                configuration.vision_config.svd_rank = self.svd_rank
+            
             # Try to load from local cache first to avoid network issues
             try:
-                self.model = SamModel.from_pretrained(checkpoint_name, local_files_only=True)
-                logger.info(f"Loaded model from local cache: {checkpoint_name}")
+                self.model = SamModel.from_pretrained(
+                    checkpoint_name, 
+                    config=configuration, 
+                    local_files_only=True
+                )
+                logger.info(f"Loaded model from local cache with custom config: {checkpoint_name}")
             except Exception as e:
-                logger.info(f"Local cache not found, downloading from Hugging Face: {checkpoint_name}")
-            self.model = SamModel.from_pretrained(checkpoint_name)
+                logger.info(f"Local cache not found, downloading from Hugging Face with custom config: {checkpoint_name}")
+                self.model = SamModel.from_pretrained(checkpoint_name, config=configuration)
         else:
             configuration = SamConfig(name_or_path=checkpoint_name)
+            if hasattr(configuration, 'vision_config'):
+                configuration.vision_config.svd_enabled = self.svd_enabled
+                configuration.vision_config.svd_rank = self.svd_rank
             self.model = SamModel(configuration)
 
     def save(self, save_path: str = "./"):
