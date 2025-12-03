@@ -69,7 +69,7 @@ if __name__ == "__main__":
     parser.add_argument("--gspo_enable", action="store_true", help="Enable GSPO (Group Sequence Policy Optimization) training")
     parser.add_argument("--gspo_group_size", type=int, default=4, help="Number of predictions per group in GSPO")
     parser.add_argument("--gspo_warmup_epochs", type=int, default=5, help="Number of epochs before enabling GSPO")
-    parser.add_argument("--gspo_contrastive_weight", type=float, default=0.1, help="Weight for contrastive loss in GSPO")
+    parser.add_argument("--gspo_contrastive_weight", type=float, default=0.0, help="Weight for contrastive loss in GSPO (Exp3-style: 0.0 = no regularization)")
     parser.add_argument("--gspo_quality_momentum", type=float, default=0.9, help="Momentum for expert quality history")
     
     # Adapter parameters

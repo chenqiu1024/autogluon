@@ -142,8 +142,9 @@ class GSPOConvLoRATrainer:
         for g in range(G):
             # Apply slight variations via dropout to create diversity
             # (dropout is automatically different across forward passes)
+            # GSPO Exp3-style: Pass group_id for dynamic noise in MoEGate
             with torch.set_grad_enabled(True):
-                pred_masks, moe_loss, selected_experts = forward_fn(images)
+                pred_masks, moe_loss, selected_experts = forward_fn(images, group_id=g, max_group_id=G-1)
             
             # Compute quality scores
             quality = self.compute_segmentation_quality(
@@ -164,16 +165,21 @@ class GSPOConvLoRATrainer:
         baseline = quality_tensor.mean(dim=0, keepdim=True)  # [1, B]
         advantages = quality_tensor - baseline  # [G, B]
         
-        # 3. GSPO weighted loss
+        # 3. GSPO weighted loss with dynamic temperature (Exp3-style)
         total_seg_loss = 0
         total_moe_loss = 0
         
         for g in range(G):
             advantage = advantages[g]  # [B]
             
-            # Compute adaptive weights based on advantage
+            # GSPO Exp3-style: Dynamic temperature scaling
+            # Progressive temperature: from conservative (2.0) to aggressive (10.0)
+            # Lower temperature = more uniform weights, higher = more emphasis on high advantage
+            temperature = 2.0 + 8.0 * (g / G)
+            
+            # Compute adaptive weights based on advantage with dynamic temperature
             # Higher advantage -> higher weight (stronger gradient)
-            weight = torch.sigmoid(advantage * self.advantage_temperature)
+            weight = torch.sigmoid(advantage * temperature)
             
             # Weighted segmentation loss
             seg_loss = group_seg_losses[g]

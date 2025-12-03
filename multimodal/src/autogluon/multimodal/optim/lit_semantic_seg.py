@@ -205,25 +205,44 @@ class SemanticSegmentationLitModule(LitModule):
         images = batch[self.model.image_key] if hasattr(self.model, 'image_key') else batch['image']
         labels = batch[self.model.label_key]
         
-        # Define forward function for GSPO
-        def forward_fn(images):
-            batch_copy = batch.copy()
-            if hasattr(self.model, 'image_key'):
-                batch_copy[self.model.image_key] = images
-            else:
-                batch_copy['image'] = images
-            output = run_model(self.model, batch_copy)
+        # Define forward function for GSPO with dynamic noise support
+        def forward_fn(images, group_id=None, max_group_id=None):
+            # GSPO Exp3-style: Set group_id in context variables for dynamic noise in MoEGate
+            # This allows MoEGate to access group information without changing the entire call chain
+            from autogluon.multimodal.models.adaptation_layers import _gspo_group_id, _gspo_max_group_id
             
-            # Extract predictions and MOE info
-            logits = output[self.model.prefix][LOGITS]
-            moe_loss = output[self.model.prefix].get(MOE_LOSS, 0)
+            # Set context variables
+            token_group = None
+            token_max = None
+            if group_id is not None:
+                token_group = _gspo_group_id.set(group_id)
+            if max_group_id is not None:
+                token_max = _gspo_max_group_id.set(max_group_id)
             
-            # Extract selected experts if available
-            selected_experts = None
-            if hasattr(output[self.model.prefix], 'selected_experts'):
-                selected_experts = output[self.model.prefix]['selected_experts']
-            
-            return logits, moe_loss, selected_experts
+            try:
+                batch_copy = batch.copy()
+                if hasattr(self.model, 'image_key'):
+                    batch_copy[self.model.image_key] = images
+                else:
+                    batch_copy['image'] = images
+                output = run_model(self.model, batch_copy)
+                
+                # Extract predictions and MOE info
+                logits = output[self.model.prefix][LOGITS]
+                moe_loss = output[self.model.prefix].get(MOE_LOSS, 0)
+                
+                # Extract selected experts if available
+                selected_experts = None
+                if hasattr(output[self.model.prefix], 'selected_experts'):
+                    selected_experts = output[self.model.prefix]['selected_experts']
+                
+                return logits, moe_loss, selected_experts
+            finally:
+                # Clean up context variables
+                if token_group is not None:
+                    _gspo_group_id.reset(token_group)
+                if token_max is not None:
+                    _gspo_max_group_id.reset(token_max)
         
         # Define loss function for GSPO
         def loss_fn(predictions, targets):

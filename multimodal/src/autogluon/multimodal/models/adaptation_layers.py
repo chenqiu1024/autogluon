@@ -6,6 +6,7 @@
 #  ------------------------------------------------------------------------------------------
 
 import math
+from contextvars import ContextVar
 from typing import List, Optional
 
 import numpy as np
@@ -13,6 +14,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions.normal import Normal
+
+# Context variables for GSPO dynamic noise - allows passing group_id through call chain
+_gspo_group_id: ContextVar[Optional[int]] = ContextVar('gspo_group_id', default=None)
+_gspo_max_group_id: ContextVar[Optional[int]] = ContextVar('gspo_max_group_id', default=None)
 
 
 
@@ -733,6 +738,10 @@ class ConvLoRALinear(nn.Linear, LoRALayer):
         return w.T if self.fan_in_fan_out else w
 
     def forward(self, x: torch.Tensor):
+        """
+        Forward pass with optional GSPO group information for dynamic noise.
+        Group information is read from context variables set by the training loop.
+        """
         # Base frozen path + residual (LoRA principle)
         result = F.linear(x, self.T(self.weight), bias=self.bias)
         moe_loss = 0
@@ -753,9 +762,14 @@ class ConvLoRALinear(nn.Linear, LoRALayer):
             # 2) Sec. 3.2: Compute Noisy-TopK gates over spatial features; also returns auxiliary moe_loss.
             lora_res = lora_res.permute(0, 3, 1, 2).contiguous()
             
-            # GSPO: Receive selected experts info
+            # GSPO: Receive selected experts info and read group_id from context for dynamic noise
             if self.gspo_enabled:
-                gates, moe_loss, selected_experts = self.lora_moe_gating(lora_res)
+                # Read group_id from context variables (set by training loop)
+                group_id = _gspo_group_id.get()
+                max_group_id = _gspo_max_group_id.get()
+                gates, moe_loss, selected_experts = self.lora_moe_gating(
+                    lora_res, group_id=group_id, max_group_id=max_group_id
+                )
             else:
                 gate_output = self.lora_moe_gating(lora_res)
                 if len(gate_output) == 3:
@@ -837,7 +851,7 @@ class MoEGate(nn.Module):
         
         assert self.k <= self.M
 
-    def forward(self, feats, loss_coef=1e-2, noise_epsilon=1e-2):
+    def forward(self, feats, loss_coef=1e-2, noise_epsilon=1e-2, group_id=None, max_group_id=None):
         """
         Paper alignment (Sec. 3.2):
         - GAP over spatial features -> linear logits (+ noise during training) -> TopK expert selection
@@ -846,6 +860,14 @@ class MoEGate(nn.Module):
         GSPO enhancement:
         - Quality-aware bias added to logits based on expert historical performance
         - Supports multi-expert selection (TopK > 1) for group-level optimization
+        - Dynamic noise scaling based on group_id (Exp3-style exploration strategy)
+        
+        Args:
+            feats: Input features [B, C, H, W]
+            loss_coef: Loss coefficient for load balancing
+            noise_epsilon: Base noise epsilon (will be scaled if group_id provided)
+            group_id: Current group ID for GSPO training (0-indexed)
+            max_group_id: Maximum group ID (for normalizing dynamic noise)
         """
         batch_size = feats.shape[0]
 
@@ -860,7 +882,17 @@ class MoEGate(nn.Module):
         
         if self.noisy_gating and self.training:
             raw_noise_stddev = feats_S @ self.w_noise
-            noise_stddev = self.softplus(raw_noise_stddev) + noise_epsilon
+            
+            # GSPO Exp3-style: Dynamic noise scaling
+            # If group_id is provided, scale noise from base to 10x base
+            if group_id is not None and max_group_id is not None and max_group_id > 0:
+                # Progressive noise: from 1x to 10x noise_epsilon
+                noise_scale_factor = 1.0 + 9.0 * (group_id / max_group_id)
+                effective_noise_epsilon = noise_epsilon * noise_scale_factor
+            else:
+                effective_noise_epsilon = noise_epsilon
+            
+            noise_stddev = self.softplus(raw_noise_stddev) + effective_noise_epsilon
             noisy_logits = clean_logits + (torch.randn_like(clean_logits) * noise_stddev)
             logits = noisy_logits
         else:
