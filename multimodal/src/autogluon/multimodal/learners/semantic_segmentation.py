@@ -278,6 +278,46 @@ class SemanticSegmentationLearner(BaseLearner):
             else:
                 raise ValueError(f"Unknown metric {metric_name}")
         
+        # Get model and preprocessor
+        model = self._model
+        model.eval()
+        
+        # Get data processors for image preprocessing
+        from torchvision import transforms as T
+        
+        # Create preprocessing pipeline similar to model's preprocessing
+        # Based on SAM's image preprocessing
+        def preprocess_image_for_sam(image_np):
+            """Preprocess image for SAM model."""
+            from PIL import Image as PILImage
+            
+            # Ensure correct format
+            if len(image_np.shape) == 2:
+                image_np = np.stack([image_np] * 3, axis=2)
+            
+            if image_np.max() <= 1.0:
+                image_np = (image_np * 255).astype(np.uint8)
+            
+            # Convert to PIL
+            img_pil = PILImage.fromarray(image_np.astype(np.uint8))
+            
+            # Resize to model's expected input size (typically 1024x1024 for SAM)
+            target_size = model.image_size
+            img_pil = img_pil.resize((target_size, target_size), PILImage.BILINEAR)
+            
+            # Convert to tensor and normalize
+            img_array = np.array(img_pil).astype(np.float32) / 255.0
+            
+            # Apply model's normalization (SAM uses specific mean/std)
+            mean = np.array(model.image_mean).reshape(1, 1, 3)
+            std = np.array(model.image_std).reshape(1, 1, 3)
+            img_array = (img_array - mean) / std
+            
+            # Convert to tensor (C, H, W)
+            img_tensor = torch.from_numpy(img_array).permute(2, 0, 1).float()
+            
+            return img_tensor
+        
         # Create a prediction function for TTA
         def predict_fn(image: np.ndarray) -> np.ndarray:
             """
@@ -286,46 +326,37 @@ class SemanticSegmentationLearner(BaseLearner):
             Parameters
             ----------
             image : np.ndarray
-                Input image (H, W, C)
+                Input image (H, W, C) in range [0, 255] or [0, 1]
             
             Returns
             -------
             prob : np.ndarray
                 Probability map (H, W) for binary or (C, H, W) for multi-class
             """
-            # Convert image to tensor
-            if len(image.shape) == 2:
-                image = np.expand_dims(image, axis=2)
+            # Preprocess image
+            img_tensor = preprocess_image_for_sam(image)
             
-            # Normalize if needed (using model's normalization)
-            from PIL import Image as PILImage
-            img_pil = PILImage.fromarray((image * 255).astype(np.uint8) if image.max() <= 1 else image.astype(np.uint8))
+            # Add batch dimension and move to device
+            img_tensor = img_tensor.unsqueeze(0).to(model.device)
             
-            # Create a temporary dataframe for single image
-            import tempfile
-            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
-                img_pil.save(tmp.name)
-                tmp_df = pd.DataFrame({'image': [tmp.name]})
+            # Forward pass
+            with torch.no_grad():
+                # Create batch dict for model
+                batch = {model.prefix + '_image': img_tensor}
+                outputs = model(batch)
                 
-                # Get prediction
-                outputs = self.predict_per_run(
-                    data=tmp_df,
-                    realtime=True,
-                    requires_label=False,
-                )
+                # Extract logits
+                logits = outputs[model.prefix][LOGITS]
                 
-                # Extract logits/probabilities
+                # Convert to probabilities
                 if self._output_shape == 1:
-                    logits = extract_from_output(ret_type=LOGITS, outputs=outputs, as_ndarray=True)
-                    prob = torch.sigmoid(torch.from_numpy(logits[0])).numpy()
+                    # Binary segmentation - remove channel dim
+                    prob = torch.sigmoid(logits[0, 0]).cpu().numpy()
                 else:
-                    logits = extract_from_output(ret_type=SEMANTIC_MASK, outputs=outputs, as_ndarray=True)
-                    prob = torch.softmax(torch.from_numpy(logits[0]), dim=0).numpy()
-                
-                # Clean up
-                os.unlink(tmp.name)
-                
-                return prob
+                    # Multi-class segmentation
+                    prob = torch.softmax(logits[0], dim=0).cpu().numpy()
+            
+            return prob
         
         # Process each image with TTA
         all_preds = []
