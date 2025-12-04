@@ -1,10 +1,14 @@
 # TTA 快速开始指南
 
-## 问题已修复 ✅
+## 所有问题已修复 ✅
 
+### 修复 1: 依赖问题
 之前的 `ModuleNotFoundError: No module named 'cv2'` 错误已经修复！
-
 TTA 现在使用项目现有的依赖库（scipy, PIL, scikit-image），无需安装 OpenCV。
+
+### 修复 2: AttributeError
+`AttributeError: 'MultiModalPredictor' object has no attribute 'enable_tta'` 错误已修复！
+现在可以直接通过 `predictor.enable_tta()` 使用 TTA 功能。
 
 ---
 

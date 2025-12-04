@@ -990,3 +990,113 @@ class MultiModalPredictor:
         a list of model names
         """
         return self._learner.list_supported_models(pretrained=pretrained)
+    
+    def enable_tta(
+        self,
+        scales: List[float] = [0.75, 1.0, 1.25],
+        flips: List[str] = ["none", "horizontal"],
+        rotations: List[float] = [0],
+        fusion_method: str = "mean",
+        scale_weights: Optional[Dict[float, float]] = None,
+        threshold: float = 0.5,
+        min_area_ratio: float = 0.001,
+        use_morphology: bool = False,
+    ):
+        """
+        Enable Test-Time Augmentation (TTA) for inference.
+        
+        This method is only available for semantic segmentation tasks.
+        TTA applies multiple augmentations (scales, flips, rotations) to each test image,
+        averages the predictions, and applies post-processing for improved accuracy.
+        
+        Parameters
+        ----------
+        scales : List[float], default = [0.75, 1.0, 1.25]
+            List of scale factors for multi-scale testing.
+            Recommended: [0.75, 1.0, 1.25] for fast (6 inferences per image).
+            Or [0.5, 0.75, 1.0, 1.25, 1.5] for better results.
+        flips : List[str], default = ["none", "horizontal"]
+            List of flip types: "none", "horizontal", "vertical".
+            Recommended: ["none", "horizontal"] for most cases.
+        rotations : List[float], default = [0]
+            List of rotation angles in degrees.
+            Recommended: [0] for fast, or [-10, 0, 10] for better (18 inferences per image).
+        fusion_method : str, default = "mean"
+            Method to fuse predictions: "mean" or "weighted_mean".
+        scale_weights : Optional[Dict[float, float]], default = None
+            Weights for each scale when using weighted_mean.
+        threshold : float, default = 0.5
+            Threshold for binary segmentation (can be tuned on validation set).
+        min_area_ratio : float, default = 0.001
+            Remove connected components with area < min_area_ratio * image_area.
+        use_morphology : bool, default = False
+            Whether to apply morphological closing for smoothing.
+        
+        Examples
+        --------
+        >>> # Basic TTA (6 inferences per image)
+        >>> predictor.enable_tta()
+        >>> results = predictor.evaluate(test_df, metrics=["iou", "dice"])
+        
+        >>> # Advanced TTA (18 inferences per image)
+        >>> predictor.enable_tta(
+        ...     scales=[0.75, 1.0, 1.25],
+        ...     flips=["none", "horizontal"],
+        ...     rotations=[-10, 0, 10],
+        ...     fusion_method="weighted_mean"
+        ... )
+        >>> results = predictor.evaluate(test_df, metrics=["iou", "dice"])
+        
+        Notes
+        -----
+        - TTA increases inference time proportionally to the number of augmentations
+        - Expected improvement: +0.3~1.0% Dice/IoU on medical image segmentation tasks
+        - Only works with semantic segmentation tasks
+        
+        Raises
+        ------
+        AttributeError
+            If the learner does not support TTA (i.e., not a SemanticSegmentationLearner)
+        """
+        if not hasattr(self._learner, 'enable_tta'):
+            raise AttributeError(
+                f"TTA is only supported for semantic segmentation tasks. "
+                f"Current problem type: {self.problem_type}"
+            )
+        
+        return self._learner.enable_tta(
+            scales=scales,
+            flips=flips,
+            rotations=rotations,
+            fusion_method=fusion_method,
+            scale_weights=scale_weights,
+            threshold=threshold,
+            min_area_ratio=min_area_ratio,
+            use_morphology=use_morphology,
+        )
+    
+    def disable_tta(self):
+        """
+        Disable Test-Time Augmentation (TTA).
+        
+        This method turns off TTA and returns to standard inference mode.
+        
+        Examples
+        --------
+        >>> predictor.enable_tta()
+        >>> # ... do some evaluation with TTA ...
+        >>> predictor.disable_tta()
+        >>> # ... back to normal inference ...
+        
+        Raises
+        ------
+        AttributeError
+            If the learner does not support TTA
+        """
+        if not hasattr(self._learner, 'disable_tta'):
+            raise AttributeError(
+                f"TTA is only supported for semantic segmentation tasks. "
+                f"Current problem type: {self.problem_type}"
+            )
+        
+        return self._learner.disable_tta()
