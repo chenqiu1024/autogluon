@@ -315,10 +315,14 @@ class SemanticSegmentationLearner(BaseLearner):
             
             # Resize to model's expected input size (typically 1024x1024 for SAM)
             target_size = model.image_size
-            img_pil = img_pil.resize((target_size, target_size), PILImage.BILINEAR)
+            img_resized = img_pil.resize((target_size, target_size), PILImage.BILINEAR)
             
             # Convert to tensor and normalize
-            img_array = np.array(img_pil).astype(np.float32) / 255.0
+            img_array = np.array(img_resized).astype(np.float32) / 255.0
+            
+            # Close PIL objects
+            img_pil.close()
+            img_resized.close()
             
             # Apply model's normalization (SAM uses specific mean/std)
             mean = np.array(model.image_mean).reshape(1, 1, 3)
@@ -326,7 +330,10 @@ class SemanticSegmentationLearner(BaseLearner):
             img_array = (img_array - mean) / std
             
             # Convert to tensor (C, H, W)
-            img_tensor = torch.from_numpy(img_array).permute(2, 0, 1).float()
+            img_tensor = torch.from_numpy(img_array).permute(2, 0, 1).float().contiguous()
+            
+            # Free intermediate array
+            del img_array
             
             return img_tensor
         
@@ -349,7 +356,7 @@ class SemanticSegmentationLearner(BaseLearner):
             img_tensor = preprocess_image_for_sam(image)
             
             # Add batch dimension and move to device
-            img_tensor = img_tensor.unsqueeze(0).to(device)
+            img_tensor = img_tensor.unsqueeze(0).to(device, non_blocking=True)
             
             # Forward pass
             with torch.no_grad():
@@ -368,13 +375,15 @@ class SemanticSegmentationLearner(BaseLearner):
                 # Convert to probabilities and immediately move to CPU
                 if self._output_shape == 1:
                     # Binary segmentation - remove channel dim
-                    prob = torch.sigmoid(logits[0, 0]).cpu().numpy()
+                    prob = torch.sigmoid(logits[0, 0]).cpu().numpy().copy()
                 else:
                     # Multi-class segmentation
-                    prob = torch.softmax(logits[0], dim=0).cpu().numpy()
+                    prob = torch.softmax(logits[0], dim=0).cpu().numpy().copy()
                 
-                # Free GPU memory immediately
+                # Free GPU memory immediately and aggressively
                 del img_tensor, batch, outputs, logits
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()  # Wait for GPU to finish
             
             return prob
         
@@ -393,14 +402,21 @@ class SemanticSegmentationLearner(BaseLearner):
             image_path = row['image']
             label_path = row['label'] if 'label' in row else None
             
-            # Load image
-            image = np.array(Image.open(image_path))
+            # Load image with proper resource management
+            img_pil = Image.open(image_path)
+            image = np.array(img_pil)
+            img_pil.close()  # Release file handle
+            
             if len(image.shape) == 2:
                 image = np.stack([image] * 3, axis=2)  # Convert grayscale to RGB
             
             # Load label if exists
+            label = None
             if label_path:
-                label = np.array(Image.open(label_path))
+                label_pil = Image.open(label_path)
+                label = np.array(label_pil)
+                label_pil.close()  # Release file handle
+                
                 if len(label.shape) == 3:
                     label = label[:, :, 0]  # Take first channel if RGB
                 all_labels.append(torch.from_numpy(label))
@@ -425,9 +441,9 @@ class SemanticSegmentationLearner(BaseLearner):
                 # Free memory
                 del pred_prob
             
-            # Free image memory
+            # Free image and label memory
             del image
-            if label_path:
+            if label is not None:
                 del label
             
             img_time = time.time() - img_start
@@ -435,11 +451,14 @@ class SemanticSegmentationLearner(BaseLearner):
             if idx == 0:
                 logger.info(f"First image processed in {img_time:.2f}s (includes warmup)")
             
-            # Periodic garbage collection and progress logging
+            # More aggressive garbage collection to prevent memory leaks
+            if (idx + 1) % 5 == 0:  # Every 5 images instead of 10
+                gc.collect()  # Force garbage collection
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()  # Clear GPU cache
+            
+            # Progress logging
             if (idx + 1) % 10 == 0:
-                gc.collect()  # Force garbage collection every 10 images
-                torch.cuda.empty_cache() if torch.cuda.is_available() else None
-                
                 elapsed = time.time() - start_time
                 avg_time = elapsed / (idx + 1)
                 eta = avg_time * (len(data) - idx - 1)

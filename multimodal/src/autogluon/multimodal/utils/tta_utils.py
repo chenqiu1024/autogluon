@@ -63,27 +63,31 @@ class ScaleTransform(TTATransform):
         if len(image.shape) == 2:
             # Grayscale
             if image.dtype != np.uint8:
-                image = (image * 255).astype(np.uint8)
+                image_uint8 = (image * 255).astype(np.uint8)
                 needs_scale_back = True
-            pil_img = Image.fromarray(image, mode='L')
+            else:
+                image_uint8 = image
+            pil_img = Image.fromarray(image_uint8, mode='L')
         else:
             # RGB
             if image.dtype != np.uint8:
-                image = (image * 255).astype(np.uint8)
+                image_uint8 = (image * 255).astype(np.uint8)
                 needs_scale_back = True
-            pil_img = Image.fromarray(image)
+            else:
+                image_uint8 = image
+            pil_img = Image.fromarray(image_uint8)
         
         # Resize
         scaled_pil = pil_img.resize((new_w, new_h), Image.BILINEAR)
-        scaled = np.array(scaled_pil)
+        scaled = np.array(scaled_pil).copy()  # Explicit copy
+        
+        # Explicitly close PIL images to free memory IMMEDIATELY
+        pil_img.close()
+        scaled_pil.close()
         
         # Scale back if needed
         if needs_scale_back:
             scaled = scaled.astype(np.float32) / 255.0
-        
-        # Explicitly close PIL images to free memory
-        pil_img.close()
-        scaled_pil.close()
         
         return scaled
     
@@ -102,14 +106,14 @@ class ScaleTransform(TTATransform):
             mask_uint8 = (mask * 255).astype(np.uint8) if mask.max() <= 1.0 else mask.astype(np.uint8)
             mask_pil = Image.fromarray(mask_uint8, mode='L')
             resized_pil = mask_pil.resize((new_w, new_h), Image.BILINEAR)
-            resized = np.array(resized_pil).astype(np.float32)
+            resized = np.array(resized_pil).astype(np.float32).copy()
+            
+            # Close PIL images IMMEDIATELY
+            mask_pil.close()
+            resized_pil.close()
             
             if mask.max() <= 1.0:
                 resized = resized / 255.0
-            
-            # Close PIL images
-            mask_pil.close()
-            resized_pil.close()
         else:  # (C, H, W)
             c, h, w = mask.shape
             new_h, new_w = int(h / self.scale), int(w / self.scale)
@@ -122,12 +126,12 @@ class ScaleTransform(TTATransform):
                 resized_pil = mask_pil.resize((new_w, new_h), Image.BILINEAR)
                 resized[i] = np.array(resized_pil).astype(np.float32)
                 
-                if mask_ch.max() <= 1.0:
-                    resized[i] = resized[i] / 255.0
-                
-                # Close PIL images
+                # Close PIL images IMMEDIATELY
                 mask_pil.close()
                 resized_pil.close()
+                
+                if mask_ch.max() <= 1.0:
+                    resized[i] = resized[i] / 255.0
         
         return resized
 
@@ -204,7 +208,11 @@ class RotateTransform(TTATransform):
         rotated_pil = img_pil.rotate(-self.angle, resample=Image.BILINEAR, expand=False)
         
         # Convert back to numpy
-        rotated = np.array(rotated_pil)
+        rotated = np.array(rotated_pil).copy()  # Explicit copy
+        
+        # Close PIL objects immediately
+        img_pil.close()
+        rotated_pil.close()
         
         if needs_scale_back:
             rotated = rotated.astype(np.float32) / 255.0
@@ -226,7 +234,12 @@ class RotateTransform(TTATransform):
             # Rotate back (opposite direction)
             rotated_pil = mask_pil.rotate(self.angle, resample=Image.BILINEAR, expand=False)
             
-            rotated = np.array(rotated_pil).astype(np.float32)
+            rotated = np.array(rotated_pil).astype(np.float32).copy()
+            
+            # Close immediately
+            mask_pil.close()
+            rotated_pil.close()
+            
             if mask.max() <= 1.0:
                 rotated = rotated / 255.0
         else:  # (C, H, W)
@@ -238,6 +251,11 @@ class RotateTransform(TTATransform):
                 mask_pil = Image.fromarray(mask_uint8, mode='L')
                 rotated_pil = mask_pil.rotate(self.angle, resample=Image.BILINEAR, expand=False)
                 rotated[i] = np.array(rotated_pil).astype(np.float32)
+                
+                # Close immediately
+                mask_pil.close()
+                rotated_pil.close()
+                
                 if mask_ch.max() <= 1.0:
                     rotated[i] = rotated[i] / 255.0
         
@@ -406,39 +424,58 @@ class TTAPredictor:
             # Get prediction (should be probability or logit)
             pred = predict_fn(transformed_img)
             
+            # Free transformed image immediately
+            del transformed_img
+            
             # Apply inverse transform to prediction
             pred_original = transform.apply_inverse_mask(pred)
             
-            # Ensure correct shape
+            # Free pred immediately
+            del pred
+            
+            # Ensure correct shape - use PIL instead of skimage for speed
             if pred_original.shape[:2] != original_shape:
+                # Use PIL for resizing (faster than skimage)
                 if len(pred_original.shape) == 2:
-                    pred_original = resize(
-                        pred_original, 
-                        original_shape,
-                        order=1,
-                        preserve_range=True,
-                        anti_aliasing=True
-                    )
+                    pred_uint8 = (pred_original * 255).astype(np.uint8) if pred_original.max() <= 1.0 else pred_original.astype(np.uint8)
+                    pred_pil = Image.fromarray(pred_uint8, mode='L')
+                    resized_pil = pred_pil.resize((original_shape[1], original_shape[0]), Image.BILINEAR)
+                    pred_resized = np.array(resized_pil).astype(np.float32).copy()
+                    
+                    # Close immediately
+                    pred_pil.close()
+                    resized_pil.close()
+                    
+                    if pred_original.max() <= 1.0:
+                        pred_resized = pred_resized / 255.0
+                    
+                    pred_original = pred_resized
                 else:
-                    resized = np.zeros((pred_original.shape[0], original_shape[0], original_shape[1]), dtype=pred_original.dtype)
+                    resized = np.zeros((pred_original.shape[0], original_shape[0], original_shape[1]), dtype=np.float32)
                     for i in range(pred_original.shape[0]):
-                        resized[i] = resize(
-                            pred_original[i],
-                            original_shape,
-                            order=1,
-                            preserve_range=True,
-                            anti_aliasing=True
-                        )
+                        pred_ch = pred_original[i]
+                        pred_uint8 = (pred_ch * 255).astype(np.uint8) if pred_ch.max() <= 1.0 else pred_ch.astype(np.uint8)
+                        pred_pil = Image.fromarray(pred_uint8, mode='L')
+                        resized_pil = pred_pil.resize((original_shape[1], original_shape[0]), Image.BILINEAR)
+                        resized[i] = np.array(resized_pil).astype(np.float32)
+                        
+                        # Close immediately
+                        pred_pil.close()
+                        resized_pil.close()
+                        
+                        if pred_ch.max() <= 1.0:
+                            resized[i] = resized[i] / 255.0
+                    
                     pred_original = resized
             
             all_probs.append(pred_original.copy())  # Explicit copy
             all_weights.append(weight)
             
             # Free memory explicitly
-            del transformed_img, pred, pred_original
+            del pred_original
             
-            # Periodic garbage collection to prevent memory buildup
-            if (idx + 1) % 3 == 0:
+            # More aggressive garbage collection
+            if (idx + 1) % 2 == 0:  # Every 2 transforms
                 gc.collect()
         
         # Fuse predictions
