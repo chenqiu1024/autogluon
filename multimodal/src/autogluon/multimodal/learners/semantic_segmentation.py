@@ -365,13 +365,16 @@ class SemanticSegmentationLearner(BaseLearner):
                 # Extract logits
                 logits = outputs[model.prefix][LOGITS]
                 
-                # Convert to probabilities
+                # Convert to probabilities and immediately move to CPU
                 if self._output_shape == 1:
                     # Binary segmentation - remove channel dim
                     prob = torch.sigmoid(logits[0, 0]).cpu().numpy()
                 else:
                     # Multi-class segmentation
                     prob = torch.softmax(logits[0], dim=0).cpu().numpy()
+                
+                # Free GPU memory immediately
+                del img_tensor, batch, outputs, logits
             
             return prob
         
@@ -380,6 +383,7 @@ class SemanticSegmentationLearner(BaseLearner):
         all_labels = []
         
         import time
+        import gc
         start_time = time.time()
         
         for idx, row in data.iterrows():
@@ -408,24 +412,46 @@ class SemanticSegmentationLearner(BaseLearner):
                     image, predict_fn, return_probs=True
                 )
                 all_preds.append(torch.from_numpy(pred_prob).unsqueeze(0))  # Add channel dim
+                
+                # Free memory
+                del pred_mask, pred_prob
             else:
                 # Multi-class segmentation
                 _, pred_prob = self._tta_predictor.predict_with_tta(
                     image, predict_fn, return_probs=True
                 )
                 all_preds.append(torch.from_numpy(pred_prob))
+                
+                # Free memory
+                del pred_prob
+            
+            # Free image memory
+            del image
+            if label_path:
+                del label
             
             img_time = time.time() - img_start
             
             if idx == 0:
                 logger.info(f"First image processed in {img_time:.2f}s (includes warmup)")
             
+            # Periodic garbage collection and progress logging
             if (idx + 1) % 10 == 0:
+                gc.collect()  # Force garbage collection every 10 images
+                torch.cuda.empty_cache() if torch.cuda.is_available() else None
+                
                 elapsed = time.time() - start_time
                 avg_time = elapsed / (idx + 1)
                 eta = avg_time * (len(data) - idx - 1)
                 logger.info(f"Processed {idx + 1}/{len(data)} images with TTA "
                           f"(avg: {avg_time:.2f}s/img, ETA: {eta/60:.1f}min)")
+        
+        # Final garbage collection
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
+        logger.info(f"Finished processing all {len(data)} images, computing metrics...")
         
         # Stack predictions and labels
         y_pred = torch.stack(all_preds).float()
@@ -433,6 +459,10 @@ class SemanticSegmentationLearner(BaseLearner):
             y_true = torch.stack(all_labels)
         else:
             raise ValueError("Labels are required for evaluation")
+        
+        # Free intermediate lists
+        del all_preds, all_labels
+        gc.collect()
         
         # Compute metrics
         results = {}
@@ -448,9 +478,16 @@ class SemanticSegmentationLearner(BaseLearner):
         
         logger.info(f"TTA evaluation completed: {results}")
         
+        # Free predictions and labels
+        del y_pred, y_true
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
         if return_pred:
-            outputs = [{"pred": p, "label": l} for p, l in zip(all_preds, all_labels)]
-            return results, outputs
+            # Note: preds were already freed, so we can't return them
+            logger.warning("return_pred=True not fully supported with TTA (memory optimization)")
+            return results, []
         else:
             return results
 

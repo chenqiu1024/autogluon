@@ -50,29 +50,45 @@ class ScaleTransform(TTATransform):
         self.scale = scale
     
     def apply(self, image: np.ndarray) -> np.ndarray:
-        """Scale image."""
+        """Scale image using PIL (memory efficient)."""
         if self.scale == 1.0:
             return image
         
         h, w = image.shape[:2]
         new_h, new_w = int(h * self.scale), int(w * self.scale)
         
-        # Use PIL for image resizing
+        # Use PIL for image resizing (more memory efficient than skimage)
+        needs_scale_back = False
+        
         if len(image.shape) == 2:
             # Grayscale
-            pil_img = Image.fromarray(image)
-            scaled = np.array(pil_img.resize((new_w, new_h), Image.BILINEAR))
+            if image.dtype != np.uint8:
+                image = (image * 255).astype(np.uint8)
+                needs_scale_back = True
+            pil_img = Image.fromarray(image, mode='L')
         else:
             # RGB
-            pil_img = Image.fromarray(image.astype(np.uint8) if image.dtype == np.uint8 else (image * 255).astype(np.uint8))
-            scaled = np.array(pil_img.resize((new_w, new_h), Image.BILINEAR))
             if image.dtype != np.uint8:
-                scaled = scaled.astype(np.float32) / 255.0
+                image = (image * 255).astype(np.uint8)
+                needs_scale_back = True
+            pil_img = Image.fromarray(image)
+        
+        # Resize
+        scaled_pil = pil_img.resize((new_w, new_h), Image.BILINEAR)
+        scaled = np.array(scaled_pil)
+        
+        # Scale back if needed
+        if needs_scale_back:
+            scaled = scaled.astype(np.float32) / 255.0
+        
+        # Explicitly close PIL images to free memory
+        pil_img.close()
+        scaled_pil.close()
         
         return scaled
     
     def apply_inverse_mask(self, mask: np.ndarray) -> np.ndarray:
-        """Resize mask back to original size."""
+        """Resize mask back to original size (memory efficient)."""
         if self.scale == 1.0:
             return mask
         
@@ -80,14 +96,38 @@ class ScaleTransform(TTATransform):
         if len(mask.shape) == 2:
             h, w = mask.shape
             new_h, new_w = int(h / self.scale), int(w / self.scale)
-            # Use skimage for float mask resizing
-            resized = resize(mask, (new_h, new_w), order=1, preserve_range=True, anti_aliasing=True)
+            
+            # Use PIL for masks too (faster and more memory efficient)
+            # Scale to 0-255 range for PIL
+            mask_uint8 = (mask * 255).astype(np.uint8) if mask.max() <= 1.0 else mask.astype(np.uint8)
+            mask_pil = Image.fromarray(mask_uint8, mode='L')
+            resized_pil = mask_pil.resize((new_w, new_h), Image.BILINEAR)
+            resized = np.array(resized_pil).astype(np.float32)
+            
+            if mask.max() <= 1.0:
+                resized = resized / 255.0
+            
+            # Close PIL images
+            mask_pil.close()
+            resized_pil.close()
         else:  # (C, H, W)
             c, h, w = mask.shape
             new_h, new_w = int(h / self.scale), int(w / self.scale)
-            resized = np.zeros((c, new_h, new_w), dtype=mask.dtype)
+            resized = np.zeros((c, new_h, new_w), dtype=np.float32)
+            
             for i in range(c):
-                resized[i] = resize(mask[i], (new_h, new_w), order=1, preserve_range=True, anti_aliasing=True)
+                mask_ch = mask[i]
+                mask_uint8 = (mask_ch * 255).astype(np.uint8) if mask_ch.max() <= 1.0 else mask_ch.astype(np.uint8)
+                mask_pil = Image.fromarray(mask_uint8, mode='L')
+                resized_pil = mask_pil.resize((new_w, new_h), Image.BILINEAR)
+                resized[i] = np.array(resized_pil).astype(np.float32)
+                
+                if mask_ch.max() <= 1.0:
+                    resized[i] = resized[i] / 255.0
+                
+                # Close PIL images
+                mask_pil.close()
+                resized_pil.close()
         
         return resized
 
@@ -132,7 +172,7 @@ class FlipTransform(TTATransform):
 
 
 class RotateTransform(TTATransform):
-    """Small angle rotation."""
+    """Small angle rotation using PIL (faster than scipy)."""
     
     def __init__(self, angle: float):
         """
@@ -145,28 +185,61 @@ class RotateTransform(TTATransform):
         self.angle = angle
     
     def apply(self, image: np.ndarray) -> np.ndarray:
-        """Rotate image."""
+        """Rotate image using PIL (much faster than scipy)."""
         if self.angle == 0:
             return image
         
-        # Use scipy.ndimage.rotate (note: angle is positive for counter-clockwise)
-        rotated = ndimage.rotate(image, self.angle, reshape=False, order=1, mode='reflect')
+        # PIL is faster than scipy.ndimage.rotate
+        # Convert to PIL Image
+        if image.max() <= 1.0:
+            image_uint8 = (image * 255).astype(np.uint8)
+            needs_scale_back = True
+        else:
+            image_uint8 = image.astype(np.uint8)
+            needs_scale_back = False
+        
+        img_pil = Image.fromarray(image_uint8)
+        
+        # Rotate (PIL uses negative angle for counter-clockwise, opposite of scipy)
+        rotated_pil = img_pil.rotate(-self.angle, resample=Image.BILINEAR, expand=False)
+        
+        # Convert back to numpy
+        rotated = np.array(rotated_pil)
+        
+        if needs_scale_back:
+            rotated = rotated.astype(np.float32) / 255.0
         
         return rotated
     
     def apply_inverse_mask(self, mask: np.ndarray) -> np.ndarray:
-        """Rotate mask back (inverse rotation)."""
+        """Rotate mask back (inverse rotation) using PIL."""
         if self.angle == 0:
             return mask
         
-        # Rotate back with negative angle using scipy
+        # For masks, use PIL which is faster
         if len(mask.shape) == 2:
-            rotated = ndimage.rotate(mask, -self.angle, reshape=False, order=1, mode='constant', cval=0)
+            # Single channel mask
+            # Scale to 0-255 for PIL
+            mask_uint8 = (mask * 255).astype(np.uint8) if mask.max() <= 1.0 else mask.astype(np.uint8)
+            mask_pil = Image.fromarray(mask_uint8, mode='L')
+            
+            # Rotate back (opposite direction)
+            rotated_pil = mask_pil.rotate(self.angle, resample=Image.BILINEAR, expand=False)
+            
+            rotated = np.array(rotated_pil).astype(np.float32)
+            if mask.max() <= 1.0:
+                rotated = rotated / 255.0
         else:  # (C, H, W)
             c, h, w = mask.shape
             rotated = np.zeros_like(mask)
             for i in range(c):
-                rotated[i] = ndimage.rotate(mask[i], -self.angle, reshape=False, order=1, mode='constant', cval=0)
+                mask_ch = mask[i]
+                mask_uint8 = (mask_ch * 255).astype(np.uint8) if mask_ch.max() <= 1.0 else mask_ch.astype(np.uint8)
+                mask_pil = Image.fromarray(mask_uint8, mode='L')
+                rotated_pil = mask_pil.rotate(self.angle, resample=Image.BILINEAR, expand=False)
+                rotated[i] = np.array(rotated_pil).astype(np.float32)
+                if mask_ch.max() <= 1.0:
+                    rotated[i] = rotated[i] / 255.0
         
         return rotated
 
@@ -319,12 +392,14 @@ class TTAPredictor:
         probs : np.ndarray (optional)
             Probability map (H, W) if return_probs=True
         """
+        import gc
+        
         original_shape = image.shape[:2]
         all_probs = []
         all_weights = []
         
         # Apply each transform and collect predictions
-        for transform, weight in self.transforms:
+        for idx, (transform, weight) in enumerate(self.transforms):
             # Transform image
             transformed_img = transform.apply(image)
             
@@ -345,7 +420,7 @@ class TTAPredictor:
                         anti_aliasing=True
                     )
                 else:
-                    resized = np.zeros((pred_original.shape[0], original_shape[0], original_shape[1]))
+                    resized = np.zeros((pred_original.shape[0], original_shape[0], original_shape[1]), dtype=pred_original.dtype)
                     for i in range(pred_original.shape[0]):
                         resized[i] = resize(
                             pred_original[i],
@@ -356,8 +431,15 @@ class TTAPredictor:
                         )
                     pred_original = resized
             
-            all_probs.append(pred_original)
+            all_probs.append(pred_original.copy())  # Explicit copy
             all_weights.append(weight)
+            
+            # Free memory explicitly
+            del transformed_img, pred, pred_original
+            
+            # Periodic garbage collection to prevent memory buildup
+            if (idx + 1) % 3 == 0:
+                gc.collect()
         
         # Fuse predictions
         if self.fusion_method == "mean":
@@ -368,6 +450,10 @@ class TTAPredictor:
             fused_prob = np.average(all_probs, axis=0, weights=weights)
         else:
             raise ValueError(f"Unknown fusion method: {self.fusion_method}")
+        
+        # Free the list of probabilities
+        del all_probs, all_weights
+        gc.collect()
         
         # Convert to 2D if needed (for binary segmentation)
         if len(fused_prob.shape) == 3 and fused_prob.shape[0] == 1:
@@ -382,6 +468,8 @@ class TTAPredictor:
         if return_probs:
             return binary_mask, fused_prob
         else:
+            # Free fused_prob if not needed
+            del fused_prob
             return binary_mask
     
     def _post_process(self, mask: np.ndarray, original_shape: Tuple[int, int]) -> np.ndarray:
