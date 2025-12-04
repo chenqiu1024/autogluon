@@ -16,11 +16,13 @@ References:
 import logging
 from typing import Dict, List, Optional, Tuple, Union
 
-import cv2
 import numpy as np
 import torch
 import torch.nn.functional as F
+from PIL import Image
 from scipy import ndimage
+from scipy.ndimage import binary_closing, label
+from skimage.transform import resize
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +56,18 @@ class ScaleTransform(TTATransform):
         
         h, w = image.shape[:2]
         new_h, new_w = int(h * self.scale), int(w * self.scale)
-        scaled = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+        
+        # Use PIL for image resizing
+        if len(image.shape) == 2:
+            # Grayscale
+            pil_img = Image.fromarray(image)
+            scaled = np.array(pil_img.resize((new_w, new_h), Image.BILINEAR))
+        else:
+            # RGB
+            pil_img = Image.fromarray(image.astype(np.uint8) if image.dtype == np.uint8 else (image * 255).astype(np.uint8))
+            scaled = np.array(pil_img.resize((new_w, new_h), Image.BILINEAR))
+            if image.dtype != np.uint8:
+                scaled = scaled.astype(np.float32) / 255.0
         
         return scaled
     
@@ -67,13 +80,14 @@ class ScaleTransform(TTATransform):
         if len(mask.shape) == 2:
             h, w = mask.shape
             new_h, new_w = int(h / self.scale), int(w / self.scale)
-            resized = cv2.resize(mask, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+            # Use skimage for float mask resizing
+            resized = resize(mask, (new_h, new_w), order=1, preserve_range=True, anti_aliasing=True)
         else:  # (C, H, W)
             c, h, w = mask.shape
             new_h, new_w = int(h / self.scale), int(w / self.scale)
             resized = np.zeros((c, new_h, new_w), dtype=mask.dtype)
             for i in range(c):
-                resized[i] = cv2.resize(mask[i], (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+                resized[i] = resize(mask[i], (new_h, new_w), order=1, preserve_range=True, anti_aliasing=True)
         
         return resized
 
@@ -135,10 +149,8 @@ class RotateTransform(TTATransform):
         if self.angle == 0:
             return image
         
-        h, w = image.shape[:2]
-        center = (w / 2, h / 2)
-        M = cv2.getRotationMatrix2D(center, self.angle, 1.0)
-        rotated = cv2.warpAffine(image, M, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+        # Use scipy.ndimage.rotate (note: angle is positive for counter-clockwise)
+        rotated = ndimage.rotate(image, self.angle, reshape=False, order=1, mode='reflect')
         
         return rotated
     
@@ -147,24 +159,14 @@ class RotateTransform(TTATransform):
         if self.angle == 0:
             return mask
         
-        # Rotate back with negative angle
+        # Rotate back with negative angle using scipy
         if len(mask.shape) == 2:
-            h, w = mask.shape
-            center = (w / 2, h / 2)
-            M = cv2.getRotationMatrix2D(center, -self.angle, 1.0)
-            rotated = cv2.warpAffine(mask, M, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+            rotated = ndimage.rotate(mask, -self.angle, reshape=False, order=1, mode='constant', cval=0)
         else:  # (C, H, W)
             c, h, w = mask.shape
-            center = (w / 2, h / 2)
-            M = cv2.getRotationMatrix2D(center, -self.angle, 1.0)
             rotated = np.zeros_like(mask)
             for i in range(c):
-                rotated[i] = cv2.warpAffine(
-                    mask[i], M, (w, h), 
-                    flags=cv2.INTER_LINEAR, 
-                    borderMode=cv2.BORDER_CONSTANT, 
-                    borderValue=0
-                )
+                rotated[i] = ndimage.rotate(mask[i], -self.angle, reshape=False, order=1, mode='constant', cval=0)
         
         return rotated
 
@@ -335,18 +337,22 @@ class TTAPredictor:
             # Ensure correct shape
             if pred_original.shape[:2] != original_shape:
                 if len(pred_original.shape) == 2:
-                    pred_original = cv2.resize(
+                    pred_original = resize(
                         pred_original, 
-                        (original_shape[1], original_shape[0]), 
-                        interpolation=cv2.INTER_LINEAR
+                        original_shape,
+                        order=1,
+                        preserve_range=True,
+                        anti_aliasing=True
                     )
                 else:
                     resized = np.zeros((pred_original.shape[0], original_shape[0], original_shape[1]))
                     for i in range(pred_original.shape[0]):
-                        resized[i] = cv2.resize(
+                        resized[i] = resize(
                             pred_original[i],
-                            (original_shape[1], original_shape[0]),
-                            interpolation=cv2.INTER_LINEAR
+                            original_shape,
+                            order=1,
+                            preserve_range=True,
+                            anti_aliasing=True
                         )
                     pred_original = resized
             
@@ -409,8 +415,12 @@ class TTAPredictor:
         
         # Morphological closing
         if self.use_morphology:
-            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+            # Use scipy's binary_closing with elliptical structuring element
+            from scipy.ndimage import generate_binary_structure, iterate_structure
+            # Create a disk-like structure (approximation of ellipse)
+            struct = generate_binary_structure(2, 1)
+            struct = iterate_structure(struct, 2)  # Expand to ~5x5
+            mask = binary_closing(mask, structure=struct).astype(np.uint8)
         
         return mask
     
