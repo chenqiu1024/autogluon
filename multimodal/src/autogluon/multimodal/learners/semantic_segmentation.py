@@ -282,6 +282,18 @@ class SemanticSegmentationLearner(BaseLearner):
         model = self._model
         model.eval()
         
+        # Ensure model is on the correct device (GPU if available)
+        if torch.cuda.is_available():
+            device = torch.device('cuda')
+            if next(model.parameters()).device.type != 'cuda':
+                logger.info("Moving model to GPU for TTA inference...")
+                model = model.cuda()
+        else:
+            device = torch.device('cpu')
+            logger.warning("GPU not available, using CPU for TTA (will be slow)")
+        
+        logger.info(f"TTA inference device: {device}")
+        
         # Get data processors for image preprocessing
         from torchvision import transforms as T
         
@@ -337,7 +349,7 @@ class SemanticSegmentationLearner(BaseLearner):
             img_tensor = preprocess_image_for_sam(image)
             
             # Add batch dimension and move to device
-            img_tensor = img_tensor.unsqueeze(0).to(model.device)
+            img_tensor = img_tensor.unsqueeze(0).to(device)
             
             # Forward pass
             with torch.no_grad():
@@ -346,7 +358,7 @@ class SemanticSegmentationLearner(BaseLearner):
                 batch = {
                     model.prefix + '_image': img_tensor,
                     model.prefix + '_label': torch.zeros((1, model.image_size, model.image_size), 
-                                                         dtype=torch.long, device=model.device)
+                                                         dtype=torch.long, device=device)
                 }
                 outputs = model(batch)
                 
@@ -367,7 +379,12 @@ class SemanticSegmentationLearner(BaseLearner):
         all_preds = []
         all_labels = []
         
+        import time
+        start_time = time.time()
+        
         for idx, row in data.iterrows():
+            img_start = time.time()
+            
             # Load image and label
             image_path = row['image']
             label_path = row['label'] if 'label' in row else None
@@ -398,8 +415,17 @@ class SemanticSegmentationLearner(BaseLearner):
                 )
                 all_preds.append(torch.from_numpy(pred_prob))
             
+            img_time = time.time() - img_start
+            
+            if idx == 0:
+                logger.info(f"First image processed in {img_time:.2f}s (includes warmup)")
+            
             if (idx + 1) % 10 == 0:
-                logger.info(f"Processed {idx + 1}/{len(data)} images with TTA")
+                elapsed = time.time() - start_time
+                avg_time = elapsed / (idx + 1)
+                eta = avg_time * (len(data) - idx - 1)
+                logger.info(f"Processed {idx + 1}/{len(data)} images with TTA "
+                          f"(avg: {avg_time:.2f}s/img, ETA: {eta/60:.1f}min)")
         
         # Stack predictions and labels
         y_pred = torch.stack(all_preds).float()
