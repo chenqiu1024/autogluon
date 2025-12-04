@@ -75,6 +75,25 @@ if __name__ == "__main__":
     # Adapter parameters
     parser.add_argument("--adapter_enable", action="store_true", help="Enable standard Adapter modules")
     parser.add_argument("--adapter_dim", type=int, default=64, help="Dimension of the adapter bottleneck")
+    
+    # TTA (Test-Time Augmentation) parameters
+    parser.add_argument("--tta_enable", action="store_true", help="Enable Test-Time Augmentation for evaluation")
+    parser.add_argument("--tta_scales", type=float, nargs="+", default=[0.75, 1.0, 1.25], 
+                        help="Scale factors for multi-scale TTA (default: [0.75, 1.0, 1.25])")
+    parser.add_argument("--tta_flips", type=str, nargs="+", default=["none", "horizontal"],
+                        choices=["none", "horizontal", "vertical"],
+                        help="Flip types for TTA (default: ['none', 'horizontal'])")
+    parser.add_argument("--tta_rotations", type=float, nargs="+", default=[0],
+                        help="Rotation angles in degrees for TTA (default: [0])")
+    parser.add_argument("--tta_fusion", type=str, default="mean", choices=["mean", "weighted_mean"],
+                        help="Fusion method for TTA predictions (default: 'mean')")
+    parser.add_argument("--tta_threshold", type=float, default=0.5,
+                        help="Threshold for binary segmentation in TTA (default: 0.5)")
+    parser.add_argument("--tta_min_area", type=float, default=0.001,
+                        help="Remove components with area < tta_min_area * image_area (default: 0.001)")
+    parser.add_argument("--tta_morphology", action="store_true",
+                        help="Apply morphological closing in TTA post-processing")
+    
     args = parser.parse_args()
 
     dataset_name = args.task
@@ -137,6 +156,27 @@ if __name__ == "__main__":
             label="label",
         )
         predictor.fit(train_data=train_df, tuning_data=val_df, seed=args.seed)
+
+    # Enable TTA if requested
+    if args.tta_enable:
+        print(f"\n{'='*60}")
+        print(f"Enabling Test-Time Augmentation (TTA)")
+        print(f"  Scales: {args.tta_scales}")
+        print(f"  Flips: {args.tta_flips}")
+        print(f"  Rotations: {args.tta_rotations}")
+        print(f"  Fusion: {args.tta_fusion}")
+        print(f"  Total augmentations: {len(args.tta_scales) * len(args.tta_flips) * len(args.tta_rotations)}")
+        print(f"{'='*60}\n")
+        
+        predictor.enable_tta(
+            scales=args.tta_scales,
+            flips=args.tta_flips,
+            rotations=args.tta_rotations,
+            fusion_method=args.tta_fusion,
+            threshold=args.tta_threshold,
+            min_area_ratio=args.tta_min_area,
+            use_morphology=args.tta_morphology,
+        )
 
     # evaluation
     metric_file = os.path.join(args.output_dir, "metrics.txt")

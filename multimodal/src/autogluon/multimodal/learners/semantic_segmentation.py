@@ -1,6 +1,6 @@
 import logging
 import os
-from typing import Dict, Iterable, List, Optional, Union
+from typing import Dict, Iterable, List, Optional, Union, Callable
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -21,6 +21,7 @@ from ..optim.metrics.semantic_seg_metrics import COD_METRICS_NAMES_Pred as COD_M
 from ..optim.metrics.semantic_seg_metrics import Multiclass_IoU_Pred as Multiclass_IoU
 from ..optim.metrics.semantic_seg_metrics import Multiclass_DICE_Pred as Multiclass_DICE
 from ..utils import extract_from_output, setup_save_path
+from ..utils.tta_utils import TTAPredictor, dice_coefficient, iou_score
 from .base import BaseLearner
 
 logger = logging.getLogger(__name__)
@@ -61,6 +62,7 @@ class SemanticSegmentationLearner(BaseLearner):
         )
         self._output_shape = num_classes
         self._sample_data_path = sample_data_path
+        self._tta_predictor = None  # Will be initialized when TTA is enabled
 
         if self._sample_data_path is not None:
             infer_output_shape = self.get_semantic_segmentation_class_num(self._sample_data_path)
@@ -165,6 +167,10 @@ class SemanticSegmentationLearner(BaseLearner):
             If provided None, we would infer it on based on the data modalities
             and sample number.
         """
+        
+        # If TTA is enabled, use TTA evaluation
+        if self._tta_predictor is not None:
+            return self._evaluate_with_tta(data, metrics, return_pred)
 
         def get_metric_predict(
             metric_name: str,
@@ -239,6 +245,152 @@ class SemanticSegmentationLearner(BaseLearner):
             return results, outputs
         else:
             return results
+    
+    def _evaluate_with_tta(
+        self,
+        data: Union[pd.DataFrame, dict, list],
+        metrics: Optional[Union[str, List[str]]] = None,
+        return_pred: Optional[bool] = False,
+    ):
+        """
+        Evaluate using Test-Time Augmentation.
+        
+        This method performs TTA for each image and evaluates the results.
+        """
+        logger.info(f"Evaluating with TTA ({len(self._tta_predictor.transforms)} augmentations per image)...")
+        
+        def get_metric_predict(metric_name: str, num_classes: Optional[int] = None):
+            """Get metric function."""
+            if metric_name == BER:
+                return Balanced_Error_Rate()
+            elif metric_name in [SM, EM, FM, MAE]:
+                return COD_METRICS_NAMES[metric_name]
+            elif metric_name == IOU:
+                if num_classes == 1:
+                    return Binary_IoU()
+                else:
+                    return Multiclass_IoU(num_classes=num_classes)
+            elif metric_name == DICE:
+                if num_classes == 1:
+                    return Binary_DICE()
+                else:
+                    return Multiclass_DICE(num_classes=num_classes)
+            else:
+                raise ValueError(f"Unknown metric {metric_name}")
+        
+        # Create a prediction function for TTA
+        def predict_fn(image: np.ndarray) -> np.ndarray:
+            """
+            Prediction function for a single image used by TTA.
+            
+            Parameters
+            ----------
+            image : np.ndarray
+                Input image (H, W, C)
+            
+            Returns
+            -------
+            prob : np.ndarray
+                Probability map (H, W) for binary or (C, H, W) for multi-class
+            """
+            # Convert image to tensor
+            if len(image.shape) == 2:
+                image = np.expand_dims(image, axis=2)
+            
+            # Normalize if needed (using model's normalization)
+            from PIL import Image as PILImage
+            img_pil = PILImage.fromarray((image * 255).astype(np.uint8) if image.max() <= 1 else image.astype(np.uint8))
+            
+            # Create a temporary dataframe for single image
+            import tempfile
+            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+                img_pil.save(tmp.name)
+                tmp_df = pd.DataFrame({'image': [tmp.name]})
+                
+                # Get prediction
+                outputs = self.predict_per_run(
+                    data=tmp_df,
+                    realtime=True,
+                    requires_label=False,
+                )
+                
+                # Extract logits/probabilities
+                if self._output_shape == 1:
+                    logits = extract_from_output(ret_type=LOGITS, outputs=outputs, as_ndarray=True)
+                    prob = torch.sigmoid(torch.from_numpy(logits[0])).numpy()
+                else:
+                    logits = extract_from_output(ret_type=SEMANTIC_MASK, outputs=outputs, as_ndarray=True)
+                    prob = torch.softmax(torch.from_numpy(logits[0]), dim=0).numpy()
+                
+                # Clean up
+                os.unlink(tmp.name)
+                
+                return prob
+        
+        # Process each image with TTA
+        all_preds = []
+        all_labels = []
+        
+        for idx, row in data.iterrows():
+            # Load image and label
+            image_path = row['image']
+            label_path = row['label'] if 'label' in row else None
+            
+            # Load image
+            image = np.array(Image.open(image_path))
+            if len(image.shape) == 2:
+                image = np.stack([image] * 3, axis=2)  # Convert grayscale to RGB
+            
+            # Load label if exists
+            if label_path:
+                label = np.array(Image.open(label_path))
+                if len(label.shape) == 3:
+                    label = label[:, :, 0]  # Take first channel if RGB
+                all_labels.append(torch.from_numpy(label))
+            
+            # Predict with TTA
+            if self._output_shape == 1:
+                # Binary segmentation
+                pred_mask, pred_prob = self._tta_predictor.predict_with_tta(
+                    image, predict_fn, return_probs=True
+                )
+                all_preds.append(torch.from_numpy(pred_prob).unsqueeze(0))  # Add channel dim
+            else:
+                # Multi-class segmentation
+                _, pred_prob = self._tta_predictor.predict_with_tta(
+                    image, predict_fn, return_probs=True
+                )
+                all_preds.append(torch.from_numpy(pred_prob))
+            
+            if (idx + 1) % 10 == 0:
+                logger.info(f"Processed {idx + 1}/{len(data)} images with TTA")
+        
+        # Stack predictions and labels
+        y_pred = torch.stack(all_preds).float()
+        if len(all_labels) > 0:
+            y_true = torch.stack(all_labels)
+        else:
+            raise ValueError("Labels are required for evaluation")
+        
+        # Compute metrics
+        results = {}
+        if isinstance(metrics, str):
+            metrics = [metrics]
+        
+        for per_metric_name in metrics:
+            per_metric = get_metric_predict(metric_name=per_metric_name.lower(), num_classes=self._output_shape)
+            for y_p, y_t in zip(y_pred, y_true):
+                per_metric.update(y_p.unsqueeze(0), y_t.unsqueeze(0))
+            score = per_metric.compute()
+            results[per_metric_name] = score.item()
+        
+        logger.info(f"TTA evaluation completed: {results}")
+        
+        if return_pred:
+            outputs = [{"pred": p, "label": l} for p, l in zip(all_preds, all_labels)]
+            return results, outputs
+        else:
+            return results
 
     def get_litmodule_per_run(
         self,
@@ -269,6 +421,73 @@ class SemanticSegmentationLearner(BaseLearner):
             self._output_shape = self.get_semantic_segmentation_class_num(data)
         self.ensure_predict_ready()
         return data
+    
+    def enable_tta(
+        self,
+        scales: List[float] = [0.75, 1.0, 1.25],
+        flips: List[str] = ["none", "horizontal"],
+        rotations: List[float] = [0],
+        fusion_method: str = "mean",
+        scale_weights: Optional[Dict[float, float]] = None,
+        threshold: float = 0.5,
+        min_area_ratio: float = 0.001,
+        use_morphology: bool = False,
+    ):
+        """
+        Enable Test-Time Augmentation (TTA) for inference.
+        
+        Parameters
+        ----------
+        scales : List[float]
+            List of scale factors for multi-scale testing.
+            Recommended: [0.75, 1.0, 1.25] for fast (6 inferences).
+            Or [0.5, 0.75, 1.0, 1.25, 1.5] for better results.
+        flips : List[str]
+            List of flip types: "none", "horizontal", "vertical".
+            Recommended: ["none", "horizontal"] for most cases.
+        rotations : List[float]
+            List of rotation angles in degrees.
+            Recommended: [0] for fast, or [-10, 0, 10] for better (18 inferences).
+        fusion_method : str
+            Method to fuse predictions: "mean" or "weighted_mean".
+        scale_weights : Optional[Dict[float, float]]
+            Weights for each scale when using weighted_mean.
+        threshold : float
+            Threshold for binary segmentation (can be tuned on validation set).
+        min_area_ratio : float
+            Remove connected components with area < min_area_ratio * image_area.
+        use_morphology : bool
+            Whether to apply morphological closing for smoothing.
+        
+        Examples
+        --------
+        >>> # Basic TTA (6 inferences)
+        >>> predictor.enable_tta()
+        
+        >>> # Advanced TTA (18 inferences)
+        >>> predictor.enable_tta(
+        ...     scales=[0.75, 1.0, 1.25],
+        ...     flips=["none", "horizontal"],
+        ...     rotations=[-10, 0, 10],
+        ...     fusion_method="weighted_mean"
+        ... )
+        """
+        self._tta_predictor = TTAPredictor(
+            scales=scales,
+            flips=flips,
+            rotations=rotations,
+            fusion_method=fusion_method,
+            scale_weights=scale_weights,
+            threshold=threshold,
+            min_area_ratio=min_area_ratio,
+            use_morphology=use_morphology,
+        )
+        logger.info(f"TTA enabled with {len(self._tta_predictor.transforms)} augmentations")
+    
+    def disable_tta(self):
+        """Disable Test-Time Augmentation."""
+        self._tta_predictor = None
+        logger.info("TTA disabled")
 
     def evaluate(
         self,
