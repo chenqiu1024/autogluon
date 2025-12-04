@@ -342,7 +342,12 @@ class SemanticSegmentationLearner(BaseLearner):
             # Forward pass
             with torch.no_grad():
                 # Create batch dict for model
-                batch = {model.prefix + '_image': img_tensor}
+                # Need to provide a dummy label for model's forward pass
+                batch = {
+                    model.prefix + '_image': img_tensor,
+                    model.prefix + '_label': torch.zeros((1, model.image_size, model.image_size), 
+                                                         dtype=torch.long, device=model.device)
+                }
                 outputs = model(batch)
                 
                 # Extract logits
