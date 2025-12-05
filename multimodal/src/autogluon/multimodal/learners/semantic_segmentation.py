@@ -472,39 +472,62 @@ class SemanticSegmentationLearner(BaseLearner):
         
         logger.info(f"Finished processing all {len(data)} images, computing metrics...")
         
-        # Stack predictions and labels
-        y_pred = torch.stack(all_preds).float()
-        if len(all_labels) > 0:
-            y_true = torch.stack(all_labels)
-        else:
+        # Check that we have predictions and labels
+        if len(all_labels) == 0:
             raise ValueError("Labels are required for evaluation")
         
-        # Free intermediate lists
-        del all_preds, all_labels
-        gc.collect()
+        if len(all_preds) != len(all_labels):
+            raise ValueError(f"Number of predictions ({len(all_preds)}) != number of labels ({len(all_labels)})")
         
-        # Compute metrics
+        # Compute metrics WITHOUT stacking (images have different sizes)
         results = {}
         if isinstance(metrics, str):
             metrics = [metrics]
         
+        # Initialize metrics
+        metric_objects = {}
         for per_metric_name in metrics:
-            per_metric = get_metric_predict(metric_name=per_metric_name.lower(), num_classes=self._output_shape)
-            for y_p, y_t in zip(y_pred, y_true):
-                per_metric.update(y_p.unsqueeze(0), y_t.unsqueeze(0))
-            score = per_metric.compute()
-            results[per_metric_name] = score.item()
+            metric_objects[per_metric_name] = get_metric_predict(
+                metric_name=per_metric_name.lower(), 
+                num_classes=self._output_shape
+            )
+        
+        # Process each image individually (can't stack due to different sizes)
+        for y_p, y_t in zip(all_preds, all_labels):
+            # Ensure predictions and labels are on CPU and have matching sizes
+            y_p = y_p.float()
+            y_t = y_t.long() if y_t.dtype != torch.long else y_t
+            
+            # Resize prediction to match label size if needed
+            if y_p.shape[-2:] != y_t.shape[-2:]:
+                # Prediction shape: (C, H, W) or (1, H, W)
+                # Label shape: (H, W)
+                target_size = y_t.shape[-2:]
+                y_p = F.interpolate(
+                    y_p.unsqueeze(0),  # Add batch dim
+                    size=target_size,
+                    mode='bilinear',
+                    align_corners=False
+                ).squeeze(0)  # Remove batch dim
+            
+            # Update all metrics with this image
+            for metric_name, metric_obj in metric_objects.items():
+                metric_obj.update(y_p.unsqueeze(0), y_t.unsqueeze(0))
+        
+        # Compute final scores
+        for metric_name, metric_obj in metric_objects.items():
+            score = metric_obj.compute()
+            results[metric_name] = score.item()
         
         logger.info(f"TTA evaluation completed: {results}")
         
-        # Free predictions and labels
-        del y_pred, y_true
+        # Free memory
+        del all_preds, all_labels, metric_objects
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         
         if return_pred:
-            # Note: preds were already freed, so we can't return them
             logger.warning("return_pred=True not fully supported with TTA (memory optimization)")
             return results, []
         else:
