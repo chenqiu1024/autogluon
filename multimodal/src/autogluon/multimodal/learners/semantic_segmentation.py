@@ -503,59 +503,73 @@ class SemanticSegmentationLearner(BaseLearner):
                 if cache_dir:
                     logger.info(f"💾 Caching enabled. Predictions will be saved to {cache_dir}")
         
+        # Initialize metrics early so we can stream updates and avoid storing all predictions
+        metric_objects = {}
+        if isinstance(metrics, str):
+            metrics = [metrics]
+        for per_metric_name in metrics:
+            metric_objects[per_metric_name] = get_metric_predict(
+                metric_name=per_metric_name.lower(),
+                num_classes=self._output_shape
+            )
+
+        # Determine whether to stream metrics (no caching => no large tensors kept)
+        streaming_metrics = cache_dir is None
+
         # Process each image with TTA
-        
         import time
         import gc
         start_time = time.time()
         total_images = len(data)
-        
+
         for idx, row in data.iterrows():
             # ⭐ 跳过已处理的样本（断点续传）
             if idx in processed_indices:
                 logger.info(f"⏭️  Skipping image {idx+1}/{total_images} (already processed)")
                 continue
-            
+
             img_start = time.time()
-            
+
             # Load image and label
             image_path = row['image']
             label_path = row['label'] if 'label' in row else None
-            
+
             # Load image with proper resource management
             img_pil = Image.open(image_path)
             image = np.array(img_pil)
             img_pil.close()  # Release file handle
-            
+
             if len(image.shape) == 2:
                 image = np.stack([image] * 3, axis=2)  # Convert grayscale to RGB
-            
+
             # Load label if exists
             label = None
             if label_path:
                 label_pil = Image.open(label_path)
                 label = np.array(label_pil)
                 label_pil.close()  # Release file handle
-                
+
                 if len(label.shape) == 3:
                     label = label[:, :, 0]  # Take first channel if RGB
-                
+
                 # Binarize label: convert [0, 255] to [0, 1]
                 # This matches the preprocessing in semantic_seg_metrics.py
                 if self._output_shape == 1:  # Binary segmentation
                     label = (label > 128).astype(np.int64)
-                
-                all_labels.append(torch.from_numpy(label))
-            
+
+                if not streaming_metrics:
+                    all_labels.append(torch.from_numpy(label))
+
             # Predict with TTA
             if self._output_shape == 1:
                 # Binary segmentation
                 pred_mask, pred_prob = self._tta_predictor.predict_with_tta(
                     image, predict_fn, return_probs=True
                 )
-                # Binary: pred_prob is (H, W), keep it as is for metric computation
-                all_preds.append(torch.from_numpy(pred_prob))
-                
+                pred_tensor = torch.from_numpy(pred_prob)
+                if not streaming_metrics:
+                    # Store only when caching/resume is enabled
+                    all_preds.append(pred_tensor)
                 # Free memory
                 del pred_mask, pred_prob
             else:
@@ -563,28 +577,49 @@ class SemanticSegmentationLearner(BaseLearner):
                 _, pred_prob = self._tta_predictor.predict_with_tta(
                     image, predict_fn, return_probs=True
                 )
-                # Multi-class: pred_prob is (C, H, W)
-                all_preds.append(torch.from_numpy(pred_prob))
-                
+                pred_tensor = torch.from_numpy(pred_prob)
+                if not streaming_metrics:
+                    all_preds.append(pred_tensor)
                 # Free memory
                 del pred_prob
-            
+
+            # Stream metric updates to avoid holding all predictions in memory
+            if streaming_metrics:
+                y_p = pred_tensor.float()
+                if label is None:
+                    raise ValueError("Labels are required for evaluation")
+                y_t = torch.from_numpy(label)
+                y_t = y_t.long() if y_t.dtype != torch.long else y_t
+
+                # Resize prediction to match label size if needed
+                if y_p.shape[-2:] != y_t.shape[-2:]:
+                    target_size = y_t.shape[-2:]
+                    y_p = F.interpolate(
+                        y_p.unsqueeze(0),
+                        size=target_size,
+                        mode='bilinear',
+                        align_corners=False
+                    ).squeeze(0)
+
+                for metric_name, metric_obj in metric_objects.items():
+                    metric_obj.update(y_p.unsqueeze(0), y_t.unsqueeze(0))
+
             # Free image and label memory
             del image
             if label is not None:
                 del label
-            
+
             # ⭐ 标记为已处理（断点续传）
             processed_indices.add(idx)
-            
+
             img_time = time.time() - img_start
-            
+
             if idx == 0:
                 logger.info(f"First image processed in {img_time:.2f}s (includes warmup)")
-            
+
             # ⭐ 定期保存缓存（每 10 张图或最后一张）
             num_processed = len(processed_indices)
-            if cache_file is not None and (num_processed % 10 == 0 or num_processed == total_images):
+            if (not streaming_metrics) and cache_file is not None and (num_processed % 10 == 0 or num_processed == total_images):
                 try:
                     logger.info(f"💾 Saving checkpoint ({num_processed}/{total_images} images)")
                     with open(cache_file, 'wb') as f:
@@ -593,21 +628,21 @@ class SemanticSegmentationLearner(BaseLearner):
                             'labels': all_labels,
                             'indices': list(processed_indices)
                         }, f)
-                    
+
                     # Save processed indices as text file (for easy inspection)
                     with open(processed_indices_file, 'w') as f:
                         f.write('\n'.join(map(str, sorted(processed_indices))))
-                    
+
                     logger.info(f"✅ Checkpoint saved successfully")
                 except Exception as e:
                     logger.warning(f"⚠️  Failed to save checkpoint: {e}")
-            
+
             # More aggressive garbage collection to prevent memory leaks
             if (idx + 1) % 5 == 0:  # Every 5 images instead of 10
                 gc.collect()  # Force garbage collection
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()  # Clear GPU cache
-            
+
             # Progress logging
             if (idx + 1) % 10 == 0 or num_processed == total_images:
                 elapsed = time.time() - start_time
@@ -621,56 +656,48 @@ class SemanticSegmentationLearner(BaseLearner):
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-        
+
         logger.info(f"Finished processing all {len(data)} images, computing metrics...")
-        
-        # Check that we have predictions and labels
-        if len(all_labels) == 0:
-            raise ValueError("Labels are required for evaluation")
-        
-        if len(all_preds) != len(all_labels):
-            raise ValueError(f"Number of predictions ({len(all_preds)}) != number of labels ({len(all_labels)})")
-        
-        # Compute metrics WITHOUT stacking (images have different sizes)
+
         results = {}
-        if isinstance(metrics, str):
-            metrics = [metrics]
-        
-        # Initialize metrics
-        metric_objects = {}
-        for per_metric_name in metrics:
-            metric_objects[per_metric_name] = get_metric_predict(
-                metric_name=per_metric_name.lower(), 
-                num_classes=self._output_shape
-            )
-        
-        # Process each image individually (can't stack due to different sizes)
-        for y_p, y_t in zip(all_preds, all_labels):
-            # Ensure predictions and labels are on CPU and have matching sizes
-            y_p = y_p.float()
-            y_t = y_t.long() if y_t.dtype != torch.long else y_t
-            
-            # Resize prediction to match label size if needed
-            if y_p.shape[-2:] != y_t.shape[-2:]:
-                # Prediction shape: (C, H, W) or (1, H, W)
-                # Label shape: (H, W)
-                target_size = y_t.shape[-2:]
-                y_p = F.interpolate(
-                    y_p.unsqueeze(0),  # Add batch dim
-                    size=target_size,
-                    mode='bilinear',
-                    align_corners=False
-                ).squeeze(0)  # Remove batch dim
-            
-            # Update all metrics with this image
+        if streaming_metrics:
+            # Metrics were updated on the fly; just compute
             for metric_name, metric_obj in metric_objects.items():
-                metric_obj.update(y_p.unsqueeze(0), y_t.unsqueeze(0))
-        
-        # Compute final scores
-        for metric_name, metric_obj in metric_objects.items():
-            score = metric_obj.compute()
-            results[metric_name] = score.item()
-        
+                score = metric_obj.compute()
+                results[metric_name] = score.item()
+        else:
+            # Check that we have predictions and labels
+            if len(all_labels) == 0:
+                raise ValueError("Labels are required for evaluation")
+            
+            if len(all_preds) != len(all_labels):
+                raise ValueError(f"Number of predictions ({len(all_preds)}) != number of labels ({len(all_labels)})")
+
+            # Process each image individually (can't stack due to different sizes)
+            for y_p, y_t in zip(all_preds, all_labels):
+                # Ensure predictions and labels are on CPU and have matching sizes
+                y_p = y_p.float()
+                y_t = y_t.long() if y_t.dtype != torch.long else y_t
+                
+                # Resize prediction to match label size if needed
+                if y_p.shape[-2:] != y_t.shape[-2:]:
+                    target_size = y_t.shape[-2:]
+                    y_p = F.interpolate(
+                        y_p.unsqueeze(0),  # Add batch dim
+                        size=target_size,
+                        mode='bilinear',
+                        align_corners=False
+                    ).squeeze(0)  # Remove batch dim
+                
+                # Update all metrics with this image
+                for metric_name, metric_obj in metric_objects.items():
+                    metric_obj.update(y_p.unsqueeze(0), y_t.unsqueeze(0))
+
+            # Compute final scores
+            for metric_name, metric_obj in metric_objects.items():
+                score = metric_obj.compute()
+                results[metric_name] = score.item()
+
         logger.info(f"TTA evaluation completed: {results}")
         
         # ⭐ 清理缓存文件（评估成功完成后）
