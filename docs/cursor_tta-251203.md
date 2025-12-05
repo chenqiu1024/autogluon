@@ -1,5 +1,5 @@
 # 设计实验Adapter部分的创新与遵循
-_Exported on 12/4/2025 at 22:12:04 PST from Cursor (2.1.46)_
+_Exported on 12/4/2025 at 22:30:13 PST from Cursor (2.1.46)_
 
 ---
 
@@ -57764,5 +57764,1463 @@ nohup python run_semantic_segmentation.py \
     --tta_morphology \
     --output_dir outputs/tta_full \
     > tta_full.log 2>&1 &
+```
+
+---
+
+**User**
+
+nohup: ignoring input
+========================================
+阶段 1: 单样本完整 TTA (1 image, 18 augmentations)
+目的：快速验证 TTA pipeline 是否正常工作
+========================================
+Loaded model from local cache: facebook/sam-vit-huge
+Load pretrained checkpoint: /root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA/AutogluonModels/ag-20251203_075302/model.ckpt
+TTA initialized with 18 augmentations
+  Scales: [0.75, 1.0, 1.25]
+  Flips: ['none', 'horizontal']
+  Rotations: [-10.0, 0.0, 10.0]
+  Fusion: weighted_mean
+  Total inferences per image: 18
+TTA enabled with 18 augmentations
+Evaluating with TTA (18 augmentations per image)...
+Moving model to GPU for TTA inference...
+TTA inference device: cuda
+🔍 Running sanity checks before full evaluation...
+  ✓ Total images to process: 1
+  ✓ DataFrame columns: ['Unnamed: 0', 'image', 'label']
+  ✓ Model device: cuda
+  ✓ CUDA available: True
+  ✓ GPU memory allocated: 2.63 GB
+  Testing TTA pipeline on first image...
+    Image shape: (2848, 4288, 3)
+    Output shape: (2848, 4288)
+  ✓ TTA pipeline test PASSED!
+✅ All sanity checks passed! Starting full evaluation...
+
+First image processed in 24.60s (includes warmup)
+Processed 1/1 images with TTA (avg: 24.60s/img, ETA: 0.0min)
+Finished processing all 1 images, computing metrics...
+
+============================================================
+Enabling Test-Time Augmentation (TTA)
+  Scales: [0.75, 1.0, 1.25]
+  Flips: ['none', 'horizontal']
+  Rotations: [-10.0, 0.0, 10.0]
+  Fusion: weighted_mean
+  Total augmentations: 18
+============================================================
+
+
+🔍 QUICK TEST MODE: Processing only first 1 images (out of 600)
+
+Traceback (most recent call last):
+  File "/root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA/run_semantic_segmentation.py", line 213, in <module>
+    res = predictor.evaluate(test_df, metrics=eval_metrics)
+  File "/root/autodl-tmp/works/autogluon/multimodal/src/autogluon/multimodal/predictor.py", line 621, in evaluate
+    return self._learner.evaluate(
+  File "/root/autodl-tmp/works/autogluon/multimodal/src/autogluon/multimodal/learners/semantic_segmentation.py", line 833, in evaluate
+    return self.evaluate_semantic_segmentation(data, metrics, realtime)
+  File "/root/autodl-tmp/works/autogluon/multimodal/src/autogluon/multimodal/learners/semantic_segmentation.py", line 176, in evaluate_semantic_segmentation
+    return self._evaluate_with_tta(
+  File "/root/autodl-tmp/works/autogluon/multimodal/src/autogluon/multimodal/learners/semantic_segmentation.py", line 663, in _evaluate_with_tta
+    score = metric_obj.compute()
+  File "/root/autodl-tmp/works/autogluon/multimodal/src/autogluon/multimodal/optim/metrics/semantic_seg_metrics.py", line 888, in compute
+    res_list.append(metric(logit, label))
+  File "/root/autodl-tmp/envs/conv-lora/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1775, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/root/autodl-tmp/envs/conv-lora/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1786, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/root/autodl-tmp/envs/conv-lora/lib/python3.10/site-packages/torchmetrics/metric.py", line 315, in forward
+    self._forward_cache = self._forward_reduce_state_update(*args, **kwargs)
+  File "/root/autodl-tmp/envs/conv-lora/lib/python3.10/site-packages/torchmetrics/metric.py", line 384, in _forward_reduce_state_update
+    self.update(*args, **kwargs)
+  File "/root/autodl-tmp/envs/conv-lora/lib/python3.10/site-packages/torchmetrics/metric.py", line 559, in wrapped_func
+    raise err
+  File "/root/autodl-tmp/envs/conv-lora/lib/python3.10/site-packages/torchmetrics/metric.py", line 549, in wrapped_func
+    update(*args, **kwargs)
+  File "/root/autodl-tmp/envs/conv-lora/lib/python3.10/site-packages/torchmetrics/classification/confusion_matrix.py", line 139, in update
+    _binary_confusion_matrix_tensor_validation(preds, target, self.ignore_index)
+  File "/root/autodl-tmp/envs/conv-lora/lib/python3.10/site-packages/torchmetrics/functional/classification/confusion_matrix.py", line 95, in _binary_confusion_matrix_tensor_validation
+    _check_same_shape(preds, target)
+  File "/root/autodl-tmp/envs/conv-lora/lib/python3.10/site-packages/torchmetrics/utilities/checks.py", line 39, in _check_same_shape
+    raise RuntimeError(
+RuntimeError: Predictions and targets are expected to have the same shape, but got torch.Size([1, 2848, 4288]) and torch.Size([2848, 4288]).
+❌ 阶段 1 失败！请先修复问题
+
+---
+
+**Cursor**
+
+```plaintext
+RuntimeError: Predictions and targets are expected to have the same shape, but got torch.Size([1, 2848, 4288]) and torch.Size([2848, 4288]).
+```
+
+太好了！✅ **Sanity Check 完美通过**，TTA pipeline 工作正常！但是在**指标计算**时出现了形状不匹配的问题。
+
+## 🔍 问题分析
+
+错误信息很明确：
+```
+RuntimeError: Predictions and targets are expected to have the same shape, 
+but got torch.Size([1, 2848, 4288]) and torch.Size([2848, 4288]).
+```
+
+**问题：**
+- 预测：`[1, 2848, 4288]` - 包含 channel 维度
+- 标签：`[2848, 4288]` - 没有 channel 维度
+
+这是因为在 TTA 处理后，我们添加了 channel 维度，但在调用 metric 的 `update()` 时，又错误地添加了 batch 维度。
+
+```plaintext
+RuntimeError: Predictions and targets are expected to have the same shape, 
+but got torch.Size([1, 2848, 4288]) and torch.Size([2848, 4288]).
+```
+
+```python
+metric_obj.update(y_p.unsqueeze(0), y_t.unsqueeze(0))
+```
+
+```python
+all_preds.append(torch.from_numpy(pred_prob).unsqueeze(0))  # Add channel dim
+```
+
+```python
+all_labels.append(torch.from_numpy(label))
+```
+
+```python
+metric_obj.update(y_p.unsqueeze(0), y_t.unsqueeze(0))
+```
+
+```python
+for y_p, y_t in zip(y_pred, y_true):
+    per_metric.update(y_p.unsqueeze(0), y_t.unsqueeze(0))
+```
+
+```python
+all_preds.append(torch.from_numpy(pred_prob).unsqueeze(0))  # Add channel dim
+
+
+```
+
+找到问题了！在存储预测时，我们多添加了一个维度。让我检查一下相关代码：
+
+## 🐛 问题根源
+
+在 `semantic_segmentation.py` 的两个地方有问题：
+
+### 问题 1: 存储预测时（第 550 行）
+```python
+all_preds.append(torch.from_numpy(pred_prob).unsqueeze(0))  # Add channel dim
+```
+
+这里添加了 channel 维度，导致：
+- `pred_prob` 从 TTA 返回: `(H, W)` → `(2848, 4288)`
+- `unsqueeze(0)` 后: `(1, H, W)` → `(1, 2848, 4288)`
+
+### 问题 2: 更新指标时（第 659 行）
+```python
+metric_obj.update(y_p.unsqueeze(0), y_t.unsqueeze(0))
+```
+
+这又添加了 batch 维度：
+- `y_p`: `(1, 2848, 4288)` → `unsqueeze(0)` → `(1, 1, 2848, 4288)` ❌
+- `y_t`: `(2848, 4288)` → `unsqueeze(0)` → `(1, 2848, 4288)` ✓
+
+**形状不匹配！**
+
+## 🔧 解决方案
+
+需要修改两处代码，使其与原始评估逻辑保持一致。
+
+**请切换到 Agent 模式**，让我帮你修复这个问题，或者你可以手动修改：
+
+### 修改位置 1: `semantic_segmentation.py` 第 550 行
+
+**旧代码：**
+```python
+all_preds.append(torch.from_numpy(pred_prob).unsqueeze(0))  # Add channel dim
+```
+
+**新代码：**
+```python
+all_preds.append(torch.from_numpy(pred_prob))  # Binary: (H, W)
+```
+
+### 修改位置 2: `semantic_segmentation.py` 第 559 行（多类别分割）
+
+保持不变，因为多类别返回的已经是 `(C, H, W)` 格式。
+
+### 说明
+
+这样修改后：
+- `all_preds` 中的每个元素是 `(H, W)` 形状（binary）
+- `all_labels` 中的每个元素也是 `(H, W)` 形状
+- 在 metric update 时，`unsqueeze(0)` 后都变成 `(1, H, W)`
+- **形状完美匹配！** ✅
+
+---
+
+## 📝 完整修改
+
+在 `multimodal/src/autogluon/multimodal/learners/semantic_segmentation.py` 中：
+
+```python
+# 找到第 544-560 行，修改为：
+
+# Predict with TTA
+if self._output_shape == 1:
+    # Binary segmentation
+    pred_mask, pred_prob = self._tta_predictor.predict_with_tta(
+        image, predict_fn, return_probs=True
+    )
+    all_preds.append(torch.from_numpy(pred_prob))  # 不添加维度，保持 (H, W)
+    
+    # Free memory
+    del pred_mask, pred_prob
+else:
+    # Multi-class segmentation
+    _, pred_prob = self._tta_predictor.predict_with_tta(
+        image, predict_fn, return_probs=True
+    )
+    all_preds.append(torch.from_numpy(pred_prob))  # (C, H, W)
+    
+    # Free memory
+    del pred_prob
+```
+
+修改后，重新运行测试脚本即可！🚀
+
+```python
+all_preds.append(torch.from_numpy(pred_prob).unsqueeze(0))  # Add channel dim
+```
+
+```python
+all_preds.append(torch.from_numpy(pred_prob).unsqueeze(0))  # Add channel dim
+```
+
+```python
+metric_obj.update(y_p.unsqueeze(0), y_t.unsqueeze(0))
+```
+
+```python
+all_preds.append(torch.from_numpy(pred_prob).unsqueeze(0))  # Add channel dim
+```
+
+```python
+all_preds.append(torch.from_numpy(pred_prob))  # Binary: (H, W)
+```
+
+```python
+# 找到第 544-560 行，修改为：
+
+# Predict with TTA
+if self._output_shape == 1:
+    # Binary segmentation
+    pred_mask, pred_prob = self._tta_predictor.predict_with_tta(
+        image, predict_fn, return_probs=True
+    )
+    all_preds.append(torch.from_numpy(pred_prob))  # 不添加维度，保持 (H, W)
+    
+    # Free memory
+    del pred_mask, pred_prob
+else:
+    # Multi-class segmentation
+    _, pred_prob = self._tta_predictor.predict_with_tta(
+        image, predict_fn, return_probs=True
+    )
+    all_preds.append(torch.from_numpy(pred_prob))  # (C, H, W)
+    
+    # Free memory
+    del pred_prob
+```
+
+---
+
+**User**
+
+请修改
+
+---
+
+**Cursor**
+
+好的，我来修复这个形状不匹配的问题！
+
+```python
+import logging
+import os
+from typing import Dict, Iterable, List, Optional, Union, Callable
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn.functional as F
+from PIL import Image
+from scipy.special import softmax
+
+from autogluon.core.metrics import Scorer
+
+from ..constants import LABEL, LOGITS, SEMANTIC_MASK, SEMANTIC_SEGMENTATION_IMG
+from ..optim import SemanticSegmentationLitModule, get_loss_func, get_norm_layer_param_names, get_peft_param_names
+from ..optim.metrics.semantic_seg_metrics import Balanced_Error_Rate_Pred as Balanced_Error_Rate
+from ..optim.metrics.semantic_seg_metrics import Binary_IoU_Pred as Binary_IoU
+from ..optim.metrics.semantic_seg_metrics import Binary_DICE_Pred as Binary_DICE
+from ..optim.metrics.semantic_seg_metrics import COD_METRICS_NAMES_Pred as COD_METRICS_NAMES
+from ..optim.metrics.semantic_seg_metrics import Multiclass_IoU_Pred as Multiclass_IoU
+from ..optim.metrics.semantic_seg_metrics import Multiclass_DICE_Pred as Multiclass_DICE
+from ..utils import extract_from_output, setup_save_path
+from ..utils.tta_utils import TTAPredictor, dice_coefficient, iou_score
+from .base import BaseLearner
+
+logger = logging.getLogger(__name__)
+
+from ..constants import BER, DICE, EM, FM, IOU, MAE, SEMANTIC_SEGMENTATION, SM
+
+
+class SemanticSegmentationLearner(BaseLearner):
+    def __init__(
+        self,
+        label: Optional[str] = None,
+        problem_type: Optional[str] = SEMANTIC_SEGMENTATION,
+        presets: Optional[str] = None,
+        eval_metric: Optional[Union[str, Scorer]] = "iou",
+        hyperparameters: Optional[dict] = None,
+        path: Optional[str] = None,
+        verbosity: Optional[int] = 2,
+        num_classes: Optional[int] = None,  # TODO: can we infer this from data?
+        warn_if_exist: Optional[bool] = True,
+        enable_progress_bar: Optional[bool] = None,
+        pretrained: Optional[bool] = True,
+        validation_metric: Optional[str] = "iou",
+        sample_data_path: Optional[str] = None,
+        **kwargs,
+    ):
+        super().__init__(
+            label=label,
+            problem_type=problem_type,
+            presets=presets,
+            eval_metric=eval_metric,
+            hyperparameters=hyperparameters,
+            path=path,
+            verbosity=verbosity,
+            warn_if_exist=warn_if_exist,
+            enable_progress_bar=enable_progress_bar,
+            pretrained=pretrained,
+            validation_metric=validation_metric,
+        )
+        self._output_shape = num_classes
+        self._sample_data_path = sample_data_path
+        self._tta_predictor = None  # Will be initialized when TTA is enabled
+
+        if self._sample_data_path is not None:
+            infer_output_shape = self.get_semantic_segmentation_class_num(self._sample_data_path)
+            if num_classes is not None:
+                assert (
+                    num_classes == infer_output_shape
+                ), f"The provided number of classes '{num_classes}' and the inferred class number {infer_output_shape}' from the sample data should be consistent."
+            else:
+                self._output_shape = infer_output_shape
+
+    def get_semantic_segmentation_class_num(self, sample_data_path):
+        """
+        Get the number of classes for given data.
+
+        Parameters
+        ----------
+            sample_data_path
+                This is used for automatically inference num_classes of semantic segmentation dataset.
+                Could be an image directory, image file or pd.DataFrame.
+        Returns
+        -------
+            The number of classes.
+        """
+        if isinstance(sample_data_path, str):
+            if os.path.isdir(sample_data_path):
+                mask_files = os.listdir(sample_data_path)
+                num_classes = []
+                for mask_file in mask_files:
+                    per_num_classes = self.get_semantic_segmentation_class_num(
+                        os.path.join(sample_data_path, mask_file)
+                    )
+                    num_classes.append(per_num_classes)
+                return max(num_classes)
+            else:
+                mask = Image.open(sample_data_path)
+                mode = mask.mode
+
+                if mode == "1":
+                    return 1
+                classes = np.unique(mask)
+                if mode == "L" and np.array_equal(classes, np.array([0, 255])):
+                    return 1
+
+                return max(classes).item() + 1  # include background
+
+        elif isinstance(sample_data_path, pd.DataFrame):
+            num_classes = []
+            for idx in range(sample_data_path.shape[0]):
+                row = sample_data_path.iloc[idx]
+                mask_file = row[self._label_column]
+                per_num_classes = self.get_semantic_segmentation_class_num(mask_file)
+                num_classes.append(per_num_classes)
+            return max(num_classes)
+
+    def infer_output_shape(self):
+        if self._output_shape is None:
+            self._output_shape = self.get_semantic_segmentation_class_num(self._train_data)
+
+    @staticmethod
+    def get_peft_param_names_per_run(model, config):
+        peft_param_names = None
+        peft = config.optim.peft
+        if peft:
+            norm_param_names = get_norm_layer_param_names(model)
+            peft_param_names = get_peft_param_names(
+                norm_param_names,
+                peft=peft,
+                extra_params=config.optim.extra_trainable_params,
+            )
+        return peft_param_names
+
+    def get_loss_func_per_run(self, config, mixup_active=None):
+        loss_func = get_loss_func(
+            problem_type=self._problem_type,
+            loss_func_name=config.optim.loss_func,
+            config=config.optim,
+            num_classes=self._output_shape,
+        )
+        return loss_func, None
+
+    def evaluate_semantic_segmentation(
+        self,
+        data: Union[pd.DataFrame, dict, list, str],
+        metrics: Optional[Union[str, List[str]]] = None,
+        return_pred: Optional[bool] = False,
+        realtime: Optional[bool] = False,
+    ):
+        """
+        Evaluate semantic segmentation on a test dataset based on "torchmetrics".
+
+        Parameters
+        ----------
+        data
+            A dataframe, containing the same columns as the training data.
+            Or a str, that is a path of the annotation file for detection.
+        metrics
+            Metrics used for evaluation.
+        return_pred
+            Whether to return the prediction result of each row.
+        realtime
+            Whether to do realtime inference, which is efficient for small data (default None).
+            If provided None, we would infer it on based on the data modalities
+            and sample number.
+        """
+        
+        # If TTA is enabled, use TTA evaluation
+        if self._tta_predictor is not None:
+            # Use cache settings if configured
+            cache_dir = getattr(self, '_tta_cache_dir', None)
+            resume_from_cache = getattr(self, '_tta_resume_from_cache', True)
+            return self._evaluate_with_tta(
+                data, metrics, return_pred, 
+                cache_dir=cache_dir,
+                resume_from_cache=resume_from_cache
+            )
+
+        def get_metric_predict(
+            metric_name: str,
+            num_classes: Optional[int] = None,
+        ):
+            """
+            Obtain a torchmerics.Metric from its name.
+            Define a customized metric function in case that torchmetrics doesn't support some metric.
+
+            Parameters
+            ----------
+            metric_name
+                Name of metric.
+            num_classes
+                Number of classes.
+            is_matching
+                Whether is matching.
+            problem_type
+                Type of problem, e.g., binary and multiclass.
+
+            Returns
+            -------
+            torchmetrics.Metric
+                A torchmetrics.Metric object.
+            custom_metric_func
+                A customized metric function.
+            """
+            if metric_name == BER:
+                return Balanced_Error_Rate()
+            elif metric_name in [SM, EM, FM, MAE]:
+                return COD_METRICS_NAMES[metric_name]
+            elif metric_name == IOU:
+                if num_classes == 1:
+                    return Binary_IoU()
+                else:
+                    return Multiclass_IoU(num_classes=num_classes)
+            elif metric_name == DICE:
+                if num_classes == 1:
+                    return Binary_DICE()
+                else:
+                    return Multiclass_DICE(num_classes=num_classes)
+            else:
+                raise ValueError(f"Unknown metric {metric_name}")
+
+        outputs = self.predict_per_run(
+            data=data,
+            realtime=realtime,
+            requires_label=False,
+        )
+
+        if self._output_shape == 1:
+            logits = extract_from_output(ret_type=LOGITS, outputs=outputs, as_ndarray=False)
+        else:
+            logits = extract_from_output(ret_type=SEMANTIC_MASK, outputs=outputs, as_ndarray=False)
+        y_pred = logits.float()
+        y_true = [ele[LABEL] for ele in outputs]
+        y_true = torch.cat(y_true)
+
+        assert len(y_true) == len(y_pred)
+
+        results = {}
+        if isinstance(metrics, str):
+            metrics = [metrics]
+        for per_metric_name in metrics:
+            per_metric = get_metric_predict(metric_name=per_metric_name.lower(), num_classes=self._output_shape)
+            for y_p, y_t in zip(y_pred, y_true):
+                per_metric.update(y_p.unsqueeze(0), y_t.unsqueeze(0))
+            score = per_metric.compute()
+            results[per_metric_name] = score.item()
+
+        if return_pred:
+            return results, outputs
+        else:
+            return results
+    
+    def _evaluate_with_tta(
+        self,
+        data: Union[pd.DataFrame, dict, list],
+        metrics: Optional[Union[str, List[str]]] = None,
+        return_pred: Optional[bool] = False,
+        cache_dir: Optional[str] = None,
+        resume_from_cache: bool = True,
+    ):
+        """
+        Evaluate using Test-Time Augmentation with checkpoint support.
+        
+        This method performs TTA for each image and evaluates the results.
+        
+        Parameters
+        ----------
+        data : Union[pd.DataFrame, dict, list]
+            Input data containing image and label paths
+        metrics : Optional[Union[str, List[str]]]
+            Metrics to compute
+        return_pred : Optional[bool]
+            Whether to return predictions
+        cache_dir : Optional[str]
+            Directory to cache TTA predictions for resume (default: None, no caching)
+        resume_from_cache : bool
+            Whether to resume from cache if exists (default: True)
+        """
+        logger.info(f"Evaluating with TTA ({len(self._tta_predictor.transforms)} augmentations per image)...")
+        
+        def get_metric_predict(metric_name: str, num_classes: Optional[int] = None):
+            """Get metric function."""
+            if metric_name == BER:
+                return Balanced_Error_Rate()
+            elif metric_name in [SM, EM, FM, MAE]:
+                return COD_METRICS_NAMES[metric_name]
+            elif metric_name == IOU:
+                if num_classes == 1:
+                    return Binary_IoU()
+                else:
+                    return Multiclass_IoU(num_classes=num_classes)
+            elif metric_name == DICE:
+                if num_classes == 1:
+                    return Binary_DICE()
+                else:
+                    return Multiclass_DICE(num_classes=num_classes)
+            else:
+                raise ValueError(f"Unknown metric {metric_name}")
+        
+        # Get model and preprocessor
+        model = self._model
+        model.eval()
+        
+        # Ensure model is on the correct device (GPU if available)
+        if torch.cuda.is_available():
+            device = torch.device('cuda')
+            if next(model.parameters()).device.type != 'cuda':
+                logger.info("Moving model to GPU for TTA inference...")
+                model = model.cuda()
+        else:
+            device = torch.device('cpu')
+            logger.warning("GPU not available, using CPU for TTA (will be slow)")
+        
+        logger.info(f"TTA inference device: {device}")
+        
+        # ============================================================
+        # 方案 4: Sanity Check - 提前发现问题
+        # ============================================================
+        logger.info("🔍 Running sanity checks before full evaluation...")
+        
+        # Sanity Check 1: 验证数据
+        if len(data) == 0:
+            raise ValueError("❌ No data to evaluate!")
+        logger.info(f"  ✓ Total images to process: {len(data)}")
+        logger.info(f"  ✓ DataFrame columns: {data.columns.tolist()}")
+        
+        # Sanity Check 2: 检查设备和模型
+        logger.info(f"  ✓ Model device: {device}")
+        logger.info(f"  ✓ CUDA available: {torch.cuda.is_available()}")
+        if torch.cuda.is_available():
+            allocated_gb = torch.cuda.memory_allocated() / 1e9
+            logger.info(f"  ✓ GPU memory allocated: {allocated_gb:.2f} GB")
+        
+        # Sanity Check 3: 测试单个样本的 TTA pipeline
+        logger.info(f"  Testing TTA pipeline on first image...")
+        test_row = data.iloc[0]
+        test_img_path = test_row['image']
+        
+        # Get data processors for image preprocessing
+        from torchvision import transforms as T
+        
+        # Create preprocessing pipeline similar to model's preprocessing
+        # Based on SAM's image preprocessing
+        def preprocess_image_for_sam(image_np):
+            """Preprocess image for SAM model."""
+            from PIL import Image as PILImage
+            
+            # Ensure correct format
+            if len(image_np.shape) == 2:
+                image_np = np.stack([image_np] * 3, axis=2)
+            
+            if image_np.max() <= 1.0:
+                image_np = (image_np * 255).astype(np.uint8)
+            
+            # Convert to PIL
+            img_pil = PILImage.fromarray(image_np.astype(np.uint8))
+            
+            # Resize to model's expected input size (typically 1024x1024 for SAM)
+            target_size = model.image_size
+            img_resized = img_pil.resize((target_size, target_size), PILImage.BILINEAR)
+            
+            # Convert to tensor and normalize
+            img_array = np.array(img_resized).astype(np.float32) / 255.0
+            
+            # Close PIL objects
+            img_pil.close()
+            img_resized.close()
+            
+            # Apply model's normalization (SAM uses specific mean/std)
+            mean = np.array(model.image_mean).reshape(1, 1, 3)
+            std = np.array(model.image_std).reshape(1, 1, 3)
+            img_array = (img_array - mean) / std
+            
+            # Convert to tensor (C, H, W)
+            img_tensor = torch.from_numpy(img_array).permute(2, 0, 1).float().contiguous()
+            
+            # Free intermediate array
+            del img_array
+            
+            return img_tensor
+        
+        # Create a prediction function for TTA
+        def predict_fn(image: np.ndarray) -> np.ndarray:
+            """
+            Prediction function for a single image used by TTA.
+            
+            Parameters
+            ----------
+            image : np.ndarray
+                Input image (H, W, C) in range [0, 255] or [0, 1]
+            
+            Returns
+            -------
+            prob : np.ndarray
+                Probability map (H, W) for binary or (C, H, W) for multi-class
+            """
+            # Preprocess image
+            img_tensor = preprocess_image_for_sam(image)
+            
+            # Add batch dimension and move to device
+            img_tensor = img_tensor.unsqueeze(0).to(device, non_blocking=True)
+            
+            # Forward pass
+            with torch.no_grad():
+                # Create batch dict for model
+                # Need to provide a dummy label for model's forward pass
+                batch = {
+                    model.prefix + '_image': img_tensor,
+                    model.prefix + '_label': torch.zeros((1, model.image_size, model.image_size), 
+                                                         dtype=torch.long, device=device)
+                }
+                outputs = model(batch)
+                
+                # Extract logits
+                logits = outputs[model.prefix][LOGITS]
+                
+                # Convert to probabilities and immediately move to CPU
+                if self._output_shape == 1:
+                    # Binary segmentation - remove channel dim
+                    prob = torch.sigmoid(logits[0, 0]).cpu().numpy().copy()
+                else:
+                    # Multi-class segmentation
+                    prob = torch.softmax(logits[0], dim=0).cpu().numpy().copy()
+                
+                # Free GPU memory immediately and aggressively
+                del img_tensor, batch, outputs, logits
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()  # Wait for GPU to finish
+            
+            return prob
+        
+        # Complete Sanity Check 3: Test TTA on first image
+        try:
+            test_img_pil = Image.open(test_img_path)
+            test_img = np.array(test_img_pil)
+            test_img_pil.close()
+            
+            if len(test_img.shape) == 2:
+                test_img = np.stack([test_img] * 3, axis=2)
+            
+            logger.info(f"    Image shape: {test_img.shape}")
+            
+            # Test TTA prediction
+            test_pred_mask, test_pred_prob = self._tta_predictor.predict_with_tta(
+                test_img, predict_fn, return_probs=True
+            )
+            
+            logger.info(f"    Output shape: {test_pred_prob.shape}")
+            
+            # Verify output shape matches input
+            assert test_pred_prob.shape[:2] == test_img.shape[:2], \
+                f"❌ Output shape mismatch! Expected {test_img.shape[:2]}, got {test_pred_prob.shape[:2]}"
+            
+            logger.info(f"  ✓ TTA pipeline test PASSED!")
+            
+            # Clean up test data
+            del test_img, test_pred_mask, test_pred_prob
+            
+        except Exception as e:
+            logger.error(f"❌ Sanity check FAILED! Error: {e}")
+            logger.error("Please fix the issue before running full evaluation.")
+            raise RuntimeError(f"TTA Sanity Check Failed: {e}") from e
+        
+        logger.info("✅ All sanity checks passed! Starting full evaluation...\n")
+        
+        # ============================================================
+        # 方案 2: 断点续传机制
+        # ============================================================
+        import os
+        import pickle
+        
+        # Setup cache directory
+        processed_indices = set()
+        all_preds = []
+        all_labels = []
+        cache_file = None
+        processed_indices_file = None
+        
+        if cache_dir is not None:
+            os.makedirs(cache_dir, exist_ok=True)
+            cache_file = os.path.join(cache_dir, "tta_predictions.pkl")
+            processed_indices_file = os.path.join(cache_dir, "processed_indices.txt")
+            
+            # Try to load cached data
+            if resume_from_cache and os.path.exists(cache_file):
+                try:
+                    logger.info(f"📂 Loading cached predictions from {cache_file}")
+                    with open(cache_file, 'rb') as f:
+                        cache_data = pickle.load(f)
+                        all_preds = cache_data['preds']
+                        all_labels = cache_data['labels']
+                        processed_indices = set(cache_data['indices'])
+                    logger.info(f"✅ Loaded {len(all_preds)} cached predictions (resuming from checkpoint)")
+                except Exception as e:
+                    logger.warning(f"⚠️  Failed to load cache: {e}. Starting fresh.")
+                    processed_indices = set()
+                    all_preds = []
+                    all_labels = []
+            else:
+                if cache_dir:
+                    logger.info(f"💾 Caching enabled. Predictions will be saved to {cache_dir}")
+        
+        # Process each image with TTA
+        
+        import time
+        import gc
+        start_time = time.time()
+        total_images = len(data)
+        
+        for idx, row in data.iterrows():
+            # ⭐ 跳过已处理的样本（断点续传）
+            if idx in processed_indices:
+                logger.info(f"⏭️  Skipping image {idx+1}/{total_images} (already processed)")
+                continue
+            
+            img_start = time.time()
+            
+            # Load image and label
+            image_path = row['image']
+            label_path = row['label'] if 'label' in row else None
+            
+            # Load image with proper resource management
+            img_pil = Image.open(image_path)
+            image = np.array(img_pil)
+            img_pil.close()  # Release file handle
+            
+            if len(image.shape) == 2:
+                image = np.stack([image] * 3, axis=2)  # Convert grayscale to RGB
+            
+            # Load label if exists
+            label = None
+            if label_path:
+                label_pil = Image.open(label_path)
+                label = np.array(label_pil)
+                label_pil.close()  # Release file handle
+                
+                if len(label.shape) == 3:
+                    label = label[:, :, 0]  # Take first channel if RGB
+                all_labels.append(torch.from_numpy(label))
+            
+            # Predict with TTA
+            if self._output_shape == 1:
+                # Binary segmentation
+                pred_mask, pred_prob = self._tta_predictor.predict_with_tta(
+                    image, predict_fn, return_probs=True
+                )
+                # Binary: pred_prob is (H, W), keep it as is for metric computation
+                all_preds.append(torch.from_numpy(pred_prob))
+                
+                # Free memory
+                del pred_mask, pred_prob
+            else:
+                # Multi-class segmentation
+                _, pred_prob = self._tta_predictor.predict_with_tta(
+                    image, predict_fn, return_probs=True
+                )
+                # Multi-class: pred_prob is (C, H, W)
+                all_preds.append(torch.from_numpy(pred_prob))
+                
+                # Free memory
+                del pred_prob
+            
+            # Free image and label memory
+            del image
+            if label is not None:
+                del label
+            
+            # ⭐ 标记为已处理（断点续传）
+            processed_indices.add(idx)
+            
+            img_time = time.time() - img_start
+            
+            if idx == 0:
+                logger.info(f"First image processed in {img_time:.2f}s (includes warmup)")
+            
+            # ⭐ 定期保存缓存（每 10 张图或最后一张）
+            num_processed = len(processed_indices)
+            if cache_file is not None and (num_processed % 10 == 0 or num_processed == total_images):
+                try:
+                    logger.info(f"💾 Saving checkpoint ({num_processed}/{total_images} images)")
+                    with open(cache_file, 'wb') as f:
+                        pickle.dump({
+                            'preds': all_preds,
+                            'labels': all_labels,
+                            'indices': list(processed_indices)
+                        }, f)
+                    
+                    # Save processed indices as text file (for easy inspection)
+                    with open(processed_indices_file, 'w') as f:
+                        f.write('\n'.join(map(str, sorted(processed_indices))))
+                    
+                    logger.info(f"✅ Checkpoint saved successfully")
+                except Exception as e:
+                    logger.warning(f"⚠️  Failed to save checkpoint: {e}")
+            
+            # More aggressive garbage collection to prevent memory leaks
+            if (idx + 1) % 5 == 0:  # Every 5 images instead of 10
+                gc.collect()  # Force garbage collection
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()  # Clear GPU cache
+            
+            # Progress logging
+            if (idx + 1) % 10 == 0 or num_processed == total_images:
+                elapsed = time.time() - start_time
+                avg_time = elapsed / num_processed if num_processed > 0 else 0
+                remaining = total_images - num_processed
+                eta = avg_time * remaining if remaining > 0 else 0
+                logger.info(f"Processed {num_processed}/{total_images} images with TTA "
+                          f"(avg: {avg_time:.2f}s/img, ETA: {eta/60:.1f}min)")
+        
+        # Final garbage collection
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
+        logger.info(f"Finished processing all {len(data)} images, computing metrics...")
+        
+        # Check that we have predictions and labels
+        if len(all_labels) == 0:
+            raise ValueError("Labels are required for evaluation")
+        
+        if len(all_preds) != len(all_labels):
+            raise ValueError(f"Number of predictions ({len(all_preds)}) != number of labels ({len(all_labels)})")
+        
+        # Compute metrics WITHOUT stacking (images have different sizes)
+        results = {}
+        if isinstance(metrics, str):
+            metrics = [metrics]
+        
+        # Initialize metrics
+        metric_objects = {}
+        for per_metric_name in metrics:
+            metric_objects[per_metric_name] = get_metric_predict(
+                metric_name=per_metric_name.lower(), 
+                num_classes=self._output_shape
+            )
+        
+        # Process each image individually (can't stack due to different sizes)
+        for y_p, y_t in zip(all_preds, all_labels):
+            # Ensure predictions and labels are on CPU and have matching sizes
+            y_p = y_p.float()
+            y_t = y_t.long() if y_t.dtype != torch.long else y_t
+            
+            # Resize prediction to match label size if needed
+            if y_p.shape[-2:] != y_t.shape[-2:]:
+                # Prediction shape: (C, H, W) or (1, H, W)
+                # Label shape: (H, W)
+                target_size = y_t.shape[-2:]
+                y_p = F.interpolate(
+                    y_p.unsqueeze(0),  # Add batch dim
+                    size=target_size,
+                    mode='bilinear',
+                    align_corners=False
+                ).squeeze(0)  # Remove batch dim
+            
+            # Update all metrics with this image
+            for metric_name, metric_obj in metric_objects.items():
+                metric_obj.update(y_p.unsqueeze(0), y_t.unsqueeze(0))
+        
+        # Compute final scores
+        for metric_name, metric_obj in metric_objects.items():
+            score = metric_obj.compute()
+            results[metric_name] = score.item()
+        
+        logger.info(f"TTA evaluation completed: {results}")
+        
+        # ⭐ 清理缓存文件（评估成功完成后）
+        if cache_file is not None and os.path.exists(cache_file):
+            try:
+                os.remove(cache_file)
+                if processed_indices_file and os.path.exists(processed_indices_file):
+                    os.remove(processed_indices_file)
+                logger.info(f"🗑️  Cleaned up cache files (evaluation completed successfully)")
+            except Exception as e:
+                logger.warning(f"⚠️  Failed to clean up cache: {e}")
+        
+        # Free memory
+        del all_preds, all_labels, metric_objects
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
+        if return_pred:
+            logger.warning("return_pred=True not fully supported with TTA (memory optimization)")
+            return results, []
+        else:
+            return results
+
+    def get_litmodule_per_run(
+        self,
+        model=None,
+        model_postprocess_fn=None,
+        peft_param_names=None,
+        optim_kwargs=None,
+        distillation_kwargs=None,
+        is_train=True,
+    ):
+        if is_train:
+            return SemanticSegmentationLitModule(
+                model=model,
+                model_postprocess_fn=model_postprocess_fn,
+                trainable_param_names=peft_param_names,
+                **optim_kwargs,
+            )
+        else:
+            return SemanticSegmentationLitModule(
+                model=self._model,
+                model_postprocess_fn=self._model_postprocess_fn,
+                **optim_kwargs,
+            )
+
+    def on_predict_start(self, data: pd.DataFrame):
+        data = self.data_to_df(data=data)
+        if self._output_shape is None:  # for zero-shot evaluation/prediction
+            self._output_shape = self.get_semantic_segmentation_class_num(data)
+        self.ensure_predict_ready()
+        return data
+    
+    def enable_tta(
+        self,
+        scales: List[float] = [0.75, 1.0, 1.25],
+        flips: List[str] = ["none", "horizontal"],
+        rotations: List[float] = [0],
+        fusion_method: str = "mean",
+        scale_weights: Optional[Dict[float, float]] = None,
+        threshold: float = 0.5,
+        min_area_ratio: float = 0.001,
+        use_morphology: bool = False,
+        cache_dir: Optional[str] = None,
+        resume_from_cache: bool = True,
+    ):
+        """
+        Enable Test-Time Augmentation (TTA) for inference.
+        
+        Parameters
+        ----------
+        scales : List[float]
+            List of scale factors for multi-scale testing.
+            Recommended: [0.75, 1.0, 1.25] for fast (6 inferences).
+            Or [0.5, 0.75, 1.0, 1.25, 1.5] for better results.
+        flips : List[str]
+            List of flip types: "none", "horizontal", "vertical".
+            Recommended: ["none", "horizontal"] for most cases.
+        rotations : List[float]
+            List of rotation angles in degrees.
+            Recommended: [0] for fast, or [-10, 0, 10] for better (18 inferences).
+        fusion_method : str
+            Method to fuse predictions: "mean" or "weighted_mean".
+        scale_weights : Optional[Dict[float, float]]
+            Weights for each scale when using weighted_mean.
+        threshold : float
+            Threshold for binary segmentation (can be tuned on validation set).
+        min_area_ratio : float
+            Remove connected components with area < min_area_ratio * image_area.
+        use_morphology : bool
+            Whether to apply morphological closing for smoothing.
+        cache_dir : Optional[str]
+            Directory to cache TTA predictions for resume (default: None, no caching).
+            Useful for long-running evaluations that might be interrupted.
+        resume_from_cache : bool
+            Whether to resume from cache if exists (default: True).
+        
+        Examples
+        --------
+        >>> # Basic TTA (6 inferences)
+        >>> predictor.enable_tta()
+        
+        >>> # Advanced TTA (18 inferences)
+        >>> predictor.enable_tta(
+        ...     scales=[0.75, 1.0, 1.25],
+        ...     flips=["none", "horizontal"],
+        ...     rotations=[-10, 0, 10],
+        ...     fusion_method="weighted_mean"
+        ... )
+        """
+        self._tta_predictor = TTAPredictor(
+            scales=scales,
+            flips=flips,
+            rotations=rotations,
+            fusion_method=fusion_method,
+            scale_weights=scale_weights,
+            threshold=threshold,
+            min_area_ratio=min_area_ratio,
+            use_morphology=use_morphology,
+        )
+        
+        # Store cache configuration
+        self._tta_cache_dir = cache_dir
+        self._tta_resume_from_cache = resume_from_cache
+        
+        logger.info(f"TTA enabled with {len(self._tta_predictor.transforms)} augmentations")
+        if cache_dir:
+            logger.info(f"TTA caching enabled: {cache_dir} (resume={resume_from_cache})")
+    
+    def disable_tta(self):
+        """Disable Test-Time Augmentation."""
+        self._tta_predictor = None
+        logger.info("TTA disabled")
+
+    def evaluate(
+        self,
+        data: Union[pd.DataFrame, dict, list, str],
+        metrics: Optional[Union[str, List[str]]] = None,
+        return_pred: Optional[bool] = False,
+        realtime: Optional[bool] = False,
+        **kwargs,
+    ):
+        """
+        Evaluate model on a test dataset.
+
+        Parameters
+        ----------
+        data
+            A dataframe, containing the same columns as the training data.
+            Or a str, that is a path of the annotation file for detection.
+        metrics
+            A list of metric names to report.
+            If None, we only return the score for the stored `_eval_metric_name`.
+        return_pred
+            Whether to return the prediction result of each row.
+        realtime
+            Whether to do realtime inference, which is efficient for small data (default False).
+            If provided None, we would infer it on based on the data modalities
+            and sample number.
+
+        Returns
+        -------
+        A dictionary with the metric names and their corresponding scores.
+        Optionally return a dataframe of prediction results.
+        """
+        data = self.on_predict_start(data)
+        return self.evaluate_semantic_segmentation(data, metrics, realtime)
+
+    def predict(
+        self,
+        data: Union[pd.DataFrame, dict, list, str],
+        realtime: Optional[bool] = False,
+        save_results: Optional[bool] = None,
+        **kwargs,
+    ):
+        """
+        Predict values for the label column of new data.
+
+        Parameters
+        ----------
+        data
+            The data to make predictions for. Should contain same column names as training data and
+            follow same format (except for the `label` column).
+        realtime
+            Whether to do realtime inference, which is efficient for small data (default False).
+            If provided None, we would infer it on based on the data modalities
+            and sample number.
+        save_results
+            Whether to save the prediction results.
+
+        Returns
+        -------
+        Array of predictions, one corresponding to each row in given dataset.
+        When save_results is True, the output is a pandas dataframe containing the path of the predicted mask file for each input image.
+        Otherwise, the output will have shape (#samples, height, width).
+        """
+        data = self.on_predict_start(data)
+        if self._output_shape == 1:
+            ret_type = LOGITS
+        else:
+            ret_type = SEMANTIC_MASK
+
+        outputs = self.predict_per_run(
+            data=data,
+            realtime=realtime,
+            requires_label=False,
+        )
+
+        logits = self.post_process_prediction(data, outputs, ret_type)
+
+        pred = []
+        for logit in logits:
+            logit = logit.numpy()
+            if ret_type == SEMANTIC_MASK:
+                pred.append(logit.argmax(axis=1))
+            else:
+                pred.append((logit > 0.5).squeeze(axis=1))
+
+        if save_results:
+            self._save_path = setup_save_path(
+                old_save_path=self._save_path,
+                warn_if_exist=False,
+            )
+            pred = self.save_segmentation_result(
+                pred=pred,
+                data=data,
+                result_path=self._save_path,
+            )
+
+        return pred
+
+        # if (as_pandas is None and isinstance(data, pd.DataFrame)) or as_pandas is True:
+        #     # TODO
+        #     pred = self._as_pandas(data=data, to_be_converted=pred)
+
+    def predict_proba(
+        self,
+        data: Union[pd.DataFrame, dict, list],
+        as_pandas: Optional[bool] = None,
+        as_multiclass: Optional[bool] = True,
+        realtime: Optional[bool] = False,
+        **kwargs,
+    ):
+        """
+        Predict probabilities class probabilities rather than class labels.
+        This is only for the classification. Calling it for regression will throw an exception.
+
+        Parameters
+        ----------
+        data
+            The data to make predictions for. Should contain same column names as training data and
+              follow same format (except for the `label` column).
+        as_pandas
+            Whether to return the output as a pandas DataFrame(Series) (True) or numpy array (False).
+        as_multiclass
+            Whether to return the probability of all labels or
+            just return the probability of the positive class for binary classification problems.
+        realtime
+            Whether to do realtime inference, which is efficient for small data (default False).
+            If provided None, we would infer it on based on the data modalities
+            and sample number.
+
+        Returns
+        -------
+        Array of predicted class-probabilities, corresponding to each row in the given data.
+        The output will always have shape (#samples, #classes, height, width).
+        """
+        assert (self._output_shape == 1 and as_multiclass == False) or (
+            self._output_shape > 1 and as_multiclass == True
+        )
+        data = self.on_predict_start(data)
+
+        outputs = self.predict_per_run(
+            data=data,
+            realtime=realtime,
+            requires_label=False,
+        )
+
+        if as_multiclass:
+            ret_type = SEMANTIC_MASK
+        else:
+            ret_type = LOGITS
+
+        logits = self.post_process_prediction(data, outputs, ret_type)
+
+        prob = []
+        for logit in logits:
+            logit = logit.numpy()
+            if ret_type == SEMANTIC_MASK:
+                prob.append(softmax(logit, axis=1))
+            else:
+                prob.append(logit)
+
+        return prob
+
+    def extract_embedding(
+        self,
+        data: Union[pd.DataFrame, dict, list],
+        as_tensor: Optional[bool] = False,
+        as_pandas: Optional[bool] = False,
+        realtime: Optional[bool] = False,
+        **kwargs,
+    ):
+        raise NotImplementedError("Semantic segmentation doesn't support calling `extract_embedding` yet.")
+
+    def save_segmentation_result(self, pred: Iterable, data: Union[pd.DataFrame, Dict], result_path: str):
+        """
+        Saving segmentation results in pd.DataFrame format (per image)
+
+        Parameters
+        ----------
+        pred
+            List containing segmentation results for one image
+        data
+            Pandas data frame or dict containing the image information to be tested
+        result_path
+            Path to save result
+        Returns
+        -------
+        The paths of the segmentation results as pandas DataFrame
+        """
+
+        def show_mask(mask, ax):
+            color = np.concatenate([np.random.random(3), np.array([0.6])], axis=0)
+            h, w = mask.shape[-2:]
+            mask_image = mask.reshape(h, w, 1) * color.reshape(1, 1, -1)
+            ax.imshow(mask_image)
+
+        image_column_name = self.get_image_column_name(data)
+        if isinstance(data, dict):
+            image_names = data[image_column_name]
+        else:
+            image_names = data[image_column_name].to_list()
+        results = []
+
+        mask_path = os.path.join(result_path, "masks")
+        txt_path = os.path.join(result_path, "result.txt")
+        os.makedirs(mask_path, exist_ok=True)
+        for image_pred, image_name in zip(pred, image_names):
+            if self._output_shape == 1:
+                mask = Image.fromarray(image_pred.squeeze(axis=0))
+                per_mask_path = os.path.join(mask_path, os.path.basename(image_name))
+                mask.save(per_mask_path)
+            else:
+                masks = []
+                classes = np.unique(image_pred)
+                for class_id in classes:
+                    if class_id == 0:  # bg
+                        continue
+                    masks.append(image_pred == class_id)
+
+                for mask in masks:
+                    show_mask(mask, plt.gca())
+                mask_name = ""
+                for i in os.path.basename(image_name).split(".")[:-1]:
+                    mask_name += i
+                per_mask_path = os.path.join(mask_path, os.path.basename(image_name))
+                plt.axis("off")
+                plt.savefig(per_mask_path, bbox_inches="tight", dpi=300, pad_inches=0.0)
+
+            results.append([image_name, per_mask_path])
+
+        result_df = pd.DataFrame(results, columns=["image", "mask"])
+        result_df.to_csv(txt_path, index=False)
+        return result_df
+
+    def post_process_prediction(self, data, outputs, ret_type):
+        """
+        Post-process segmentation results to match the size of original input images.
+
+        Parameters
+        ----------
+        data
+            Pandas data frame or dict containing the image information.
+        outputs
+            A list of segmentation output results.
+        ret_type
+            What kind of information to extract from model outputs.
+
+        Returns
+        -------
+        A list of the post-processed segmentation results.
+        """
+        logits = [ele[ret_type] for ele in outputs]
+        image_column_name = self.get_image_column_name(data)
+        for idx in range(data.shape[0]):
+            ori_image_size = Image.open(data[image_column_name][idx]).size  # width, height
+            logits[idx] = F.interpolate(
+                logits[idx].float(), (ori_image_size[1], ori_image_size[0]), mode="bilinear", align_corners=False
+            )
+        return logits
+
+    def get_image_column_name(self, data: pd.DataFrame):
+        if self.column_types is None:
+            column_names = list(data.columns)
+            if self._label_column in column_names:
+                column_names.remove(self._label_column)
+            assert (
+                len(column_names) == 1
+            ), f"More than one image columns {column_names} exist in the data. Make sure to provide data with one image column."
+            return column_names[0]
+        else:
+            for k, v in self.column_types.items():
+                if v == SEMANTIC_SEGMENTATION_IMG:
+                    return k
+        return None
+
+```
+
+完美！✅ 代码已修复。让我验证一下修改后的形状逻辑：
+
+完美！✅ 修改已完成且通过 linter 检查。
+
+## 📊 修改总结
+
+### 修改内容
+
+**文件：** `multimodal/src/autogluon/multimodal/learners/semantic_segmentation.py`
+
+**修改位置：** 第 550 行
+
+**旧代码：**
+```python
+all_preds.append(torch.from_numpy(pred_prob).unsqueeze(0))  # Add channel dim
+```
+
+**新代码：**
+```python
+# Binary: pred_prob is (H, W), keep it as is for metric computation
+all_preds.append(torch.from_numpy(pred_prob))
+```
+
+### 形状验证
+
+修改后的形状逻辑：
+
+| 步骤 | Binary Segmentation | 形状 |
+|------|---------------------|------|
+| **TTA 返回** | `pred_prob` | `(H, W)` 例如 `(2848, 4288)` |
+| **存储到列表** | `all_preds.append(...)` | `(H, W)` |
+| **存储标签** | `all_labels.append(...)` | `(H, W)` |
+| **Metric update 前** | `y_p.unsqueeze(0)` | `(1, H, W)` → `(1, 2848, 4288)` |
+| **Metric update 前** | `y_t.unsqueeze(0)` | `(1, H, W)` → `(1, 2848, 4288)` |
+| **形状匹配** | ✅ | **两者都是 `(1, 2848, 4288)`** |
+
+这与原始的非 TTA 评估逻辑完全一致！
+
+---
+
+## 🚀 现在可以重新运行测试了！
+
+```bash
+# 重新运行渐进式测试
+cd /root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA
+./test_tta_progressive.sh
+```
+
+或者单独运行阶段 1：
+
+```bash
+python run_semantic_segmentation.py \
+    --task isic2017 \
+    --eval \
+    --ckpt_path AutogluonModels/ag-20251203_075302 \
+    --tta_enable \
+    --tta_scales 0.75 1.0 1.25 \
+    --tta_flips none horizontal \
+    --tta_rotations -10 0 10 \
+    --tta_fusion weighted_mean \
+    --tta_morphology \
+    --output_dir outputs/tta_progressive_test/stage1 \
+    --quick_test 1
+```
+
+这次应该能成功完成！🎉
+
+```python
+all_preds.append(torch.from_numpy(pred_prob).unsqueeze(0))  # Add channel dim
+```
+
+```python
+# Binary: pred_prob is (H, W), keep it as is for metric computation
+all_preds.append(torch.from_numpy(pred_prob))
+```
+
+```shellscript
+# 重新运行渐进式测试
+cd /root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA
+./test_tta_progressive.sh
+```
+
+```shellscript
+python run_semantic_segmentation.py \
+    --task isic2017 \
+    --eval \
+    --ckpt_path AutogluonModels/ag-20251203_075302 \
+    --tta_enable \
+    --tta_scales 0.75 1.0 1.25 \
+    --tta_flips none horizontal \
+    --tta_rotations -10 0 10 \
+    --tta_fusion weighted_mean \
+    --tta_morphology \
+    --output_dir outputs/tta_progressive_test/stage1 \
+    --quick_test 1
 ```
 

@@ -547,7 +547,8 @@ class SemanticSegmentationLearner(BaseLearner):
                 pred_mask, pred_prob = self._tta_predictor.predict_with_tta(
                     image, predict_fn, return_probs=True
                 )
-                all_preds.append(torch.from_numpy(pred_prob).unsqueeze(0))  # Add channel dim
+                # Binary: pred_prob is (H, W), keep it as is for metric computation
+                all_preds.append(torch.from_numpy(pred_prob))
                 
                 # Free memory
                 del pred_mask, pred_prob
@@ -556,6 +557,7 @@ class SemanticSegmentationLearner(BaseLearner):
                 _, pred_prob = self._tta_predictor.predict_with_tta(
                     image, predict_fn, return_probs=True
                 )
+                # Multi-class: pred_prob is (C, H, W)
                 all_preds.append(torch.from_numpy(pred_prob))
                 
                 # Free memory
