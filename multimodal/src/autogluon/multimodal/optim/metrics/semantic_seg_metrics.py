@@ -629,12 +629,17 @@ class Binary_IoU(torchmetrics.Metric):
         self.labels.append(labels)
 
     def compute(self):
-        logits = torch.cat(self.logits).cpu()
-        labels = torch.cat(self.labels).cpu()
-
+        # Handle different image sizes by processing individually instead of concatenating
         res_list = []
         metric = torchmetrics.JaccardIndex(task="binary")
-        for logit, label in zip(logits, labels):
+        for logit, label in zip(self.logits, self.labels):
+            # Move to CPU and remove batch dim if present
+            logit = logit.cpu()
+            label = label.cpu()
+            if logit.dim() == 3 and logit.shape[0] == 1:
+                logit = logit.squeeze(0)
+            if label.dim() == 3 and label.shape[0] == 1:
+                label = label.squeeze(0)
             res_list.append(metric(logit, label))
         return torch.mean(torch.tensor(res_list))
 
@@ -657,13 +662,18 @@ class Binary_DICE(torchmetrics.Metric):
         self.labels.append(labels)
 
     def compute(self):
-        logits = torch.cat(self.logits).cpu()
-        labels = torch.cat(self.labels).cpu()
-
+        # Handle different image sizes by processing individually instead of concatenating
         res_list = []
         # Compute DICE from IoU: DICE = 2 * IoU / (1 + IoU)
         iou_metric = torchmetrics.JaccardIndex(task="binary")
-        for logit, label in zip(logits, labels):
+        for logit, label in zip(self.logits, self.labels):
+            # Move to CPU and remove batch dim if present
+            logit = logit.cpu()
+            label = label.cpu()
+            if logit.dim() == 3 and logit.shape[0] == 1:
+                logit = logit.squeeze(0)
+            if label.dim() == 3 and label.shape[0] == 1:
+                label = label.squeeze(0)
             iou = iou_metric(logit, label)
             dice = 2 * iou / (1 + iou)
             res_list.append(dice)
