@@ -1001,6 +1001,8 @@ class MultiModalPredictor:
         threshold: float = 0.5,
         min_area_ratio: float = 0.001,
         use_morphology: bool = False,
+        cache_dir: Optional[str] = None,
+        resume_from_cache: bool = True,
     ):
         """
         Enable Test-Time Augmentation (TTA) for inference.
@@ -1031,6 +1033,13 @@ class MultiModalPredictor:
             Remove connected components with area < min_area_ratio * image_area.
         use_morphology : bool, default = False
             Whether to apply morphological closing for smoothing.
+        cache_dir : Optional[str], default = None
+            Directory to cache TTA predictions for resume (default: None, no caching).
+            Useful for long-running evaluations that might be interrupted.
+            Predictions will be saved every 10 images and can be resumed if interrupted.
+        resume_from_cache : bool, default = True
+            Whether to resume from cache if exists (default: True).
+            Set to False to start fresh even if cache exists.
         
         Examples
         --------
@@ -1073,6 +1082,8 @@ class MultiModalPredictor:
             threshold=threshold,
             min_area_ratio=min_area_ratio,
             use_morphology=use_morphology,
+            cache_dir=cache_dir,
+            resume_from_cache=resume_from_cache,
         )
     
     def disable_tta(self):

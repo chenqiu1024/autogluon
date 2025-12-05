@@ -93,6 +93,16 @@ if __name__ == "__main__":
                         help="Remove components with area < tta_min_area * image_area (default: 0.001)")
     parser.add_argument("--tta_morphology", action="store_true",
                         help="Apply morphological closing in TTA post-processing")
+    parser.add_argument("--tta_cache_dir", type=str, default=None,
+                        help="Directory to cache TTA predictions for resume (default: None, no caching)")
+    parser.add_argument("--tta_no_resume", action="store_true",
+                        help="Disable resume from cache (start fresh even if cache exists)")
+    
+    # Quick test / Debug parameters
+    parser.add_argument("--debug", action="store_true",
+                        help="Debug mode: only process first 5 images for quick validation")
+    parser.add_argument("--quick_test", type=int, default=None,
+                        help="Quick test mode: only process first N images")
     
     args = parser.parse_args()
 
@@ -176,6 +186,8 @@ if __name__ == "__main__":
             threshold=args.tta_threshold,
             min_area_ratio=args.tta_min_area,
             use_morphology=args.tta_morphology,
+            cache_dir=args.tta_cache_dir,
+            resume_from_cache=not args.tta_no_resume,
         )
 
     # evaluation
@@ -183,6 +195,16 @@ if __name__ == "__main__":
     f = open(metric_file, "a")
     if dataset_name in ["isic2017", "SBU-shadow", "road_segmentation", "leaf_disease_segmentation"]:
         test_df = expand_path(pd.read_csv(os.path.join(dataset_dir, f"test.csv")), dataset_dir)
+        
+        # Apply quick test / debug mode (方案 1: 快速验证模式)
+        original_size = len(test_df)
+        if args.debug:
+            test_df = test_df.head(5)
+            print(f"\n🔍 DEBUG MODE: Processing only first 5 images (out of {original_size})\n")
+        elif args.quick_test is not None:
+            test_df = test_df.head(args.quick_test)
+            print(f"\n🔍 QUICK TEST MODE: Processing only first {args.quick_test} images (out of {original_size})\n")
+        
         if dataset_name == "SBU-shadow":
             eval_metrics = ["ber"]
         else:
@@ -200,6 +222,16 @@ if __name__ == "__main__":
             raise ValueError(f"Unknown dataset name: {dataset_name}.")
         for per_dataset in test_datasets:
             test_df = expand_path(pd.read_csv(os.path.join(dataset_dir, f"test_{per_dataset}.csv")), dataset_dir)
+            
+            # Apply quick test / debug mode (方案 1: 快速验证模式)
+            original_size = len(test_df)
+            if args.debug:
+                test_df = test_df.head(5)
+                print(f"\n🔍 DEBUG MODE: Processing only first 5 images (out of {original_size}) for {per_dataset}\n")
+            elif args.quick_test is not None:
+                test_df = test_df.head(args.quick_test)
+                print(f"\n🔍 QUICK TEST MODE: Processing only first {args.quick_test} images (out of {original_size}) for {per_dataset}\n")
+            
             res = predictor.evaluate(test_df, metrics=["sm", "fm", "em", "mae"])
             print(f"Evaluation results for test dataset {per_dataset}: ", res)
             f.write(f"Evaluation results for test dataset {per_dataset}: {res} \n")

@@ -170,7 +170,14 @@ class SemanticSegmentationLearner(BaseLearner):
         
         # If TTA is enabled, use TTA evaluation
         if self._tta_predictor is not None:
-            return self._evaluate_with_tta(data, metrics, return_pred)
+            # Use cache settings if configured
+            cache_dir = getattr(self, '_tta_cache_dir', None)
+            resume_from_cache = getattr(self, '_tta_resume_from_cache', True)
+            return self._evaluate_with_tta(
+                data, metrics, return_pred, 
+                cache_dir=cache_dir,
+                resume_from_cache=resume_from_cache
+            )
 
         def get_metric_predict(
             metric_name: str,
@@ -251,11 +258,26 @@ class SemanticSegmentationLearner(BaseLearner):
         data: Union[pd.DataFrame, dict, list],
         metrics: Optional[Union[str, List[str]]] = None,
         return_pred: Optional[bool] = False,
+        cache_dir: Optional[str] = None,
+        resume_from_cache: bool = True,
     ):
         """
-        Evaluate using Test-Time Augmentation.
+        Evaluate using Test-Time Augmentation with checkpoint support.
         
         This method performs TTA for each image and evaluates the results.
+        
+        Parameters
+        ----------
+        data : Union[pd.DataFrame, dict, list]
+            Input data containing image and label paths
+        metrics : Optional[Union[str, List[str]]]
+            Metrics to compute
+        return_pred : Optional[bool]
+            Whether to return predictions
+        cache_dir : Optional[str]
+            Directory to cache TTA predictions for resume (default: None, no caching)
+        resume_from_cache : bool
+            Whether to resume from cache if exists (default: True)
         """
         logger.info(f"Evaluating with TTA ({len(self._tta_predictor.transforms)} augmentations per image)...")
         
@@ -293,6 +315,29 @@ class SemanticSegmentationLearner(BaseLearner):
             logger.warning("GPU not available, using CPU for TTA (will be slow)")
         
         logger.info(f"TTA inference device: {device}")
+        
+        # ============================================================
+        # 方案 4: Sanity Check - 提前发现问题
+        # ============================================================
+        logger.info("🔍 Running sanity checks before full evaluation...")
+        
+        # Sanity Check 1: 验证数据
+        if len(data) == 0:
+            raise ValueError("❌ No data to evaluate!")
+        logger.info(f"  ✓ Total images to process: {len(data)}")
+        logger.info(f"  ✓ DataFrame columns: {data.columns.tolist()}")
+        
+        # Sanity Check 2: 检查设备和模型
+        logger.info(f"  ✓ Model device: {device}")
+        logger.info(f"  ✓ CUDA available: {torch.cuda.is_available()}")
+        if torch.cuda.is_available():
+            allocated_gb = torch.cuda.memory_allocated() / 1e9
+            logger.info(f"  ✓ GPU memory allocated: {allocated_gb:.2f} GB")
+        
+        # Sanity Check 3: 测试单个样本的 TTA pipeline
+        logger.info(f"  Testing TTA pipeline on first image...")
+        test_row = data.iloc[0]
+        test_img_path = test_row['image']
         
         # Get data processors for image preprocessing
         from torchvision import transforms as T
@@ -387,15 +432,90 @@ class SemanticSegmentationLearner(BaseLearner):
             
             return prob
         
-        # Process each image with TTA
+        # Complete Sanity Check 3: Test TTA on first image
+        try:
+            test_img_pil = Image.open(test_img_path)
+            test_img = np.array(test_img_pil)
+            test_img_pil.close()
+            
+            if len(test_img.shape) == 2:
+                test_img = np.stack([test_img] * 3, axis=2)
+            
+            logger.info(f"    Image shape: {test_img.shape}")
+            
+            # Test TTA prediction
+            test_pred_mask, test_pred_prob = self._tta_predictor.predict_with_tta(
+                test_img, predict_fn, return_probs=True
+            )
+            
+            logger.info(f"    Output shape: {test_pred_prob.shape}")
+            
+            # Verify output shape matches input
+            assert test_pred_prob.shape[:2] == test_img.shape[:2], \
+                f"❌ Output shape mismatch! Expected {test_img.shape[:2]}, got {test_pred_prob.shape[:2]}"
+            
+            logger.info(f"  ✓ TTA pipeline test PASSED!")
+            
+            # Clean up test data
+            del test_img, test_pred_mask, test_pred_prob
+            
+        except Exception as e:
+            logger.error(f"❌ Sanity check FAILED! Error: {e}")
+            logger.error("Please fix the issue before running full evaluation.")
+            raise RuntimeError(f"TTA Sanity Check Failed: {e}") from e
+        
+        logger.info("✅ All sanity checks passed! Starting full evaluation...\n")
+        
+        # ============================================================
+        # 方案 2: 断点续传机制
+        # ============================================================
+        import os
+        import pickle
+        
+        # Setup cache directory
+        processed_indices = set()
         all_preds = []
         all_labels = []
+        cache_file = None
+        processed_indices_file = None
+        
+        if cache_dir is not None:
+            os.makedirs(cache_dir, exist_ok=True)
+            cache_file = os.path.join(cache_dir, "tta_predictions.pkl")
+            processed_indices_file = os.path.join(cache_dir, "processed_indices.txt")
+            
+            # Try to load cached data
+            if resume_from_cache and os.path.exists(cache_file):
+                try:
+                    logger.info(f"📂 Loading cached predictions from {cache_file}")
+                    with open(cache_file, 'rb') as f:
+                        cache_data = pickle.load(f)
+                        all_preds = cache_data['preds']
+                        all_labels = cache_data['labels']
+                        processed_indices = set(cache_data['indices'])
+                    logger.info(f"✅ Loaded {len(all_preds)} cached predictions (resuming from checkpoint)")
+                except Exception as e:
+                    logger.warning(f"⚠️  Failed to load cache: {e}. Starting fresh.")
+                    processed_indices = set()
+                    all_preds = []
+                    all_labels = []
+            else:
+                if cache_dir:
+                    logger.info(f"💾 Caching enabled. Predictions will be saved to {cache_dir}")
+        
+        # Process each image with TTA
         
         import time
         import gc
         start_time = time.time()
+        total_images = len(data)
         
         for idx, row in data.iterrows():
+            # ⭐ 跳过已处理的样本（断点续传）
+            if idx in processed_indices:
+                logger.info(f"⏭️  Skipping image {idx+1}/{total_images} (already processed)")
+                continue
+            
             img_start = time.time()
             
             # Load image and label
@@ -446,10 +566,33 @@ class SemanticSegmentationLearner(BaseLearner):
             if label is not None:
                 del label
             
+            # ⭐ 标记为已处理（断点续传）
+            processed_indices.add(idx)
+            
             img_time = time.time() - img_start
             
             if idx == 0:
                 logger.info(f"First image processed in {img_time:.2f}s (includes warmup)")
+            
+            # ⭐ 定期保存缓存（每 10 张图或最后一张）
+            num_processed = len(processed_indices)
+            if cache_file is not None and (num_processed % 10 == 0 or num_processed == total_images):
+                try:
+                    logger.info(f"💾 Saving checkpoint ({num_processed}/{total_images} images)")
+                    with open(cache_file, 'wb') as f:
+                        pickle.dump({
+                            'preds': all_preds,
+                            'labels': all_labels,
+                            'indices': list(processed_indices)
+                        }, f)
+                    
+                    # Save processed indices as text file (for easy inspection)
+                    with open(processed_indices_file, 'w') as f:
+                        f.write('\n'.join(map(str, sorted(processed_indices))))
+                    
+                    logger.info(f"✅ Checkpoint saved successfully")
+                except Exception as e:
+                    logger.warning(f"⚠️  Failed to save checkpoint: {e}")
             
             # More aggressive garbage collection to prevent memory leaks
             if (idx + 1) % 5 == 0:  # Every 5 images instead of 10
@@ -458,11 +601,12 @@ class SemanticSegmentationLearner(BaseLearner):
                     torch.cuda.empty_cache()  # Clear GPU cache
             
             # Progress logging
-            if (idx + 1) % 10 == 0:
+            if (idx + 1) % 10 == 0 or num_processed == total_images:
                 elapsed = time.time() - start_time
-                avg_time = elapsed / (idx + 1)
-                eta = avg_time * (len(data) - idx - 1)
-                logger.info(f"Processed {idx + 1}/{len(data)} images with TTA "
+                avg_time = elapsed / num_processed if num_processed > 0 else 0
+                remaining = total_images - num_processed
+                eta = avg_time * remaining if remaining > 0 else 0
+                logger.info(f"Processed {num_processed}/{total_images} images with TTA "
                           f"(avg: {avg_time:.2f}s/img, ETA: {eta/60:.1f}min)")
         
         # Final garbage collection
@@ -521,6 +665,16 @@ class SemanticSegmentationLearner(BaseLearner):
         
         logger.info(f"TTA evaluation completed: {results}")
         
+        # ⭐ 清理缓存文件（评估成功完成后）
+        if cache_file is not None and os.path.exists(cache_file):
+            try:
+                os.remove(cache_file)
+                if processed_indices_file and os.path.exists(processed_indices_file):
+                    os.remove(processed_indices_file)
+                logger.info(f"🗑️  Cleaned up cache files (evaluation completed successfully)")
+            except Exception as e:
+                logger.warning(f"⚠️  Failed to clean up cache: {e}")
+        
         # Free memory
         del all_preds, all_labels, metric_objects
         gc.collect()
@@ -573,6 +727,8 @@ class SemanticSegmentationLearner(BaseLearner):
         threshold: float = 0.5,
         min_area_ratio: float = 0.001,
         use_morphology: bool = False,
+        cache_dir: Optional[str] = None,
+        resume_from_cache: bool = True,
     ):
         """
         Enable Test-Time Augmentation (TTA) for inference.
@@ -599,6 +755,11 @@ class SemanticSegmentationLearner(BaseLearner):
             Remove connected components with area < min_area_ratio * image_area.
         use_morphology : bool
             Whether to apply morphological closing for smoothing.
+        cache_dir : Optional[str]
+            Directory to cache TTA predictions for resume (default: None, no caching).
+            Useful for long-running evaluations that might be interrupted.
+        resume_from_cache : bool
+            Whether to resume from cache if exists (default: True).
         
         Examples
         --------
@@ -623,7 +784,14 @@ class SemanticSegmentationLearner(BaseLearner):
             min_area_ratio=min_area_ratio,
             use_morphology=use_morphology,
         )
+        
+        # Store cache configuration
+        self._tta_cache_dir = cache_dir
+        self._tta_resume_from_cache = resume_from_cache
+        
         logger.info(f"TTA enabled with {len(self._tta_predictor.transforms)} augmentations")
+        if cache_dir:
+            logger.info(f"TTA caching enabled: {cache_dir} (resume={resume_from_cache})")
     
     def disable_tta(self):
         """Disable Test-Time Augmentation."""
