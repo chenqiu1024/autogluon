@@ -539,6 +539,12 @@ class SemanticSegmentationLearner(BaseLearner):
                 
                 if len(label.shape) == 3:
                     label = label[:, :, 0]  # Take first channel if RGB
+                
+                # Binarize label: convert [0, 255] to [0, 1]
+                # This matches the preprocessing in semantic_seg_metrics.py
+                if self._output_shape == 1:  # Binary segmentation
+                    label = (label > 128).astype(np.int64)
+                
                 all_labels.append(torch.from_numpy(label))
             
             # Predict with TTA
