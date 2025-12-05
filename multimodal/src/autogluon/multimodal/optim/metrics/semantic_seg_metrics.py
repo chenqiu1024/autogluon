@@ -889,12 +889,17 @@ class Binary_IoU_Pred:
         self.labels.append(labels)
 
     def compute(self):
-        logits = torch.cat(self.logits).cpu()
-        labels = torch.cat(self.labels).cpu()
-
+        # Handle different image sizes by processing individually instead of concatenating
         res_list = []
         metric = torchmetrics.JaccardIndex(task="binary")
-        for logit, label in zip(logits, labels):
+        for logit, label in zip(self.logits, self.labels):
+            # Move to CPU and remove batch dim if present
+            logit = logit.cpu()
+            label = label.cpu()
+            if logit.dim() == 3 and logit.shape[0] == 1:
+                logit = logit.squeeze(0)
+            if label.dim() == 3 and label.shape[0] == 1:
+                label = label.squeeze(0)
             res_list.append(metric(logit, label))
         return torch.mean(torch.tensor(res_list))
 
@@ -917,13 +922,18 @@ class Binary_DICE_Pred:
         self.labels.append(labels)
 
     def compute(self):
-        logits = torch.cat(self.logits).cpu()
-        labels = torch.cat(self.labels).cpu()
-
+        # Handle different image sizes by processing individually instead of concatenating
         res_list = []
         # Compute DICE from IoU: DICE = 2 * IoU / (1 + IoU)
         iou_metric = torchmetrics.JaccardIndex(task="binary")
-        for logit, label in zip(logits, labels):
+        for logit, label in zip(self.logits, self.labels):
+            # Move to CPU and remove batch dim if present
+            logit = logit.cpu()
+            label = label.cpu()
+            if logit.dim() == 3 and logit.shape[0] == 1:
+                logit = logit.squeeze(0)
+            if label.dim() == 3 and label.shape[0] == 1:
+                label = label.squeeze(0)
             iou = iou_metric(logit, label)
             dice = 2 * iou / (1 + iou)
             res_list.append(dice)
@@ -988,15 +998,19 @@ class Balanced_Error_Rate_Pred:
         self.labels.append(labels)
 
     def compute(self):
-        logits = torch.cat(self.logits).cpu()
-        labels = torch.cat(self.labels).cpu()
-
-        labels = (labels * 255) > 125
-        logits = (logits * 255) > 125
-        ber = 1 - torchmetrics.Accuracy(
+        # Handle different image sizes by processing individually instead of concatenating
+        ber_list = []
+        accuracy_metric = torchmetrics.Accuracy(
             task="multiclass", num_classes=2, average="macro", multidim_average="samplewise"
-        )(logits, labels)
-        return torch.mean(ber)
+        )
+        for logit, label in zip(self.logits, self.labels):
+            logit = logit.cpu()
+            label = label.cpu()
+            label = (label * 255) > 125
+            logit = (logit * 255) > 125
+            ber = 1 - accuracy_metric(logit, label)
+            ber_list.append(ber)
+        return torch.mean(torch.stack(ber_list))
 
 
 class COD_Pred:
@@ -1019,66 +1033,68 @@ class COD_Pred:
 
 class SM_Pred(COD_Pred):
     def compute(self):
-        logits = torch.cat(self.logits)
-        labels = torch.cat(self.labels)
-        assert logits.shape == labels.shape
-
-        batchsize = labels.shape[0]
-
+        # Handle different image sizes by processing individually instead of concatenating
         metric_SM = Smeasure()
-
-        for i in range(batchsize):
-            true, pred = labels[i, 0].cpu().data.numpy() * 255, logits[i, 0].cpu().data.numpy() * 255
-            metric_SM.step(pred=pred, gt=true)
+        
+        for logit, label in zip(self.logits, self.labels):
+            # Process each sample (batch) individually
+            batchsize = logit.shape[0]
+            for i in range(batchsize):
+                true = label[i, 0].cpu().data.numpy() * 255
+                pred = logit[i, 0].cpu().data.numpy() * 255
+                metric_SM.step(pred=pred, gt=true)
+        
         self.reset()
         return torch.tensor(metric_SM.get_results()["sm"])
 
 
 class FM_Pred(COD_Pred):
     def compute(self):
-        logits = torch.cat(self.logits)
-        labels = torch.cat(self.labels)
-        assert logits.shape == labels.shape
-        batchsize = labels.shape[0]
-
+        # Handle different image sizes by processing individually instead of concatenating
         metric_WFM = WeightedFmeasure()
-        for i in range(batchsize):
-            true, pred = labels[i, 0].cpu().data.numpy() * 255, logits[i, 0].cpu().data.numpy() * 255
-
-            metric_WFM.step(pred=pred, gt=true)
+        
+        for logit, label in zip(self.logits, self.labels):
+            # Process each sample (batch) individually
+            batchsize = logit.shape[0]
+            for i in range(batchsize):
+                true = label[i, 0].cpu().data.numpy() * 255
+                pred = logit[i, 0].cpu().data.numpy() * 255
+                metric_WFM.step(pred=pred, gt=true)
+        
         self.reset()
         return torch.tensor(metric_WFM.get_results()["wfm"])
 
 
 class EM_Pred(COD_Pred):
     def compute(self):
-        logits = torch.cat(self.logits)
-        labels = torch.cat(self.labels)
-        assert logits.shape == labels.shape
-        batchsize = labels.shape[0]
-
+        # Handle different image sizes by processing individually instead of concatenating
         metric_EM = Emeasure()
-
-        for i in range(batchsize):
-            true, pred = labels[i, 0].cpu().data.numpy() * 255, logits[i, 0].cpu().data.numpy() * 255
-
-            metric_EM.step(pred=pred, gt=true)
+        
+        for logit, label in zip(self.logits, self.labels):
+            # Process each sample (batch) individually
+            batchsize = logit.shape[0]
+            for i in range(batchsize):
+                true = label[i, 0].cpu().data.numpy() * 255
+                pred = logit[i, 0].cpu().data.numpy() * 255
+                metric_EM.step(pred=pred, gt=true)
+        
         self.reset()
         return torch.tensor(metric_EM.get_results()["em"]["curve"].mean())
 
 
 class MAE_Pred(COD_Pred):
     def compute(self):
-        logits = torch.cat(self.logits)
-        labels = torch.cat(self.labels)
-        assert logits.shape == labels.shape
-        batchsize = labels.shape[0]
-
+        # Handle different image sizes by processing individually instead of concatenating
         metric_MAE = MAE_SOD()
-        for i in range(batchsize):
-            true, pred = labels[i, 0].cpu().data.numpy() * 255, logits[i, 0].cpu().data.numpy() * 255
-
-            metric_MAE.step(pred=pred, gt=true)
+        
+        for logit, label in zip(self.logits, self.labels):
+            # Process each sample (batch) individually
+            batchsize = logit.shape[0]
+            for i in range(batchsize):
+                true = label[i, 0].cpu().data.numpy() * 255
+                pred = logit[i, 0].cpu().data.numpy() * 255
+                metric_MAE.step(pred=pred, gt=true)
+        
         self.reset()
         return torch.tensor(metric_MAE.get_results()["mae"])
 
