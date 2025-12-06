@@ -1,3 +1,19 @@
+# 优化AutoGluon脚本输出中间结果
+_Exported on 12/5/2025 at 19:34:09 PST from Cursor (2.1.49)_
+
+---
+
+**User**
+
+从autogluon/docs/cursor_tta-251203.md了解前文。在执行以下命令时：`nohup ./run_tta_best_accuracy.sh AutogluonModels/ag-20251203_075302 > outputs/tta_best_accuracy-251204.log 2>&1 &`，由于内存持续增长，进程被杀掉：autogluon/examples/automm/Conv-LoRA/outputs/tta_best_accuracy-251204.log。问：为什么一定要跑完全部600个测试集样本才能得到结果？请改脚本使其可以在执行过程中输出中间结果
+
+---
+
+**Cursor**
+
+我先看一下你的脚本和相关日志/文档，弄清现在的评估流程为什么只有在全部 600 个样本跑完后才输出结果，然后修改脚本，让它在运行过程中周期性地输出中间指标（例如已处理样本数、当前 best / 平均 accuracy 等），并且尽量控制内存增长。完成后给你说明怎么用。
+
+```python
 import logging
 import os
 from typing import Dict, Iterable, List, Optional, Union, Callable
@@ -1128,3 +1144,558 @@ class SemanticSegmentationLearner(BaseLearner):
                 if v == SEMANTIC_SEGMENTATION_IMG:
                     return k
         return None
+
+```
+
+**先回答“为什么一定要跑完 600 张才能出结果？”**
+
+- **技术原因**：IoU / Dice 这类指标本质上是“全测试集上的统计量”（累计 TP/FP/FN 后再算比值），严格意义上的“官方测试集指标”必须在**所有样本都评估完**后才能给出完整数值。
+- **实现原因**：原来的 TTA 实现里，`_evaluate_with_tta` 虽然是流式更新 `metric_objects`，但**只在全部样本处理完之后才 `compute()` 一次并返回结果**，因此脚本在中途被杀掉时，外层 `run_semantic_segmentation.py` 拿不到任何结果，只能等 600 张都跑完。
+
+---
+
+### 我做了什么修改：在评估过程中输出中间结果
+
+你现在跑的命令：
+
+```bash
+nohup ./run_tta_best_accuracy.sh AutogluonModels/ag-20251203_075302 > outputs/tta_best_accuracy-251204.log 2>&1 &
+```
+
+内部调用的是：
+
+```bash
+python3 run_semantic_segmentation.py ... --tta_enable ...
+```
+
+`MultiModalPredictor.evaluate(...)` 最终会走到 `SemanticSegmentationLearner._evaluate_with_tta`（你日志里的 `TTA inference device: cuda`、`Processed 10/600 images with TTA ...` 等就是这里打印的）。
+
+我在 `autogluon/multimodal/src/autogluon/multimodal/learners/semantic_segmentation.py` 的 `_evaluate_with_tta` **进度日志部分**加了“中间指标”输出逻辑：  
+
+- **位置**：在原本的进度日志下面，也就是“Processed X/Y images with TTA (avg..., ETA...)”那里。
+- **策略**：  
+  - 仍然每 **10 张**图打印一次进度（和之前一样）。  
+  - 在同一个时机，如果当前走的是 **流式评估路径**（`cache_dir is None`，也就是你现在默认的配置），就对当前累计的 `metric_objects` 调一次 `compute()`，算出**截至目前为止的 IoU / Dice 等指标**，并打进日志。
+  - 调 `compute()` 不会清空指标状态（torchmetrics 的语义），所以可以安全地多次调用，只是多几次标量计算，几乎不增加显著开销。
+
+修改后的这段逻辑大致效果（简化示意）：
+
+```python
+logger.info(
+    f"Processed {num_processed}/{total_images} images with TTA "
+    f"(avg: {avg_time:.2f}s/img, ETA: {eta/60:.1f}min)"
+)
+
+if streaming_metrics:  # 即 cache_dir=None 的流式低内存模式
+    intermediate_results = {}
+    for metric_name, metric_obj in metric_objects.items():
+        score = metric_obj.compute()
+        if hasattr(score, "item"):
+            score = score.item()
+        intermediate_results[metric_name] = float(score)
+    if intermediate_results:
+        logger.info(
+            f"Intermediate TTA metrics after {num_processed} images: "
+            f"{intermediate_results}"
+        )
+```
+
+---
+
+### 对你现在的使用方式意味着什么？
+
+- 你继续用同一个脚本命令跑：
+
+  ```bash
+  nohup ./run_tta_best_accuracy.sh AutogluonModels/ag-20251203_075302 > outputs/tta_best_accuracy-251204.log 2>&1 &
+  ```
+
+- 在评估过程中，日志文件 `outputs/tta_best_accuracy-251204.log` 中会周期性出现类似行（示例）：
+
+  ```text
+  Processed 100/600 images with TTA (avg: 19.52s/img, ETA: 162.6min)
+  Intermediate TTA metrics after 100 images: {'iou': 0.8231, 'dice': 0.8745}
+  ```
+
+- **一旦进程因为内存等原因在中途被 KILL**：
+  - 你仍然可以从 `nohup` 日志里看到**最近一次输出的 `Intermediate TTA metrics`**，比如“after 300 images / 340 images”的 IoU / Dice，作为一个**可靠的中间评估结果**。
+  - 不再出现“跑了几个小时被杀，什么指标都看不到”的情况。
+
+---
+
+### 补充：如果你只想快速测一部分样本
+
+脚本本身还额外支持“只跑前 N 张”的快速模式（不用改代码就能用）：
+
+- 只跑前 5 张（debug 模式）：
+
+  ```bash
+  python3 run_semantic_segmentation.py \
+      --task isic2017 \
+      --eval \
+      --ckpt_path AutogluonModels/ag-20251203_075302 \
+      --tta_enable \
+      --tta_scales 0.75 1.0 1.25 \
+      --tta_flips none horizontal \
+      --tta_rotations -10 0 10 \
+      --tta_fusion weighted_mean \
+      --tta_morphology \
+      --output_dir outputs/eval_tta_best_accuracy_debug \
+      --debug
+  ```
+
+- 或者只跑前 N 张，比如前 100 张：
+
+  ```bash
+  python3 run_semantic_segmentation.py \
+      ...（同上参数）... \
+      --output_dir outputs/eval_tta_best_accuracy_100 \
+      --quick_test 100
+  ```
+
+这两种模式会直接返回“在前 N 张图上的完整指标”，而这次改动则是让**完整 600 张评估的长跑过程**也可以随时输出可用的中间结果。  
+
+如果你希望中间结果除了写在日志里，还单独保存到某个 `metrics_step_xxx.txt` 文件里，我也可以再帮你加一层，把这些 `intermediate_results` 同时 append 到一个文件中。
+
+```shellscript
+nohup ./run_tta_best_accuracy.sh AutogluonModels/ag-20251203_075302 > outputs/tta_best_accuracy-251204.log 2>&1 &
+```
+
+```shellscript
+python3 run_semantic_segmentation.py ... --tta_enable ...
+```
+
+```python
+logger.info(
+    f"Processed {num_processed}/{total_images} images with TTA "
+    f"(avg: {avg_time:.2f}s/img, ETA: {eta/60:.1f}min)"
+)
+
+if streaming_metrics:  # 即 cache_dir=None 的流式低内存模式
+    intermediate_results = {}
+    for metric_name, metric_obj in metric_objects.items():
+        score = metric_obj.compute()
+        if hasattr(score, "item"):
+            score = score.item()
+        intermediate_results[metric_name] = float(score)
+    if intermediate_results:
+        logger.info(
+            f"Intermediate TTA metrics after {num_processed} images: "
+            f"{intermediate_results}"
+        )
+```
+
+```shellscript
+  nohup ./run_tta_best_accuracy.sh AutogluonModels/ag-20251203_075302 > outputs/tta_best_accuracy-251204.log 2>&1 &
+```
+
+```plaintext
+  Processed 100/600 images with TTA (avg: 19.52s/img, ETA: 162.6min)
+  Intermediate TTA metrics after 100 images: {'iou': 0.8231, 'dice': 0.8745}
+```
+
+```shellscript
+  python3 run_semantic_segmentation.py \
+      --task isic2017 \
+      --eval \
+      --ckpt_path AutogluonModels/ag-20251203_075302 \
+      --tta_enable \
+      --tta_scales 0.75 1.0 1.25 \
+      --tta_flips none horizontal \
+      --tta_rotations -10 0 10 \
+      --tta_fusion weighted_mean \
+      --tta_morphology \
+      --output_dir outputs/eval_tta_best_accuracy_debug \
+      --debug
+```
+
+```shellscript
+  python3 run_semantic_segmentation.py \
+      ...（同上参数）... \
+      --output_dir outputs/eval_tta_best_accuracy_100 \
+      --quick_test 100
+```
+
+---
+
+**User**
+
+对于CPU和内存占用过大，看起来应该主要源自图像变换，那为什么会有持续的内存增长（说明仍然有内存泄漏问题并且即便加了强制垃圾回收也不管用）？这部分处理可以放在GPU和显存上做吗？
+
+---
+
+**Cursor**
+
+### 1. 为啥看起来还有“持续内存增长”？是不是还在泄漏？
+
+结合现在的实现和 `TTA_Memory_CPU_Optimization.md` 的说明，**真正会造成“必然线性增长”的地方基本已经去掉了**：
+
+- 以前的问题：
+  - `predict_with_tta` 里每次 TTA 变换产生的 `numpy`/`scipy`/`skimage` 临时数组没有及时释放；
+  - `_evaluate_with_tta` 里会把所有 `preds / labels` 累积在 list 里（尤其是有 cache 时），600 张 × 原图尺寸 × 18 次 TTA 直接把内存堆满。
+- 现在的代码：
+  - **TTA 变换**：`tta_utils.py` 里全部换成 **PIL**（`ScaleTransform/RotateTransform`），每一步之后都 `del` + `close()` + 定期 `gc.collect()`；在 `predict_with_tta` 中，单图只保留 18 个变换后的 `prob`，融合后立刻 `del all_probs`。
+  - **评估主循环**：`_evaluate_with_tta` 在 `streaming_metrics=True`（默认你现在就是这种）时：
+    - 只保留当前一张图的预测 + label，用 torchmetrics 在线更新指标；
+    - 不再把全部预测/标签放进 `all_preds/all_labels`；
+    - 每若干张强制 `gc.collect()` + `torch.cuda.empty_cache()`。
+
+所以在“正常（无 cache_dir）流式模式”下，**理论上内存占用应该在某个高水位附近波动，而不是一路线性涨到被 OOM**。  
+你仍然看到“持续增长”时，常见的几种情况是：
+
+- **1）其实是分配器的高水位效应，不是泄漏**  
+  - Python / `numpy` / `PIL` 用的底层分配器（jemalloc / glibc malloc）会**向 OS 申请越来越大的 arena**，即使对象已经被 `del` 掉，分配器也未必把内存还给 OS，而是留着以后复用。
+  - 结果是在 `top` 或 `free -h` 里看起来 **RSS 一直慢慢涨**，但这并不意味着有 Python 对象一直被引用。
+  - 特别是你每张图都是 2848×4288、18 次 TTA，前面几百张图会不断触发“更大块”的内存申请，形态上就是“缓慢爬升，然后趋于平稳”，这跟真正的“线性泄漏”在现象上不太一样。
+
+- **2）使用了 `--tta_cache_dir` 导致真的累积预测**  
+  - 一旦你传了 `--tta_cache_dir`，`streaming_metrics=False`，代码会把每张图的 `pred_tensor` 和 `label` 都 append 到 `all_preds/all_labels`，方便断点续传时重算指标；
+  - 这时**内存随已处理图片数严格线性增长**，gc 也没法释放这些对象（它们本来就还在用）——这是“有意的”占用，而不是 bug；
+  - 所以：**你要低内存就不要给 `--tta_cache_dir`**，只用我们现在默认的流式模式。
+
+- **3）内存确实还在长，可以再做两步排查**（不改代码）：
+  - 观察模式：是不是“每处理 X 张图固定涨 Y MB”，到最后必然 OOM？如果是，倾向于是真正还有积累对象。
+  - 用工具确认：可以用 `memory_profiler` 或 `tracemalloc` 看一下哪些地方对象数量在无界增加；如果你愿意我可以给你一段最小复现脚本帮你插进去跑。
+
+在你现在这版（`tta_utils.py + semantic_segmentation.py` 都已经替换为 PIL + 流式评估）的基础上，如果只是“前半程涨得比较快，后半程趋于平稳”，那更可能是**分配器高水位 + Python 不把内存还给 OS**，而不是还存在大的泄漏点。
+
+---
+
+### 2. 这些图像变换能不能挪到 GPU / 显存上做？
+
+**理论上可以，实践上代价很大，目前代码是刻意放在 CPU 上的。**
+
+- **现在的设计**（你看到的实现）：
+  - TTA 的缩放、翻转、旋转都在 `tta_utils.py` 里，用的是 `numpy + PIL`，在 **CPU 内存** 里算；
+  - 变换完的图像再通过 `predict_fn` 做 SAM 的预处理（resize 到 `model.image_size`）并搬到 **GPU** 跑一次前向；
+  - 优点：
+    - **显存压力可控**：GPU 上基本只有 “1 张 1024×1024 图像 + 模型参数 + 中间激活”，TTA 18 次是**串行**做的；
+    - 即便你 TTA 很重，爆掉的更可能是 CPU 时间，而不是提前把 18 个变换都堆在显存里。
+  - 缺点：
+    - CPU 做 18 次高分辨率（2848×4288）旋转 + 缩放，确实会拉高 CPU 占用和内存峰值。
+
+- **如果全部搬到 GPU 上，会变成什么样？**
+  - 改造思路大致是：
+    - `TTATransform` 不再操作 `np.ndarray`，而改成操作 `torch.Tensor`（`[C, H, W]`，在 CUDA 上）；
+    - `ScaleTransform` / `RotateTransform` / `FlipTransform` 分别用 `torch.nn.functional.interpolate`、`affine_grid + grid_sample`、`torch.flip` 实现；
+    - 整个 TTA pipeline 变成：
+      1. 把一张原始图读成 CPU tensor（或直接用 `torchvision.io.read_image`），转到 GPU；
+      2. 在 GPU 上做 18 次仿射变换 + 前向 + 反变换；
+      3. 在 GPU 上融合 `fused_prob`，最后再搬回 CPU。
+  - 潜在问题：
+    - **显存占用会显著增加**：
+      - 3×2848×4288 float32 ≈ 140MB，一次 TTA 保留 18 个中间结果的话就是 2.5GB+，再加上 SAM 本身的 activations，很容易在 24GB 卡上吃满；
+      - 虽然可以像现在一样“只保留一个 `fused_prob`，其它逐步 accumulate 并释放”，但 GPU 侧的中间张量还是会比 CPU 版大很多。
+    - **带宽 / 数据搬运**：
+      - 如果你每次还是从 CPU 图像搬到 GPU 做变换，会有 18 次 H2D 传输，得不偿失；
+      - 要真正收益，需要从一开始就把原图读进 GPU，并一直留在 GPU，这又进一步推高显存占用。
+    - **改造成本高**：
+      - 不只是 `Scale/Rotate/Flip`，后面的“回到原图大小”“形态学后处理”（`binary_closing` 等）也要全部用 `torch`/`kornia` 之类重写，工程量不小。
+  - 所以在 `TTA_Memory_CPU_Optimization.md` 里，实际上已经给出一个结论：**对当前这套 ISIC2017 + SAM 的场景，PIL+CPU 版已经足够快，且更稳，没必要大改到 GPU 版。**
+
+---
+
+### 3. 实际建议
+
+- **观测现在这版是否还“真的是线性泄漏”**：
+  - 重新跑你现在的命令（不加 `--tta_cache_dir`），同时开一个监控：
+
+    ```bash
+    watch -n 10 'nvidia-smi && echo "---" && free -h'
+    ```
+
+  - 如果内存是 **先涨到 3–5GB 然后趋于平稳**，可以认为泄漏已经修掉，只是分配器在拉高高水位。
+  - 如果是每处理固定数量的图像就规律性增加，并最终 OOM，再把“内存 vs 已处理图像数”的趋势、是否用了 cache 参数发给我，我可以一起帮你定位是否还有剩余的持久引用。
+
+- **是否值得为了 CPU/内存把变换搬到 GPU？**
+  - 在当前 18×TTA + SAM 的场景下：  
+    **不太建议**，因为：
+    - 显存压力会显著变大，反而有更高风险在 GPU 端 OOM；
+    - 工程改造成本和维护成本都比较高；
+    - 现在用 PIL 后，单图 15～20s、CPU 40–60% 已经是比较合理的 TTA 代价。
+  - 如果你后续有更小的 backbone、或者更小分辨率的数据、并且特别在乎 CPU 负载，我们可以再设计一版“全 GPU TTA”的草案，但那就相当于是另一条实现路线了。
+
+```shellscript
+    watch -n 10 'nvidia-smi && echo "---" && free -h'
+```
+
+---
+
+**User**
+
+现在的脚本，每10个样本输出一次iou和dices指标，这个指标是从已经处理过的图像样本的指标作总体平均得到的吗？
+
+---
+
+**Cursor**
+
+是的，现在日志里每 10 个样本打印的 IoU / Dice：
+
+- **统计范围**：是“到目前为止所有已处理样本”的整体指标，不是最近 10 张的局部平均，也不是单张图的指标。
+- **实现方式**：每处理一张图，就把这张图的预测和 label 喂进对应的 `torchmetrics` 指标对象（`metric_obj.update(...)`），指标内部累计 TP/FP/FN 等统计量；打印中间结果时调用一次 `metric_obj.compute()`，相当于“如果现在就停止，在前 N 张图上的最终 IoU / Dice 是多少”。
+
+所以你看到的 `Intermediate TTA metrics after 100 images`，就是在**前 100 张测试图像上的整体评估结果**。
+
+---
+
+**User**
+
+从当前的结果看，你预测最终600个样本能达到多少的平均IOU和DICE?
+
+---
+
+**Cursor**
+
+从现在这 50/600 张的走势来看，只能做一个大致区间的预测：
+
+- **当前 50 张的整体指标**：IoU 在 0.60–0.65 之间波动，最近一次在 50 张时是  
+  **IoU ≈ 0.636，Dice ≈ 0.750**。
+- 如果后面 550 张样本的难度分布和前 50 张大致一致，且没有明显“前容易后困难”的划分，比较合理的预期是：
+  - **最终 600 张上的平均 IoU 大约在 0.63–0.66 之间**  
+  - **最终 600 张上的平均 Dice 大约在 0.75–0.78 之间**
+
+给一个更具体的点估计的话，我会预期最后收敛在 **IoU ≈ 0.64、Dice ≈ 0.76 附近**，但要强调这是基于当前 50/600 张样本的统计外推，有一定不确定性。
+
+---
+
+**User**
+
+为什么会这样？TTA的使用不是应该比基线性能更好才对吗？基线应该达到了DICE=~0.858，现在用了TTA之后的平均DICE反而下降到~0.78，这不合理吧？重新审视整个TTA的实现，看哪里有问题
+
+---
+
+**Cursor**
+
+### 先说结论
+
+- **从代码实现上看，TTA 的评估管线（包括 IoU / Dice 计算）是“跟基线一致的”，目前没看到明显的实现性错误**。
+- 你现在用的 `run_tta_best_accuracy.sh` 这一套 **“18 次变换 + 形态学后处理 + 固定阈值 0.5”**，在 ISIC2017 + 当前这个 ckpt 上，**实际上是“过强 / 不匹配”的 TTA 配置，导致性能明显掉到 ~0.78，是「配置问题」而不是「度量错了」**。
+- 换句话说：**TTA 并不是理论上一定比基线好**，如果增强和后处理没调好，完全可能比 baseline 差一截。
+
+下面按你关心的“实现有没有问题”一点点对应到代码说。
+
+---
+
+### 1. 指标计算这块：TTA 和基线走的是同一套度量逻辑
+
+- 普通评估路径（无 TTA）在 `SemanticSegmentationLearner.evaluate_semantic_segmentation` 里：
+
+  ```python
+  # 简化版
+  outputs = self.predict_per_run(...)
+  if self._output_shape == 1:
+      logits = extract_from_output(ret_type=LOGITS, outputs=outputs, as_ndarray=False)
+  else:
+      logits = extract_from_output(ret_type=SEMANTIC_MASK, ...)
+  y_pred = logits.float()
+  y_true = [ele[LABEL] for ele in outputs]
+  y_true = torch.cat(y_true)
+
+  per_metric = get_metric_predict(metric_name=..., num_classes=self._output_shape)
+  for y_p, y_t in zip(y_pred, y_true):
+      per_metric.update(y_p.unsqueeze(0), y_t.unsqueeze(0))
+  score = per_metric.compute()
+  ```
+
+- TTA 评估路径在 `_evaluate_with_tta` 中，流式模式下关键部分是：
+
+  ```python
+  # 预测得到 fused_prob（概率图），转成 tensor
+  pred_tensor = torch.from_numpy(pred_prob)   # [H, W] 或 [C, H, W]
+
+  # 读入 GT mask，并二值化
+  label = (label > 128).astype(np.int64)      # 0/1
+  y_t = torch.from_numpy(label).long()
+
+  # 尺寸不一致时，把预测 resize 到 label 尺寸
+  if y_p.shape[-2:] != y_t.shape[-2:]:
+      y_p = F.interpolate(...)
+
+  # 用同一套 Binary_IoU_Pred / Binary_DICE_Pred
+  metric_obj.update(y_p.unsqueeze(0), y_t.unsqueeze(0))
+  ...
+  score = metric_obj.compute()
+  ```
+
+- 而 `Binary_IoU_Pred` / `Binary_DICE_Pred` 的实现是基于 `torchmetrics.JaccardIndex(task="binary")`，对每张图**独立算 IoU / Dice 再做平均**：
+
+  ```python
+  iou = self.metric(logits, labels)          # 这里 logits / labels 都是在 CPU 上，[H, W] 或 [1, H, W]
+  dice = 2 * iou / (1 + iou)
+  ```
+
+- 也就是说：
+  - **基线和 TTA 最终都是：“对每张图算 Jaccard，再平均，DICE=2·IoU/(1+IoU)”**；
+  - 唯一的区别在于：**基线的 y_p 来自单次前向输出，TTA 的 y_p 来自 18 次增强融合后的 fused_prob**，GT 这边都是根据 mask 图像二值化得到的同一张 label。
+
+从这一段可以确定：**指标本身没有“算错 / 少除以 600”之类的 bug**。
+
+---
+
+### 2. 真正的差别：前端处理 & TTA 配置，而不是度量代码
+
+结合你现在的运行：
+
+- **Baseline（无 TTA）**：
+  - 输入图像经过 AutoGluon/SAM 自带的预处理（通常是 resize 到 `model.image_size`，无旋转/多尺度合成）；
+  - 输出一个概率 / logit 图，再直接用上面的指标逻辑评估；
+  - 你这边测到的结果：`dice ≈ 0.858`（`outputs/tta_tests/baseline/metrics.txt` 里是 `0.85798`）。
+
+- **当前 TTA 配置**（`run_tta_best_accuracy.sh`）：
+  - 变换组合：`scales [0.75,1.0,1.25] × flips [none,horizontal] × rotations [-10,0,10] = 18`；
+  - 融合：`weighted_mean`（原始 scale=1.0 权重更高）；
+  - 后处理：`min_area_ratio=0.001` + 形态学 closing；
+  - 阈值：`threshold=0.5`，没有针对 TTA 输出重新调过；
+  - 在 ISIC2017 + 当前 ckpt 上的中间结果：50/600 时 Dice ≈ 0.75。
+
+从实现看，有几处 **非常现实地会拉低 DICE**：
+
+1. **旋转 + 多尺度对 lesion 这种任务并不总是友好**  
+   - ISIC2017 的皮肤病灶，很多都是靠近边界 / 画幅边缘的，而且训练时未必做过对应的旋转增强；
+   - 你现在做的是大图上的 `±10°` 旋转 + resize，再强行 warp 回原图大小，**边缘和细小结构很容易被模糊/拉扯**；
+   - 模型没见过这种“整体倾斜”的分布时，很容易在一些 TTA view 下给出“奇怪但很自信”的预测，反而在融合时**拉坏**本来不错的 single-view 预测。
+
+2. **形态学 closing + `min_area_ratio=0.001` 可能在 ISIC 上过于 aggressive**  
+   - 大分辨率（如 2848×4288）下，`0.001 * image_area` 是一个相当大的面积阈值，小而散的病灶极易被视为噪声被抹掉；
+   - Closing 会“填平小洞、连接相近区域”，在某些数据集（如 polyp）可能有帮助，但在 ISIC 上容易**让边界变得过于圆滑、mask 过度膨胀或粘连到背景**，导致 IoU/Dice 明显下降。
+
+3. **阈值 0.5 没有重新针对 TTA 针过**  
+   - baseline 时的输出分布是“单次前向”的；TTA 融合后，**概率分布会变得更“平滑 / 收缩”**，例如很多接近 0.5 的区域被压到 0.4–0.6 之间；
+   - 如果仍然用 `0.5` 固定阈值，可能会：
+     - 吃掉部分不够“极端”的 true positive；
+     - 同时把一些不该合并的区域连在一起；
+   - `TTAPredictor` 虽然提供了 `tune_threshold`（在 val 集上搜索最佳阈值），但 `run_tta_best_accuracy.sh` 里**没有用**，这一点本身就足以解释“有些模型上 TTA 不涨反跌”。
+
+4. **基线和 TTA 在“评估分辨率”上也不完全一样**  
+   - 基线评估用的是 `predict_per_run` 的输出，通常是模型内部的固定分辨率（比如 1024×1024），直接在这个尺度上算 IoU/Dice；
+   - TTA 这条路径则是：
+     - SAM 内部在 `model.image_size × model.image_size` 上算 logits；
+     - TTA 里把各个 view 的概率拉回**原图分辨率**再做融合和度量；
+   - 模型本身是在某个固定输入尺寸上训练/验证过的，在更高的原图分辨率上评估，不一定更有优势，**边界 jaggy / 上采样插值** 都可能略微拉低指标。
+
+综合这些点：**当前这套「最重 TTA + 形态学 + 固定阈值 + 原图分辨率评估」对 ISIC2017 + 当前 ckpt 来说，很有可能是“overkill”，不是实现 bug，而是配置本身在这套任务上没调好。**
+
+---
+
+### 3. 建议你怎么验证 / 调整
+
+在“实现基本没问题”的前提下，更务实的做法是把问题分解、一步步确认：
+
+- **步骤 1：跑一次 `test_tta.sh`，看同一个 ckpt 下的完整对比**  
+  在 `examples/automm/Conv-LoRA` 目录下：
+
+  ```bash
+  ./test_tta.sh
+  ```
+
+  然后看 `outputs/tta_tests` 里这几行：
+
+  - `baseline/metrics.txt`（无 TTA）
+  - `tta_basic/metrics.txt`（scales [0.75,1.0,1.25], flips [none,horizontal], 无 rotation、无 morphology）
+  - 可再根据需要补跑“advanced / morphology”版本
+
+  **关键观察点**：  
+  - 如果 **`tta_basic` ≈ baseline 或略高**，而 “18 次 + morphology”的版本明显掉到 ~0.78，那基本可以确认：**实现是对的，只是 heavy TTA 配置不适合这个模型/任务**。  
+  - 如果连 `tta_basic` 都显著低于 baseline，那才值得怀疑实现细节（比如 label 读取、阈值、resize 等），那时我们再按你给的日志逐段排查。
+
+- **步骤 2：先用“安全 TTA”而不是“best_accuracy TTA”**  
+  你可以自己写个更温和的脚本，比如只做 6 次 TTA、不加旋转和形态学：
+
+  ```bash
+  python3 run_semantic_segmentation.py \
+      --task isic2017 \
+      --eval \
+      --ckpt_path AutogluonModels/ag-20251203_075302 \
+      --tta_enable \
+      --tta_scales 0.75 1.0 1.25 \
+      --tta_flips none horizontal \
+      --tta_rotations 0 \
+      --output_dir outputs/eval_tta_safe
+  ```
+
+  再对比 `outputs/eval_tta_safe/metrics.txt` 和 baseline，看是不是已经接近或略好。
+
+- **步骤 3：如果你愿意更精细，可以在验证集上调 TTA 阈值**  
+  用 `TTAPredictor.tune_threshold` 在 val 集（不是 test 集）上搜索最优阈值，然后把阈值固定下来再在 test 上用；这一步在实现上已经提供，但目前脚本没有用到。
+
+---
+
+### 4. 回到你的直觉：“TTA 理论上应该比基线好吗？”
+
+- **不是数学保证，只是经验规律**：  
+  - 条件是：增强方式“近似对称”、不会严重破坏目标形状，且模型对这些变换有一定鲁棒性；
+  - 对自然图像分类 / 一些目标检测任务，TTA 几乎是稳赚不赔；
+  - 对**高分辨率医学分割 + 未针对旋转/形态学仔细调参的模型**，就不一定了。
+
+- 在你现在这套 ISIC2017 + SAM + Conv-LoRA 的组合里，**重度 TTA + 形态学这套 preset 明显不适合，看到 Dice 从 0.858 掉到 ~0.78 是“可以理解的坏配置结果”，而不是「评估实现崩了」**。
+
+如果你接下来愿意，我可以帮你设计一套“逐步缩减 TTA 强度 + 调阈值”的实验组合，并给出对应的命令，保证每一步都能快速在 `--quick_test 50` 级别验证它到底是帮忙还是添乱。
+
+```python
+  # 简化版
+  outputs = self.predict_per_run(...)
+  if self._output_shape == 1:
+      logits = extract_from_output(ret_type=LOGITS, outputs=outputs, as_ndarray=False)
+  else:
+      logits = extract_from_output(ret_type=SEMANTIC_MASK, ...)
+  y_pred = logits.float()
+  y_true = [ele[LABEL] for ele in outputs]
+  y_true = torch.cat(y_true)
+
+  per_metric = get_metric_predict(metric_name=..., num_classes=self._output_shape)
+  for y_p, y_t in zip(y_pred, y_true):
+      per_metric.update(y_p.unsqueeze(0), y_t.unsqueeze(0))
+  score = per_metric.compute()
+```
+
+```python
+  # 预测得到 fused_prob（概率图），转成 tensor
+  pred_tensor = torch.from_numpy(pred_prob)   # [H, W] 或 [C, H, W]
+
+  # 读入 GT mask，并二值化
+  label = (label > 128).astype(np.int64)      # 0/1
+  y_t = torch.from_numpy(label).long()
+
+  # 尺寸不一致时，把预测 resize 到 label 尺寸
+  if y_p.shape[-2:] != y_t.shape[-2:]:
+      y_p = F.interpolate(...)
+
+  # 用同一套 Binary_IoU_Pred / Binary_DICE_Pred
+  metric_obj.update(y_p.unsqueeze(0), y_t.unsqueeze(0))
+  ...
+  score = metric_obj.compute()
+```
+
+```python
+  iou = self.metric(logits, labels)          # 这里 logits / labels 都是在 CPU 上，[H, W] 或 [1, H, W]
+  dice = 2 * iou / (1 + iou)
+```
+
+```shellscript
+  ./test_tta.sh
+```
+
+```shellscript
+  python3 run_semantic_segmentation.py \
+      --task isic2017 \
+      --eval \
+      --ckpt_path AutogluonModels/ag-20251203_075302 \
+      --tta_enable \
+      --tta_scales 0.75 1.0 1.25 \
+      --tta_flips none horizontal \
+      --tta_rotations 0 \
+      --output_dir outputs/eval_tta_safe
+```
+
+---
+
+**User**
+
+请总结现在的TTA方案具体是如何实现的，遇到了哪些问题待解决，写成一个详细的文档，细化到关键代码，供以后继续研究做参考
+
+---
+
+**Cursor**
+
+我会新建一个独立的中文文档，把当前 TTA 的整体设计、关键代码路径、已解决和未解决的问题系统性整理出来，方便你后续继续研究或改代码。文档里会直接引用目前代码里的关键实现片段，并总结我们这几天排查中发现的行为和假设。
+
