@@ -1,6 +1,6 @@
 import logging
 import os
-from typing import Dict, Iterable, List, Optional, Union, Callable
+from typing import Dict, Iterable, List, Optional, Union, Callable, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -383,7 +383,7 @@ class SemanticSegmentationLearner(BaseLearner):
             return img_tensor
         
         # Create a prediction function for TTA
-        def predict_fn(image: np.ndarray) -> np.ndarray:
+        def predict_fn(image: np.ndarray, box_prompt: Optional[np.ndarray] = None, box_ref_shape: Optional[Tuple[int, int]] = None) -> np.ndarray:
             """
             Prediction function for a single image used by TTA.
             
@@ -402,6 +402,18 @@ class SemanticSegmentationLearner(BaseLearner):
             
             # Add batch dimension and move to device
             img_tensor = img_tensor.unsqueeze(0).to(device, non_blocking=True)
+
+            box_tensor = None
+            if box_prompt is not None:
+                # box_prompt stays in ORIGINAL image coords (no TTA transform)
+                ref_h, ref_w = box_ref_shape if box_ref_shape is not None else image.shape[:2]
+                scale_x = model.image_size / float(ref_w)
+                scale_y = model.image_size / float(ref_h)
+                box_scaled = box_prompt.astype(np.float32).copy()
+                box_scaled[0::2] *= scale_x
+                box_scaled[1::2] *= scale_y
+                box_scaled = np.clip(box_scaled, 0, model.image_size - 1)
+                box_tensor = torch.from_numpy(box_scaled).to(device).unsqueeze(0).unsqueeze(0)  # (1,1,4)
             
             # Forward pass
             with torch.no_grad():
@@ -412,6 +424,8 @@ class SemanticSegmentationLearner(BaseLearner):
                     model.prefix + '_label': torch.zeros((1, model.image_size, model.image_size), 
                                                          dtype=torch.long, device=device)
                 }
+                if box_tensor is not None and self._tta_box_prompt_mode in ["add", "replace"]:
+                    batch[model.box_key] = box_tensor
                 outputs = model(batch)
                 
                 # Extract logits
@@ -544,6 +558,7 @@ class SemanticSegmentationLearner(BaseLearner):
 
             # Load label if exists
             label = None
+            gt_box = None
             if label_path:
                 label_pil = Image.open(label_path)
                 label = np.array(label_pil)
@@ -560,11 +575,16 @@ class SemanticSegmentationLearner(BaseLearner):
                 if not streaming_metrics:
                     all_labels.append(torch.from_numpy(label))
 
+                # Compute GT bounding box (single box per sample, original coords)
+                ys, xs = np.where(label > 0)
+                if xs.size > 0 and ys.size > 0:
+                    gt_box = np.array([xs.min(), ys.min(), xs.max(), ys.max()], dtype=np.float32)
+
             # Predict with TTA
             if self._output_shape == 1:
                 # Binary segmentation
                 pred_mask, pred_prob = self._tta_predictor.predict_with_tta(
-                    image, predict_fn, return_probs=True
+                    image, predict_fn, return_probs=True, box_prompt=gt_box, box_ref_shape=image.shape[:2]
                 )
                 pred_tensor = torch.from_numpy(pred_prob)
                 if not streaming_metrics:
@@ -575,7 +595,7 @@ class SemanticSegmentationLearner(BaseLearner):
             else:
                 # Multi-class segmentation
                 _, pred_prob = self._tta_predictor.predict_with_tta(
-                    image, predict_fn, return_probs=True
+                    image, predict_fn, return_probs=True, box_prompt=gt_box, box_ref_shape=image.shape[:2]
                 )
                 pred_tensor = torch.from_numpy(pred_prob)
                 if not streaming_metrics:
@@ -787,6 +807,7 @@ class SemanticSegmentationLearner(BaseLearner):
         use_morphology: bool = False,
         cache_dir: Optional[str] = None,
         resume_from_cache: bool = True,
+        box_prompt_mode: str = "off",
     ):
         """
         Enable Test-Time Augmentation (TTA) for inference.
@@ -846,6 +867,7 @@ class SemanticSegmentationLearner(BaseLearner):
         # Store cache configuration
         self._tta_cache_dir = cache_dir
         self._tta_resume_from_cache = resume_from_cache
+        self._tta_box_prompt_mode = box_prompt_mode
         
         logger.info(f"TTA enabled with {len(self._tta_predictor.transforms)} augmentations")
         if cache_dir:

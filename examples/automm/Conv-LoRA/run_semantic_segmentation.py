@@ -97,6 +97,9 @@ if __name__ == "__main__":
                         help="Directory to cache TTA predictions for resume (default: None, no caching)")
     parser.add_argument("--tta_no_resume", action="store_true",
                         help="Disable resume from cache (start fresh even if cache exists)")
+    parser.add_argument("--tta_box_prompt_mode", type=str, default="off",
+                        choices=["off", "add", "replace"],
+                        help="Use GT box as SAM box prompt (off/add/replace); box not transformed with TTA")
     
     # Quick test / Debug parameters
     parser.add_argument("--debug", action="store_true",
@@ -188,6 +191,7 @@ if __name__ == "__main__":
             use_morphology=args.tta_morphology,
             cache_dir=args.tta_cache_dir,
             resume_from_cache=not args.tta_no_resume,
+            box_prompt_mode=args.tta_box_prompt_mode,
         )
 
     # evaluation
