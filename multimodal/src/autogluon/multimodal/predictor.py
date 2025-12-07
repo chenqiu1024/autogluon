@@ -1003,6 +1003,7 @@ class MultiModalPredictor:
         use_morphology: bool = False,
         cache_dir: Optional[str] = None,
         resume_from_cache: bool = True,
+        box_prompt_mode: str = "off",
     ):
         """
         Enable Test-Time Augmentation (TTA) for inference.
@@ -1084,6 +1085,7 @@ class MultiModalPredictor:
             use_morphology=use_morphology,
             cache_dir=cache_dir,
             resume_from_cache=resume_from_cache,
+            box_prompt_mode=box_prompt_mode,
         )
     
     def disable_tta(self):
