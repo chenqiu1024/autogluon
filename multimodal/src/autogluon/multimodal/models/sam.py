@@ -402,6 +402,10 @@ class SAMForSemanticSegmentation(nn.Module):
     def class_label_key(self):
         return f"{self.prefix}_{CLASS_LABEL}"
 
+    @property
+    def box_key(self):
+        return f"{self.prefix}_box"
+
     def train(self, mode: bool = True):
         super().train(mode)
         for module in self.modules():
@@ -429,7 +433,12 @@ class SAMForSemanticSegmentation(nn.Module):
         """
         # binary
         if self.num_classes == 1:
-            rets = self.model(batch[self.image_key], multimask_output=False, output_moe_loss=self.output_moe_loss)
+            rets = self.model(
+                batch[self.image_key],
+                input_boxes=batch.get(self.box_key, None),
+                multimask_output=False,
+                output_moe_loss=self.output_moe_loss,
+            )
             pred_masks = rets.pred_masks[:, 0, :, :, :]
             pred_masks = F.interpolate(
                 pred_masks, (self.image_size, self.image_size), mode="bilinear", align_corners=False
@@ -440,7 +449,12 @@ class SAMForSemanticSegmentation(nn.Module):
                 rets_dict = {self.prefix: {LOGITS: pred_masks, LABEL: batch[self.label_key]}}
         # multi-class
         else:
-            rets = self.model(batch[self.image_key], multimask_output=False, output_moe_loss=self.output_moe_loss)
+            rets = self.model(
+                batch[self.image_key],
+                input_boxes=batch.get(self.box_key, None),
+                multimask_output=False,
+                output_moe_loss=self.output_moe_loss,
+            )
             rets, class_predictions = rets
             pred_masks = rets.pred_masks[:, 0, :, :, :]
             pred_classes = class_predictions[:, 0, :, :]
