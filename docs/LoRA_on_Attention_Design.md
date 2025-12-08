@@ -243,6 +243,7 @@ python3 run_semantic_segmentation.py \
 | `--decoder_attn_lora_r` | int | 8 | LoRA 秩（rank），控制参数量和表达能力 |
 | `--decoder_attn_lora_alpha` | int | 8 | LoRA 缩放因子，通常设为与 r 相同 |
 | `--decoder_attn_lora_dropout` | float | 0.0 | LoRA dropout，防止过拟合 |
+| `--lr` | float | auto | 学习率（默认根据任务自动选择：isic2017=1e-4, road=3e-4） |
 
 ### 5.2 超参数推荐
 
@@ -261,6 +262,7 @@ python3 run_semantic_segmentation.py \
 --decoder_attn_lora_r 8
 --decoder_attn_lora_alpha 8
 --decoder_attn_lora_dropout 0.0
+--lr 2e-4  # 可选：使用较高学习率加快收敛
 ```
 - 参数量：~86K
 - 训练速度：中等
