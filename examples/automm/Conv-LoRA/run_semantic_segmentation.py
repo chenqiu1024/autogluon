@@ -114,6 +114,10 @@ if __name__ == "__main__":
     parser.add_argument("--quick_test", type=int, default=None,
                         help="Quick test mode: only process first N images")
     
+    # Training hyperparameters
+    parser.add_argument("--lr", type=float, default=None,
+                        help="Learning rate (default: auto based on task, typically 1e-4 or 3e-4)")
+    
     args = parser.parse_args()
 
     dataset_name = args.task
@@ -126,6 +130,11 @@ if __name__ == "__main__":
 
     # get the validation metric
     validation_metric, loss, max_epoch, lr = get_default_training_setting(dataset_name)
+    
+    # Override learning rate if user specified it via CLI
+    if args.lr is not None:
+        lr = args.lr
+        print(f"Using custom learning rate: {lr}")
 
     hyperparameters = {}
     hyperparameters.update(

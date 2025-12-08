@@ -14,6 +14,19 @@ python3 run_semantic_segmentation.py \
   --output_dir outputs/lora_attn_test
 ```
 
+### 训练（自定义学习率）
+```bash
+python3 run_semantic_segmentation.py \
+  --task isic2017 \
+  --decoder_attn_lora_enable \
+  --decoder_attn_lora_r 8 \
+  --lr 3e-4 \
+  --num_gpus 1 \
+  --per_gpu_batch_size 1 \
+  --batch_size 4 \
+  --output_dir outputs/lora_attn_lr3e4
+```
+
 ### 评估
 ```bash
 python3 run_semantic_segmentation.py \
@@ -38,6 +51,7 @@ python3 run_semantic_segmentation.py \
 | `--decoder_attn_lora_enable` | 启用功能 | 必须 |
 | `--decoder_attn_lora_r` | LoRA 秩 | 8 (默认) |
 | `--decoder_attn_lora_alpha` | 缩放因子 | 8 (默认) |
+| `--lr` | 学习率 | 1e-4 (默认) / 2e-4~5e-4 (推荐) |
 
 ## 常见组合
 
