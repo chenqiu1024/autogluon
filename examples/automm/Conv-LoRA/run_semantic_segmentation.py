@@ -104,6 +104,16 @@ if __name__ == "__main__":
     parser.add_argument("--quick_test", type=int, default=None,
                         help="Quick test mode: only process first N images")
     
+    # Training hyperparameters
+    parser.add_argument("--lr", type=float, default=None,
+                        help="Learning rate (default: auto based on task, typically 1e-4 or 3e-4)")
+    
+    # LEMDA augmentation parameters
+    parser.add_argument("--lemda_enable", action="store_true",
+                        help="Enable LEMDA data augmentation with VAE")
+    parser.add_argument("--kld_weight", type=float, default=None,
+                        help="KL divergence loss weight (beta) for LEMDA training (default: 0.1)")
+    
     args = parser.parse_args()
 
     dataset_name = args.task
@@ -116,6 +126,11 @@ if __name__ == "__main__":
 
     # get the validation metric
     validation_metric, loss, max_epoch, lr = get_default_training_setting(dataset_name)
+    
+    # Override learning rate if user specified it via CLI
+    if args.lr is not None:
+        lr = args.lr
+        print(f"Using custom learning rate: {lr}")
 
     hyperparameters = {}
     hyperparameters.update(
@@ -154,6 +169,18 @@ if __name__ == "__main__":
             "model.sam.adapter_enabled": True,
             "model.sam.adapter_dim": args.adapter_dim,
         })
+    
+    # LEMDA augmentation configuration (VAE-based data augmentation)
+    if args.lemda_enable or args.kld_weight is not None:
+        print("Enabling LEMDA data augmentation...")
+        hyperparameters.update({
+            "optim.lemda.turn_on": True,
+        })
+        if args.kld_weight is not None:
+            print(f"Setting KL divergence weight (beta): {args.kld_weight}")
+            hyperparameters.update({
+                "optim.lemda.kld_weight": args.kld_weight,
+            })
 
     if args.eval:  # load a checkpoint for evaluation
         predictor = MultiModalPredictor.load(args.ckpt_path)
