@@ -79,6 +79,16 @@ if __name__ == "__main__":
     parser.add_argument("--adapter_enable", action="store_true", help="Enable standard Adapter modules")
     parser.add_argument("--adapter_dim", type=int, default=64, help="Dimension of the adapter bottleneck")
     
+    # Decoder Attention LoRA parameters (LoRA on Attention)
+    parser.add_argument("--decoder_attn_lora_enable", action="store_true", 
+                        help="Enable LoRA on decoder attention Q/K/V projections")
+    parser.add_argument("--decoder_attn_lora_r", type=int, default=8,
+                        help="LoRA rank for decoder attention (default: 8)")
+    parser.add_argument("--decoder_attn_lora_alpha", type=int, default=8,
+                        help="LoRA alpha for decoder attention (default: 8, same as rank)")
+    parser.add_argument("--decoder_attn_lora_dropout", type=float, default=0.0,
+                        help="LoRA dropout for decoder attention (default: 0.0)")
+    
     # TTA (Test-Time Augmentation) parameters
     parser.add_argument("--tta_enable", action="store_true", help="Enable Test-Time Augmentation for evaluation")
     parser.add_argument("--tta_scales", type=float, nargs="+", default=[0.75, 1.0, 1.25], 
@@ -186,6 +196,16 @@ if __name__ == "__main__":
         hyperparameters.update({
             "model.sam.adapter_enabled": True,
             "model.sam.adapter_dim": args.adapter_dim,
+        })
+    
+    # Decoder Attention LoRA configuration
+    if args.decoder_attn_lora_enable:
+        print(f"Enabling Decoder Attention LoRA: r={args.decoder_attn_lora_r}, "
+              f"alpha={args.decoder_attn_lora_alpha}, dropout={args.decoder_attn_lora_dropout}")
+        hyperparameters.update({
+            "model.sam.decoder_attention_lora_r": args.decoder_attn_lora_r,
+            "model.sam.decoder_attention_lora_alpha": args.decoder_attn_lora_alpha,
+            "model.sam.decoder_attention_lora_dropout": args.decoder_attn_lora_dropout,
         })
 
     if args.eval:  # load a checkpoint for evaluation

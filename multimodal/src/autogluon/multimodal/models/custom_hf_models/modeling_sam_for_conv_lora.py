@@ -34,7 +34,7 @@ from transformers.models.sam.configuration_sam import (
     SamVisionConfig,
 )
 from transformers.utils import ModelOutput, add_start_docstrings, add_start_docstrings_to_model_forward, logging
-from ..adaptation_layers import AdapterLayer
+from ..adaptation_layers import AdapterLayer, LoRALinear
 
 logger = logging.get_logger(__name__)
 
@@ -199,9 +199,25 @@ class SamAttention(nn.Module):
     """
     SAM's attention layer that allows for downscaling the size of the embedding after projection to queries, keys, and
     values.
+    
+    Supports optional LoRA (Low-Rank Adaptation) on Q/K/V projection layers for parameter-efficient fine-tuning.
     """
 
-    def __init__(self, config, downsample_rate=None):
+    def __init__(self, config, downsample_rate=None, lora_r=0, lora_alpha=1, lora_dropout=0.0):
+        """
+        Parameters
+        ----------
+        config : SamMaskDecoderConfig
+            Configuration for the attention layer
+        downsample_rate : int, optional
+            Downsample rate for attention (default: from config)
+        lora_r : int, default=0
+            LoRA rank. If 0, LoRA is disabled (default behavior for backward compatibility)
+        lora_alpha : int, default=1
+            LoRA scaling factor
+        lora_dropout : float, default=0.0
+            Dropout probability for LoRA
+        """
         super().__init__()
         self.hidden_size = config.hidden_size
 
@@ -212,9 +228,26 @@ class SamAttention(nn.Module):
         if self.internal_dim % config.num_attention_heads != 0:
             raise ValueError("num_attention_heads must divide hidden_size.")
 
-        self.q_proj = nn.Linear(self.hidden_size, self.internal_dim)
-        self.k_proj = nn.Linear(self.hidden_size, self.internal_dim)
-        self.v_proj = nn.Linear(self.hidden_size, self.internal_dim)
+        # Q/K/V projections: Use LoRALinear if lora_r > 0, otherwise use standard nn.Linear
+        if lora_r > 0:
+            self.q_proj = LoRALinear(
+                self.hidden_size, self.internal_dim,
+                r=lora_r, lora_alpha=lora_alpha, lora_dropout=lora_dropout
+            )
+            self.k_proj = LoRALinear(
+                self.hidden_size, self.internal_dim,
+                r=lora_r, lora_alpha=lora_alpha, lora_dropout=lora_dropout
+            )
+            self.v_proj = LoRALinear(
+                self.hidden_size, self.internal_dim,
+                r=lora_r, lora_alpha=lora_alpha, lora_dropout=lora_dropout
+            )
+        else:
+            self.q_proj = nn.Linear(self.hidden_size, self.internal_dim)
+            self.k_proj = nn.Linear(self.hidden_size, self.internal_dim)
+            self.v_proj = nn.Linear(self.hidden_size, self.internal_dim)
+        
+        # Output projection: standard Linear (LoRA not applied here per design)
         self.out_proj = nn.Linear(self.internal_dim, self.hidden_size)
 
     def _separate_heads(self, hidden_states: Tensor, num_attention_heads: int) -> Tensor:
@@ -259,7 +292,8 @@ class SamAttention(nn.Module):
 
 
 class SamTwoWayAttentionBlock(nn.Module):
-    def __init__(self, config, attention_downsample_rate: int = 2, skip_first_layer_pe: bool = False):
+    def __init__(self, config, attention_downsample_rate: int = 2, skip_first_layer_pe: bool = False,
+                 lora_r: int = 0, lora_alpha: int = 1, lora_dropout: float = 0.0):
         """
         A transformer block with four layers:
             (1) self-attention of sparse inputs (2) cross attention of sparse inputs -> dense inputs (3) mlp block on
@@ -268,27 +302,36 @@ class SamTwoWayAttentionBlock(nn.Module):
         Arguments:
             config (`SamMaskDecoderConfig`):
                 The configuration file used to instantiate the block
-            attention_downsample_rate (*optionalk*, int, defaults to 2):
+            attention_downsample_rate (*optional*, int, defaults to 2):
                 The downsample ratio of the block used to reduce the inner dim of the attention.
             skip_first_layer_pe (*optional*, bool, defaults to `False`):
                 Whether or not to skip the addition of the query_point_embedding on the first layer.
+            lora_r (int, default=0):
+                LoRA rank for attention layers. If 0, LoRA is disabled.
+            lora_alpha (int, default=1):
+                LoRA scaling factor
+            lora_dropout (float, default=0.0):
+                Dropout probability for LoRA
         """
         super().__init__()
 
         self.hidden_size = config.hidden_size
         self.layer_norm_eps = config.layer_norm_eps
 
-        self.self_attn = SamAttention(config, downsample_rate=1)
+        self.self_attn = SamAttention(config, downsample_rate=1, 
+                                      lora_r=lora_r, lora_alpha=lora_alpha, lora_dropout=lora_dropout)
         self.layer_norm1 = nn.LayerNorm(self.hidden_size, eps=self.layer_norm_eps)
 
-        self.cross_attn_token_to_image = SamAttention(config, downsample_rate=attention_downsample_rate)
+        self.cross_attn_token_to_image = SamAttention(config, downsample_rate=attention_downsample_rate,
+                                                      lora_r=lora_r, lora_alpha=lora_alpha, lora_dropout=lora_dropout)
         self.layer_norm2 = nn.LayerNorm(self.hidden_size, eps=self.layer_norm_eps)
 
         self.mlp = SamMLPBlock(config)
         self.layer_norm3 = nn.LayerNorm(self.hidden_size, eps=self.layer_norm_eps)
 
         self.layer_norm4 = nn.LayerNorm(self.hidden_size, eps=self.layer_norm_eps)
-        self.cross_attn_image_to_token = SamAttention(config, downsample_rate=attention_downsample_rate)
+        self.cross_attn_image_to_token = SamAttention(config, downsample_rate=attention_downsample_rate,
+                                                      lora_r=lora_r, lora_alpha=lora_alpha, lora_dropout=lora_dropout)
 
         self.skip_first_layer_pe = skip_first_layer_pe
 
@@ -346,7 +389,7 @@ class SamTwoWayAttentionBlock(nn.Module):
 
 
 class SamTwoWayTransformer(nn.Module):
-    def __init__(self, config: SamMaskDecoderConfig):
+    def __init__(self, config: SamMaskDecoderConfig, lora_r: int = 0, lora_alpha: int = 1, lora_dropout: float = 0.0):
         super().__init__()
         self.config = config
 
@@ -354,9 +397,10 @@ class SamTwoWayTransformer(nn.Module):
         self.layers = nn.ModuleList()
 
         for i in range(self.num_hidden_layers):
-            self.layers.append(SamTwoWayAttentionBlock(config, skip_first_layer_pe=(i == 0)))
+            self.layers.append(SamTwoWayAttentionBlock(config, skip_first_layer_pe=(i == 0),
+                                                       lora_r=lora_r, lora_alpha=lora_alpha, lora_dropout=lora_dropout))
 
-        self.final_attn_token_to_image = SamAttention(config)
+        self.final_attn_token_to_image = SamAttention(config, lora_r=lora_r, lora_alpha=lora_alpha, lora_dropout=lora_dropout)
         self.layer_norm_final_attn = nn.LayerNorm(config.hidden_size)
 
     def forward(
@@ -441,7 +485,7 @@ class SamFeedForward(nn.Module):
 
 
 class SamMaskDecoder(nn.Module):
-    def __init__(self, config: SamMaskDecoderConfig):
+    def __init__(self, config: SamMaskDecoderConfig, lora_r: int = 0, lora_alpha: int = 1, lora_dropout: float = 0.0):
         super().__init__()
 
         self.hidden_size = config.hidden_size
@@ -452,7 +496,7 @@ class SamMaskDecoder(nn.Module):
         self.iou_token = nn.Embedding(1, self.hidden_size)
         self.mask_tokens = nn.Embedding(self.num_mask_tokens, self.hidden_size)
 
-        self.transformer = SamTwoWayTransformer(config)
+        self.transformer = SamTwoWayTransformer(config, lora_r=lora_r, lora_alpha=lora_alpha, lora_dropout=lora_dropout)
 
         # should we create a new class for this?
         self.upscale_conv1 = nn.ConvTranspose2d(self.hidden_size, self.hidden_size // 4, kernel_size=2, stride=2)
@@ -1255,7 +1299,18 @@ class SamModel(SamPreTrainedModel):
 
         self.vision_encoder = SamVisionEncoder(config.vision_config)
         self.prompt_encoder = SamPromptEncoder(config.prompt_encoder_config, self.shared_image_embedding)
-        self.mask_decoder = SamMaskDecoder(config.mask_decoder_config)
+        
+        # Extract decoder attention LoRA parameters from config (if available)
+        decoder_attn_lora_r = getattr(config.mask_decoder_config, 'decoder_attention_lora_r', 0)
+        decoder_attn_lora_alpha = getattr(config.mask_decoder_config, 'decoder_attention_lora_alpha', 1)
+        decoder_attn_lora_dropout = getattr(config.mask_decoder_config, 'decoder_attention_lora_dropout', 0.0)
+        
+        self.mask_decoder = SamMaskDecoder(
+            config.mask_decoder_config,
+            lora_r=decoder_attn_lora_r,
+            lora_alpha=decoder_attn_lora_alpha,
+            lora_dropout=decoder_attn_lora_dropout
+        )
 
         self.post_init()
 
