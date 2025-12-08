@@ -1,5 +1,5 @@
 # 设计实验Adapter部分的创新与遵循
-_Exported on 12/7/2025 at 20:46:28 PST from Cursor (2.1.50)_
+_Exported on 12/7/2025 at 21:39:33 PST from Cursor (2.1.50)_
 
 ---
 
@@ -102196,5 +102196,518 @@ SAM Decoder (Mask Decoder)
     ├── Block 2
     │   └── ... (同上)
     └── Final Attention (Q/K/V + LoRA) ⭐
+```
+
+---
+
+**User**
+
+执行基础训练：`nohup python3 run_semantic_segmentation.py \
+
+  --task isic2017 \
+
+  --decoder_attn_lora_enable \
+
+  --decoder_attn_lora_r 8 \
+
+  --num_gpus 1 \
+
+  --per_gpu_batch_size 1 \
+
+  --batch_size 4 \
+
+  --output_dir outputs/lora_attn_r8 \
+
+  > outputs/lora_attn_r8.log 2>&1 &`  时出错 ：`
+
+Seed set to 42686693
+
+Enabling Decoder Attention LoRA: r=8, alpha=8, dropout=0.0
+
+Traceback (most recent call last):
+
+  File "/root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA/run_semantic_segmentation.py", line 188, in <module>
+
+    predictor.fit(train_data=train_df, tuning_data=val_df, seed=args.seed)
+
+  File "/root/autodl-tmp/works/autogluon/multimodal/src/autogluon/multimodal/predictor.py", line 540, in fit
+
+    self._learner.fit(
+
+  File "/root/autodl-tmp/works/autogluon/multimodal/src/autogluon/multimodal/learners/base.py", line 665, in fit
+
+    fit_returns = self.execute_fit()
+
+  File "/root/autodl-tmp/works/autogluon/multimodal/src/autogluon/multimodal/learners/base.py", line 577, in execute_fit
+
+    attributes = self.fit_per_run(**self._fit_args)
+
+  File "/root/autodl-tmp/works/autogluon/multimodal/src/autogluon/multimodal/learners/base.py", line 1275, in fit_per_run
+
+    config = self.get_config_per_run(config=config, hyperparameters=hyperparameters)
+
+  File "/root/autodl-tmp/works/autogluon/multimodal/src/autogluon/multimodal/learners/base.py", line 703, in get_config_per_run
+
+    config = get_config(
+
+  File "/root/autodl-tmp/works/autogluon/multimodal/src/autogluon/multimodal/utils/config.py", line 198, in get_config
+
+    config = apply_omegaconf_overrides(config, overrides=overrides, check_key_exist=True)
+
+  File "/root/autodl-tmp/works/autogluon/multimodal/src/autogluon/multimodal/utils/config.py", line 480, in apply_omegaconf_overrides
+
+    raise KeyError(
+
+KeyError: '"model.sam.decoder_attention_lora_r" is not found in the config. You may need to check the overrides. overrides={\'optim.lora.r\': 3, \'optim.peft\': \'conv_lora\', \'optim.lora.conv_lora_expert_num\': 8, \'env.num_gpus\': 1, \'optim.loss_func\': \'structure_loss\', \'optim.max_epochs\': 30, \'optim.lr\': 0.0001, \'env.per_gpu_batch_size\': 1, \'env.batch_size\': 4, \'model.sam.decoder_attention_lora_r\': 8, \'model.sam.decoder_attention_lora_alpha\': 8, \'model.sam.decoder_attention_lora_dropout\': 0.0}'`
+
+---
+
+**Cursor**
+
+看到错误了，配置系统找不到 `model.sam.decoder_attention_lora_r` 等键。需要在配置文件中预定义这些参数。
+
+找到了！需要在 SAM 配置中添加 LoRA 参数。
+
+```yaml
+model:
+  names:
+  categorical_mlp:
+    hidden_size: 64
+    activation: "leaky_relu"
+    num_layers: 1
+    dropout: 0.1
+    normalization: "layer_norm"
+    data_types:
+      - "categorical"
+
+  numerical_mlp:
+    hidden_size: 128
+    activation: "leaky_relu"
+    num_layers: 1
+    dropout: 0.1
+    normalization: "layer_norm"
+    token_dim: 8
+    embedding_arch:
+    data_types:
+      - "numerical"
+    merge: "concat"
+
+  hf_text:
+    checkpoint_name: "google/electra-base-discriminator"
+    gradient_checkpointing: False
+    pooling_mode: 'cls'  # The pooling mode, can be 'cls' or 'mean'
+    data_types:
+      - "text"
+    tokenizer_name: "hf_auto"
+    use_fast: True  # Use a fast Rust-based tokenizer if it is supported for a given model. If a fast tokenizer is not available for a given model, a normal Python-based tokenizer is returned instead.
+    max_text_len: 512  # If None or <=0, then use the max length of pretrained models.
+    insert_sep: True
+    low_cpu_mem_usage: False
+    text_segment_num: 2
+    stochastic_chunk: False
+    text_aug_detect_length: 10                # We perform text augmentation only if a text has more than text_detection_length words. It is used to differentiate text columns versus tabular columns that are treated as text.
+    text_trivial_aug_maxscale: 0.1            # augmentation magnitude randomly drawn from [0, text_trivial_aug_maxscale]
+    text_train_augment_types:        # specify augmentation space manually, will randomly select one from the following and identity
+      # - "random_swap(0.05)"          # less than 0.1 based on eda paper
+      # - "random_delete(0.05)"        # less than 0.1 based on eda paper
+      # - "syn_replacement(0.05)"  # less than 0.1 based on eda paper
+      # - "insert_punc(0.05)"
+
+  ner_text:
+    checkpoint_name: "bert-base-cased"
+    max_text_len: 512
+    gradient_checkpointing: False
+    low_cpu_mem_usage: False
+    data_types:
+      - "text_ner"
+    tokenizer_name: "hf_auto"
+    insert_sep: False
+    text_segment_num: 2
+    stochastic_chunk: False
+    special_tags: 
+      - X # CLS, SEP, and non-first tokens of a word will be labelled as X
+      - O # Outside of a named entity
+
+  document_transformer:
+    checkpoint_name: "microsoft/layoutlmv3-base" # document foundation models
+    gradient_checkpointing: False
+    pooling_mode: 'cls'  # The pooling mode, can be 'cls' or 'mean'
+    data_types:
+      - "document"
+    train_transforms:
+      - "resize_shorter_side"
+      - "center_crop"
+    val_transforms:
+      - "resize_shorter_side"
+      - "center_crop"
+    image_norm: "imagenet"
+    image_size: 224
+    tokenizer_name: "hf_auto"
+    max_text_len: 512  # If None or <=0, then use the max length of pretrained models.
+    insert_sep: True
+    low_cpu_mem_usage: False
+    text_segment_num: 2
+    stochastic_chunk: False
+    text_aug_detect_length: 10                # We perform text augmentation only if a text has more than text_detection_length words. It is used to differentiate text columns versus tabular columns that are treated as text.
+    text_trivial_aug_maxscale: 0.0            # augmentation magnitude randomly drawn from [0, text_trivial_aug_maxscale]
+
+  t_few:
+    checkpoint_name: "t5-small" #"bigscience/T0_3B"
+    gradient_checkpointing: False
+    data_types:
+      - "text"
+    tokenizer_name: "hf_auto"
+    length_norm: 1.0 # Normalizes length to adjust for length bias in target template
+    unlikely_loss: 1.0 # Adds loss term that lowers probability of incorrect outputs
+    mc_loss: 1.0 # Adds multiple choice cross entropy loss
+    max_text_len: 512  # If None or <=0, then use the max length of pretrained models.
+    text_segment_num: 2
+    insert_sep: True
+    low_cpu_mem_usage: False
+    stochastic_chunk: False
+    text_aug_detect_length: 10                # We perform text augmentation only if a text has more than text_detection_length words. It is used to differentiate text columns versus tabular columns that are treated as text.
+    text_trivial_aug_maxscale: 0.0            # augmentation magnititude randomly drawn from [0, text_trivial_aug_maxscale]
+    text_train_augment_types:
+
+  timm_image:
+    checkpoint_name: "swin_base_patch4_window7_224"
+    mix_choice: "all_logits"
+    data_types:
+      - "image"
+    train_transforms:
+      - "resize_shorter_side"
+      - "center_crop"
+      - "trivial_augment"
+    val_transforms:
+      - "resize_shorter_side"
+      - "center_crop"
+    image_norm: "imagenet"
+    image_size: null
+    image_chan_num: 3
+    use_learnable_image: False
+    max_image_num_per_column: 1
+
+  mmdet_image:
+    checkpoint_name: "yolov3_mobilenetv2_8xb24-320-300e_coco"
+    config_file: ""
+    data_types:
+      - "image"
+    max_img_num_per_col: 1
+    output_bbox_format: "xyxy"  # now support xyxy or xywh, for bbox format details see https://keras.io/api/keras_cv/bounding_box/formats/
+    frozen_layers: null
+    coco_root: null
+
+  mmocr_text_detection:
+    checkpoint_name: "TextSnake"
+    data_types:
+      - "image"
+    train_transforms:
+      - "resize_shorter_side"
+      - "center_crop"
+      - "trivial_augment"
+    val_transforms:
+      - "resize_shorter_side"
+      - "center_crop"
+    image_norm: "imagenet"
+    image_size: 224
+    max_img_num_per_col: 2
+
+  mmocr_text_recognition:
+    checkpoint_name: "ABINet"
+    data_types:
+      - "image"
+    train_transforms:
+      - "resize_shorter_side"
+      - "center_crop"
+      - "trivial_augment"
+    val_transforms:
+      - "resize_shorter_side"
+      - "center_crop"
+    image_norm: "imagenet"
+    image_size: 224
+    max_img_num_per_col: 2
+
+  clip:
+    checkpoint_name: "openai/clip-vit-base-patch32"
+    data_types:
+      - "image"
+      - "text"
+    train_transforms:
+      - "resize_shorter_side"
+      - "center_crop"
+      - "trivial_augment"
+    val_transforms:
+      - "resize_shorter_side"
+      - "center_crop"
+    image_norm: "clip"
+    image_size: 224
+    image_chan_num: 3
+    use_learnable_image: False
+    max_image_num_per_column: 1
+    tokenizer_name: "clip"
+    max_text_len: 77  # The maximum possible length.
+    insert_sep: False
+    text_segment_num: 1
+    stochastic_chunk: False
+    text_aug_detect_length: 10                     # We perform text augmentation only if a text has more than text_detection_length words. It is used to differentiate text columns versus tabular columns that are treated as text.
+    text_trivial_aug_maxscale: 0.0                      # scale randomly drawn from [0, text_trivial_aug_maxscale]
+    text_train_augment_types:        # specify augmentation space manually, will randomly select one from the following and identity
+      # - "random_swap(0.05)"          # less than 0.1 based on eda paper
+      # - "random_delete(0.05)"        # less than 0.1 based on eda paper
+      # - "syn_replacement(0.05)"  # less than 0.1 based on eda paper
+      # - "insert_punc(0.05)"
+
+  fusion_mlp:
+    aux_loss_weight:
+    adapt_in_features: "max"
+    hidden_sizes:
+      - 128
+    activation: "leaky_relu"
+    dropout: 0.1
+    normalization: "layer_norm"
+    data_types:
+
+  fusion_ner:
+    weight:
+    adapt_in_features: "max"
+    hidden_sizes:
+      - 128
+    activation: "leaky_relu"
+    drop_rate: 0.1
+    normalization: "layer_norm"
+    data_types:
+
+  fusion_transformer:
+    aux_loss_weight:
+    hidden_size: 192
+    num_blocks: 3
+    attention_num_heads: 8
+    adapt_in_features: "max"
+    attention_dropout: 0.2
+    residual_dropout: 0.0
+    ffn_dropout: 0.1
+    ffn_hidden_size: 192
+    normalization: "layer_norm"
+    ffn_activation: "geglu"
+    head_activation: "relu"
+    data_types:
+    additive_attention: False # Whether to use lightweight additive attention, can be True, False or "auto"
+    share_qv_weights: False # Whether to share weight for query and value, can be True, False or "auto"
+
+  ft_transformer:
+    data_types:
+      - "categorical"
+      - "numerical"
+    embedding_arch:
+      - 'linear'
+    token_dim: 192
+    hidden_size: 192
+    num_blocks: 3
+    attention_num_heads: 8
+    attention_dropout: 0.2
+    residual_dropout: 0.0
+    ffn_dropout: 0.1
+    ffn_hidden_size: 192
+    ffn_activation: "geglu"
+    head_activation: "relu"
+    normalization: "layer_norm"
+    merge: "concat"
+    requires_all_dtypes: False
+    additive_attention: False # Whether to use lightweight additive attention, can be True, False or "auto"
+    share_qv_weights: False # Whether to share weight for query and value, can be True, False or "auto"
+    pooling_mode: "cls"
+    checkpoint_name: null
+
+  sam:
+    checkpoint_name: "facebook/sam-vit-huge"
+    image_norm: "imagenet"
+    data_types:
+      - "semantic_segmentation_img"
+    train_transforms:
+      - "random_horizontal_flip"
+    val_transforms: []
+    img_transforms:
+      - "resize_to_square"
+    gt_transforms:
+      - "resize_gt_to_square"
+    max_img_num_per_col: 1
+    frozen_layers: ["mask_decoder.iou_prediction_head", "prompt_encoder"]
+    num_mask_tokens: 1
+    ignore_label: 255
+    adapter_enabled: False
+    adapter_dim: 64
+    decoder_attention_lora_r: 0
+    decoder_attention_lora_alpha: 1
+    decoder_attention_lora_dropout: 0.0
+
+  meta_transformer:
+    data_types:
+      - "image"
+      - "text"
+      - "categorical"
+      - "numerical"
+    checkpoint_path: null
+    model_version: "base"
+    requires_all_dtypes: False
+    train_transforms:
+      - "resize_shorter_side"
+      - "center_crop"
+      - "trivial_augment"
+    val_transforms:
+      - "resize_shorter_side"
+      - "center_crop"
+    image_norm: "imagenet"
+    image_size: 224
+    image_chan_num: 3
+    use_learnable_image: False
+    max_image_num_per_column: 1
+    tokenizer_name: "hf_auto"
+    max_text_len: 512  # If None or <=0, then use the max length of pretrained models.
+    insert_sep: True
+    text_segment_num: 2
+    stochastic_chunk: False
+    text_aug_detect_length: 10     # We perform text augmentation only if a text has more than text_detection_length words. It is used to differentiate text columns versus tabular columns that are treated as text.
+    text_trivial_aug_maxscale: 0.1  # augmentation magnitude randomly drawn from [0, text_trivial_aug_maxscale]
+    text_train_augment_types:
+    merge: "concat"
+
+```
+
+```markdown
+# LoRA on Attention 配置修复
+
+## 问题描述
+
+在初次实现 LoRA on Attention 时，训练报错：
+```
+KeyError: '"model.sam.decoder_attention_lora_r" is not found in the config.
+```
+
+## 原因分析
+
+AutoGluon 的配置系统使用 OmegaConf，在应用 hyperparameters 覆盖时会检查键是否存在（`check_key_exist=True`）。由于 `decoder_attention_lora_*` 参数是新增的，但没有在默认配置文件中预定义，导致配置验证失败。
+
+## 解决方案
+
+在 `multimodal/src/autogluon/multimodal/configs/model/default.yaml` 的 `sam` 配置节中添加默认值：
+
+```yaml
+sam:
+  checkpoint_name: "facebook/sam-vit-huge"
+  # ... 其他配置 ...
+  adapter_enabled: False
+  adapter_dim: 64
+  decoder_attention_lora_r: 0          # 新增：默认禁用
+  decoder_attention_lora_alpha: 1      # 新增：默认缩放因子
+  decoder_attention_lora_dropout: 0.0  # 新增：默认无 dropout
+```
+
+## 验证方法
+
+重新运行训练命令：
+```bash
+python3 run_semantic_segmentation.py \
+  --task isic2017 \
+  --decoder_attn_lora_enable \
+  --decoder_attn_lora_r 8 \
+  --num_gpus 1 \
+  --per_gpu_batch_size 1 \
+  --batch_size 4 \
+  --output_dir outputs/lora_attn_r8
+```
+
+应该看到日志输出：
+```
+Enabling Decoder Attention LoRA: r=8, alpha=8, dropout=0.0
+```
+并且训练正常开始，不再报 KeyError。
+
+## 向后兼容性确认
+
+- ✅ 默认值 `decoder_attention_lora_r: 0` 确保 LoRA 默认禁用
+- ✅ 旧训练脚本（不指定这些参数）将继续使用默认值
+- ✅ 不影响现有功能
+
+## 修改文件
+
+- `multimodal/src/autogluon/multimodal/configs/model/default.yaml`
+
+## 更新日期
+
+2024-12-08
+
+```
+
+已修复！问题是配置文件中缺少 LoRA 参数的默认值定义。
+
+## 🔧 修复内容
+
+在 `multimodal/src/autogluon/multimodal/configs/model/default.yaml` 的 SAM 配置中添加了：
+
+```yaml
+sam:
+  # ... 其他配置 ...
+  decoder_attention_lora_r: 0          # 默认禁用（向后兼容）
+  decoder_attention_lora_alpha: 1      # 默认缩放因子
+  decoder_attention_lora_dropout: 0.0  # 默认无 dropout
+```
+
+## ✅ 现在可以运行训练了
+
+重新执行您的命令（应该可以正常工作）：
+
+```bash
+nohup python3 run_semantic_segmentation.py \
+  --task isic2017 \
+  --decoder_attn_lora_enable \
+  --decoder_attn_lora_r 8 \
+  --num_gpus 1 \
+  --per_gpu_batch_size 1 \
+  --batch_size 4 \
+  --output_dir outputs/lora_attn_r8 \
+  > outputs/lora_attn_r8.log 2>&1 &
+```
+
+## 🔍 验证成功的标志
+
+训练开始后，日志应该显示：
+```
+Seed set to 42686693
+Enabling Decoder Attention LoRA: r=8, alpha=8, dropout=0.0
+Decoder Attention LoRA enabled: r=8, alpha=8, dropout=0.0
+```
+
+然后正常进入训练循环，不再报 KeyError。
+
+## 📝 更新说明
+
+- **修复文件**：`multimodal/src/autogluon/multimodal/configs/model/default.yaml`
+- **向后兼容**：默认值为 0（禁用），不影响现有代码
+- **文档更新**：创建了 `LoRA_on_Attention_Bugfix.md` 记录此修复
+
+```yaml
+sam:
+  # ... 其他配置 ...
+  decoder_attention_lora_r: 0          # 默认禁用（向后兼容）
+  decoder_attention_lora_alpha: 1      # 默认缩放因子
+  decoder_attention_lora_dropout: 0.0  # 默认无 dropout
+```
+
+```shellscript
+nohup python3 run_semantic_segmentation.py \
+  --task isic2017 \
+  --decoder_attn_lora_enable \
+  --decoder_attn_lora_r 8 \
+  --num_gpus 1 \
+  --per_gpu_batch_size 1 \
+  --batch_size 4 \
+  --output_dir outputs/lora_attn_r8 \
+  > outputs/lora_attn_r8.log 2>&1 &
+```
+
+```plaintext
+Seed set to 42686693
+Enabling Decoder Attention LoRA: r=8, alpha=8, dropout=0.0
+Decoder Attention LoRA enabled: r=8, alpha=8, dropout=0.0
 ```
 
