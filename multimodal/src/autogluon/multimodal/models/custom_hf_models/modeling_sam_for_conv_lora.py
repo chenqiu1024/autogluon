@@ -877,6 +877,65 @@ class SamVisionAttention(nn.Module):
         return outputs
 
 
+class AdapterFusion(nn.Module):
+    """
+    A lightweight gating-based fusion module to combine multiple adapter outputs.
+    Each adapter output is projected to a shared dim, scaled by a learnable gate
+    (sigmoid), optionally passed through a small FFN, then added back to the
+    residual path.
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        proj_dim: int = 256,
+        dropout: float = 0.05,
+        gate_init: float = -4.0,
+        use_ffn: bool = True,
+    ):
+        super().__init__()
+        self.proj_dim = proj_dim
+        self.gate_init = gate_init
+        self.use_ffn = use_ffn
+
+        self.proj_layers = nn.ModuleList()
+        self.gates = nn.ParameterList()
+        self.layernorm = nn.LayerNorm(proj_dim)
+        if use_ffn:
+            self.ffn = nn.Sequential(
+                nn.Linear(proj_dim, proj_dim * 4),
+                nn.GELU(),
+                nn.Linear(proj_dim * 4, proj_dim),
+            )
+        else:
+            self.ffn = None
+        self.dropout = nn.Dropout(dropout)
+
+    def register_adapter(self, adapter_output_dim: int):
+        self.proj_layers.append(nn.Linear(adapter_output_dim, self.proj_dim))
+        gate = nn.Parameter(torch.tensor(self.gate_init))
+        self.gates.append(gate)
+
+    def forward(self, adapter_outputs: List[torch.Tensor]) -> torch.Tensor:
+        if len(adapter_outputs) != len(self.proj_layers):
+            raise ValueError(
+                f"AdapterFusion expects {len(self.proj_layers)} outputs, got {len(adapter_outputs)}."
+            )
+
+        projected = []
+        for out, proj in zip(adapter_outputs, self.proj_layers):
+            projected.append(proj(out))
+
+        gates = torch.stack([torch.sigmoid(g) for g in self.gates])  # [n]
+        stacked = torch.stack(projected, dim=0)  # [n, B, seq, proj_dim]
+        fused = (gates[:, None, None, None] * stacked).sum(dim=0)
+        fused = self.layernorm(fused)
+        if self.ffn is not None:
+            fused = self.ffn(fused)
+        fused = self.dropout(fused)
+        return fused
+
+
 class SamVisionLayer(nn.Module):
     def __init__(self, config, window_size):
         super().__init__()
@@ -888,9 +947,25 @@ class SamVisionLayer(nn.Module):
         
         # Adapter Integration
         self.adapter = None
+        self.adapter_fusion = None
         if hasattr(config, "adapter_enabled") and config.adapter_enabled:
             adapter_dim = getattr(config, "adapter_dim", 64)
             self.adapter = AdapterLayer(config.hidden_size, adapter_dim)
+        if getattr(config, "adapter_fusion_enabled", False):
+            fusion_proj_dim = getattr(config, "adapter_fusion_proj_dim", 256)
+            fusion_dropout = getattr(config, "adapter_fusion_dropout", 0.05)
+            fusion_gate_init = getattr(config, "adapter_fusion_gate_init", -4.0)
+            fusion_use_ffn = getattr(config, "adapter_fusion_use_ffn", True)
+            self.adapter_fusion = AdapterFusion(
+                input_dim=config.hidden_size,
+                proj_dim=fusion_proj_dim,
+                dropout=fusion_dropout,
+                gate_init=fusion_gate_init,
+                use_ffn=fusion_use_ffn,
+            )
+            # Register existing adapter branch if present
+            if self.adapter is not None:
+                self.adapter_fusion.register_adapter(config.hidden_size)
 
 
     def window_partition(self, hidden_states: torch.Tensor, window_size: int) -> Tuple[torch.Tensor, Tuple[int, int]]:
@@ -981,7 +1056,11 @@ class SamVisionLayer(nn.Module):
         hidden_states = self.layer_norm2(hidden_states)
         mlp_out = self.mlp(hidden_states)
         
-        if self.adapter is not None:
+        if self.adapter is not None and self.adapter_fusion is not None:
+            adapter_out = self.adapter(hidden_states)
+            fused_out = self.adapter_fusion([adapter_out])
+            hidden_states = residual + mlp_out + fused_out
+        elif self.adapter is not None:
             adapter_out = self.adapter(hidden_states)
             hidden_states = residual + mlp_out + adapter_out
         else:

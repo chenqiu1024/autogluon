@@ -265,6 +265,11 @@ model:
     ignore_label: 255
     adapter_enabled: False
     adapter_dim: 64
+    adapter_fusion_enabled: False
+    adapter_fusion_proj_dim: 256
+    adapter_fusion_dropout: 0.05
+    adapter_fusion_use_ffn: True
+    adapter_fusion_gate_init: -4.0
 
   meta_transformer:
     data_types:

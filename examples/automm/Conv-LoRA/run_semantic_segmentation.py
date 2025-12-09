@@ -75,6 +75,17 @@ if __name__ == "__main__":
     # Adapter parameters
     parser.add_argument("--adapter_enable", action="store_true", help="Enable standard Adapter modules")
     parser.add_argument("--adapter_dim", type=int, default=64, help="Dimension of the adapter bottleneck")
+    
+    # AdapterFusion parameters
+    parser.add_argument("--adapter_fusion_enable", action="store_true", help="Enable AdapterFusion gating module")
+    parser.add_argument("--adapter_fusion_proj_dim", type=int, default=256, help="Projection dim inside fusion")
+    parser.add_argument("--adapter_fusion_dropout", type=float, default=0.05, help="Dropout used in fusion output")
+    parser.add_argument("--adapter_fusion_gate_init", type=float, default=-4.0, help="Init value for fusion gates")
+    parser.add_argument(
+        "--adapter_fusion_disable_ffn",
+        action="store_true",
+        help="Disable optional FFN inside fusion (default: enabled)",
+    )
     args = parser.parse_args()
 
     dataset_name = args.task
@@ -125,6 +136,19 @@ if __name__ == "__main__":
             "model.sam.adapter_enabled": True,
             "model.sam.adapter_dim": args.adapter_dim,
         })
+        if args.adapter_fusion_enable:
+            print(
+                f"Enabling AdapterFusion (proj_dim={args.adapter_fusion_proj_dim}, "
+                f"dropout={args.adapter_fusion_dropout}, gate_init={args.adapter_fusion_gate_init}, "
+                f"use_ffn={not args.adapter_fusion_disable_ffn})"
+            )
+            hyperparameters.update({
+                "model.sam.adapter_fusion_enabled": True,
+                "model.sam.adapter_fusion_proj_dim": args.adapter_fusion_proj_dim,
+                "model.sam.adapter_fusion_dropout": args.adapter_fusion_dropout,
+                "model.sam.adapter_fusion_gate_init": args.adapter_fusion_gate_init,
+                "model.sam.adapter_fusion_use_ffn": not args.adapter_fusion_disable_ffn,
+            })
 
     if args.eval:  # load a checkpoint for evaluation
         predictor = MultiModalPredictor.load(args.ckpt_path)
