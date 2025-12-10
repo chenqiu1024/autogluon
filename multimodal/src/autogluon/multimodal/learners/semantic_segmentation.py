@@ -785,6 +785,7 @@ class SemanticSegmentationLearner(BaseLearner):
         threshold: float = 0.5,
         min_area_ratio: float = 0.001,
         use_morphology: bool = False,
+        resize_method: str = "bilinear",
         cache_dir: Optional[str] = None,
         resume_from_cache: bool = True,
     ):
@@ -813,6 +814,9 @@ class SemanticSegmentationLearner(BaseLearner):
             Remove connected components with area < min_area_ratio * image_area.
         use_morphology : bool
             Whether to apply morphological closing for smoothing.
+        resize_method : str
+            Resize interpolation method: "bilinear" or "bicubic".
+            Recommended: "bilinear" for speed, "bicubic" for quality.
         cache_dir : Optional[str]
             Directory to cache TTA predictions for resume (default: None, no caching).
             Useful for long-running evaluations that might be interrupted.
@@ -829,7 +833,8 @@ class SemanticSegmentationLearner(BaseLearner):
         ...     scales=[0.75, 1.0, 1.25],
         ...     flips=["none", "horizontal"],
         ...     rotations=[-10, 0, 10],
-        ...     fusion_method="weighted_mean"
+        ...     fusion_method="weighted_mean",
+        ...     resize_method="bicubic"
         ... )
         """
         self._tta_predictor = TTAPredictor(
@@ -841,6 +846,7 @@ class SemanticSegmentationLearner(BaseLearner):
             threshold=threshold,
             min_area_ratio=min_area_ratio,
             use_morphology=use_morphology,
+            resize_method=resize_method,
         )
         
         # Store cache configuration

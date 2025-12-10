@@ -45,9 +45,26 @@ class TTATransform:
 class ScaleTransform(TTATransform):
     """Multi-scale transformation."""
     
-    def __init__(self, scale: float):
+    def __init__(self, scale: float, resize_method: str = "bilinear"):
+        """
+        Parameters
+        ----------
+        scale : float
+            Scale factor for resizing
+        resize_method : str
+            Resize interpolation method: "bilinear" or "bicubic"
+        """
         super().__init__()
         self.scale = scale
+        self.resize_method = resize_method.lower()
+        
+        # Map resize method to PIL constant
+        if self.resize_method == "bilinear":
+            self.pil_resample = Image.BILINEAR
+        elif self.resize_method == "bicubic":
+            self.pil_resample = Image.BICUBIC
+        else:
+            raise ValueError(f"Unknown resize_method: {resize_method}. Use 'bilinear' or 'bicubic'")
     
     def apply(self, image: np.ndarray) -> np.ndarray:
         """Scale image using PIL (memory efficient)."""
@@ -77,8 +94,8 @@ class ScaleTransform(TTATransform):
                 image_uint8 = image
             pil_img = Image.fromarray(image_uint8)
         
-        # Resize
-        scaled_pil = pil_img.resize((new_w, new_h), Image.BILINEAR)
+        # Resize with specified method
+        scaled_pil = pil_img.resize((new_w, new_h), self.pil_resample)
         scaled = np.array(scaled_pil).copy()  # Explicit copy
         
         # Explicitly close PIL images to free memory IMMEDIATELY
@@ -105,7 +122,7 @@ class ScaleTransform(TTATransform):
             # Scale to 0-255 range for PIL
             mask_uint8 = (mask * 255).astype(np.uint8) if mask.max() <= 1.0 else mask.astype(np.uint8)
             mask_pil = Image.fromarray(mask_uint8, mode='L')
-            resized_pil = mask_pil.resize((new_w, new_h), Image.BILINEAR)
+            resized_pil = mask_pil.resize((new_w, new_h), self.pil_resample)
             resized = np.array(resized_pil).astype(np.float32).copy()
             
             # Close PIL images IMMEDIATELY
@@ -123,7 +140,7 @@ class ScaleTransform(TTATransform):
                 mask_ch = mask[i]
                 mask_uint8 = (mask_ch * 255).astype(np.uint8) if mask_ch.max() <= 1.0 else mask_ch.astype(np.uint8)
                 mask_pil = Image.fromarray(mask_uint8, mode='L')
-                resized_pil = mask_pil.resize((new_w, new_h), Image.BILINEAR)
+                resized_pil = mask_pil.resize((new_w, new_h), self.pil_resample)
                 resized[i] = np.array(resized_pil).astype(np.float32)
                 
                 # Close PIL images IMMEDIATELY
@@ -306,6 +323,7 @@ class TTAPredictor:
         threshold: float = 0.5,
         min_area_ratio: float = 0.001,
         use_morphology: bool = False,
+        resize_method: str = "bilinear",
     ):
         """
         Parameters
@@ -330,6 +348,9 @@ class TTAPredictor:
             Remove connected components with area < min_area_ratio * image_area.
         use_morphology : bool
             Whether to apply morphological closing for smoothing.
+        resize_method : str
+            Resize interpolation method: "bilinear" or "bicubic".
+            Recommended: "bilinear" for speed, "bicubic" for quality.
         """
         self.scales = scales
         self.flips = flips
@@ -338,6 +359,7 @@ class TTAPredictor:
         self.threshold = threshold
         self.min_area_ratio = min_area_ratio
         self.use_morphology = use_morphology
+        self.resize_method = resize_method
         
         # Setup scale weights
         if scale_weights is None and fusion_method == "weighted_mean":
@@ -368,7 +390,7 @@ class TTAPredictor:
                 for rotate in self.rotations:
                     # Create composed transform
                     t = ComposedTransform([
-                        ScaleTransform(scale),
+                        ScaleTransform(scale, resize_method=self.resize_method),
                         FlipTransform(flip),
                         RotateTransform(rotate),
                     ])

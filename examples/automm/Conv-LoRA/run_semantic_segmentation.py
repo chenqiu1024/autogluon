@@ -79,14 +79,19 @@ if __name__ == "__main__":
     # TTA (Test-Time Augmentation) parameters
     parser.add_argument("--tta_enable", action="store_true", help="Enable Test-Time Augmentation for evaluation")
     parser.add_argument("--tta_scales", type=float, nargs="+", default=[0.75, 1.0, 1.25], 
-                        help="Scale factors for multi-scale TTA (default: [0.75, 1.0, 1.25])")
+                        help="Scale factors for multi-scale TTA (default: [0.75, 1.0, 1.25]). "
+                             "Recommended: [0.75, 1.0, 1.25] or [0.8, 1.0, 1.2]")
     parser.add_argument("--tta_flips", type=str, nargs="+", default=["none", "horizontal"],
                         choices=["none", "horizontal", "vertical"],
                         help="Flip types for TTA (default: ['none', 'horizontal'])")
     parser.add_argument("--tta_rotations", type=float, nargs="+", default=[0],
-                        help="Rotation angles in degrees for TTA (default: [0])")
+                        help="Rotation angles in degrees for TTA (default: [0]). "
+                             "Recommended: [0] for fast, or [-10, 0, 10] for better")
     parser.add_argument("--tta_fusion", type=str, default="mean", choices=["mean", "weighted_mean"],
                         help="Fusion method for TTA predictions (default: 'mean')")
+    parser.add_argument("--tta_resize_method", type=str, default="bilinear", choices=["bilinear", "bicubic"],
+                        help="Resize interpolation method for multi-scale TTA (default: 'bilinear'). "
+                             "bilinear: faster, bicubic: higher quality")
     parser.add_argument("--tta_threshold", type=float, default=0.5,
                         help="Threshold for binary segmentation in TTA (default: 0.5)")
     parser.add_argument("--tta_min_area", type=float, default=0.001,
@@ -175,6 +180,7 @@ if __name__ == "__main__":
         print(f"  Flips: {args.tta_flips}")
         print(f"  Rotations: {args.tta_rotations}")
         print(f"  Fusion: {args.tta_fusion}")
+        print(f"  Resize method: {args.tta_resize_method}")
         print(f"  Total augmentations: {len(args.tta_scales) * len(args.tta_flips) * len(args.tta_rotations)}")
         print(f"{'='*60}\n")
         
@@ -183,6 +189,7 @@ if __name__ == "__main__":
             flips=args.tta_flips,
             rotations=args.tta_rotations,
             fusion_method=args.tta_fusion,
+            resize_method=args.tta_resize_method,
             threshold=args.tta_threshold,
             min_area_ratio=args.tta_min_area,
             use_morphology=args.tta_morphology,
