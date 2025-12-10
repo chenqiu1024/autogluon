@@ -45,9 +45,11 @@ class TTATransform:
 class ScaleTransform(TTATransform):
     """Multi-scale transformation."""
     
-    def __init__(self, scale: float):
+    def __init__(self, scale: float, resize_method: str = "bilinear"):
         super().__init__()
         self.scale = scale
+        # PIL resample method, keeps CPU implementation configurable (bilinear/bicubic)
+        self._pil_resample = Image.BICUBIC if resize_method == "bicubic" else Image.BILINEAR
     
     def apply(self, image: np.ndarray) -> np.ndarray:
         """Scale image using PIL (memory efficient)."""
@@ -78,7 +80,7 @@ class ScaleTransform(TTATransform):
             pil_img = Image.fromarray(image_uint8)
         
         # Resize
-        scaled_pil = pil_img.resize((new_w, new_h), Image.BILINEAR)
+        scaled_pil = pil_img.resize((new_w, new_h), self._pil_resample)
         scaled = np.array(scaled_pil).copy()  # Explicit copy
         
         # Explicitly close PIL images to free memory IMMEDIATELY
@@ -105,7 +107,7 @@ class ScaleTransform(TTATransform):
             # Scale to 0-255 range for PIL
             mask_uint8 = (mask * 255).astype(np.uint8) if mask.max() <= 1.0 else mask.astype(np.uint8)
             mask_pil = Image.fromarray(mask_uint8, mode='L')
-            resized_pil = mask_pil.resize((new_w, new_h), Image.BILINEAR)
+            resized_pil = mask_pil.resize((new_w, new_h), self._pil_resample)
             resized = np.array(resized_pil).astype(np.float32).copy()
             
             # Close PIL images IMMEDIATELY
@@ -123,7 +125,7 @@ class ScaleTransform(TTATransform):
                 mask_ch = mask[i]
                 mask_uint8 = (mask_ch * 255).astype(np.uint8) if mask_ch.max() <= 1.0 else mask_ch.astype(np.uint8)
                 mask_pil = Image.fromarray(mask_uint8, mode='L')
-                resized_pil = mask_pil.resize((new_w, new_h), Image.BILINEAR)
+                resized_pil = mask_pil.resize((new_w, new_h), self._pil_resample)
                 resized[i] = np.array(resized_pil).astype(np.float32)
                 
                 # Close PIL images IMMEDIATELY
@@ -306,6 +308,10 @@ class TTAPredictor:
         threshold: float = 0.5,
         min_area_ratio: float = 0.001,
         use_morphology: bool = False,
+        resize_method: str = "bilinear",
+        max_transforms: Optional[int] = None,
+        transform_prob: float = 1.0,
+        random_seed: Optional[int] = None,
     ):
         """
         Parameters
@@ -338,6 +344,10 @@ class TTAPredictor:
         self.threshold = threshold
         self.min_area_ratio = min_area_ratio
         self.use_morphology = use_morphology
+        self.resize_method = resize_method if resize_method in ["bilinear", "bicubic"] else "bilinear"
+        self.max_transforms = max_transforms
+        self.transform_prob = float(transform_prob)
+        self.random_seed = random_seed
         
         # Setup scale weights
         if scale_weights is None and fusion_method == "weighted_mean":
@@ -362,13 +372,18 @@ class TTAPredictor:
     def _generate_transforms(self) -> List[Tuple[ComposedTransform, float]]:
         """Generate all combinations of transforms with their weights."""
         transforms = []
+        rng = np.random.default_rng(self.random_seed) if self.transform_prob < 1.0 or self.max_transforms else None
         
         for scale in self.scales:
             for flip in self.flips:
                 for rotate in self.rotations:
+                    # Randomly drop this transform based on transform_prob (if set)
+                    if self.transform_prob < 1.0 and rng is not None:
+                        if rng.random() > self.transform_prob:
+                            continue
                     # Create composed transform
                     t = ComposedTransform([
-                        ScaleTransform(scale),
+                        ScaleTransform(scale, resize_method=self.resize_method),
                         FlipTransform(flip),
                         RotateTransform(rotate),
                     ])
@@ -380,6 +395,15 @@ class TTAPredictor:
                         weight = 1.0
                     
                     transforms.append((t, weight))
+        
+        # If max_transforms is set, keep the first N (deterministic order)
+        if self.max_transforms is not None and len(transforms) > self.max_transforms:
+            transforms = transforms[: self.max_transforms]
+        
+        # Guarantee at least identity transform
+        if not transforms:
+            identity = ComposedTransform([ScaleTransform(1.0, resize_method=self.resize_method), FlipTransform("none"), RotateTransform(0)])
+            transforms.append((identity, 1.0))
         
         return transforms
     
@@ -439,7 +463,8 @@ class TTAPredictor:
                 if len(pred_original.shape) == 2:
                     pred_uint8 = (pred_original * 255).astype(np.uint8) if pred_original.max() <= 1.0 else pred_original.astype(np.uint8)
                     pred_pil = Image.fromarray(pred_uint8, mode='L')
-                    resized_pil = pred_pil.resize((original_shape[1], original_shape[0]), Image.BILINEAR)
+                    pil_resample = Image.BICUBIC if self.resize_method == "bicubic" else Image.BILINEAR
+                    resized_pil = pred_pil.resize((original_shape[1], original_shape[0]), pil_resample)
                     pred_resized = np.array(resized_pil).astype(np.float32).copy()
                     
                     # Close immediately
@@ -456,7 +481,8 @@ class TTAPredictor:
                         pred_ch = pred_original[i]
                         pred_uint8 = (pred_ch * 255).astype(np.uint8) if pred_ch.max() <= 1.0 else pred_ch.astype(np.uint8)
                         pred_pil = Image.fromarray(pred_uint8, mode='L')
-                        resized_pil = pred_pil.resize((original_shape[1], original_shape[0]), Image.BILINEAR)
+                        pil_resample = Image.BICUBIC if self.resize_method == "bicubic" else Image.BILINEAR
+                        resized_pil = pred_pil.resize((original_shape[1], original_shape[0]), pil_resample)
                         resized[i] = np.array(resized_pil).astype(np.float32)
                         
                         # Close immediately

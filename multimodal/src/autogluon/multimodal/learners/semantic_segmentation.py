@@ -787,6 +787,10 @@ class SemanticSegmentationLearner(BaseLearner):
         use_morphology: bool = False,
         cache_dir: Optional[str] = None,
         resume_from_cache: bool = True,
+        resize_method: str = "bilinear",
+        max_transforms: Optional[int] = None,
+        transform_prob: float = 1.0,
+        random_seed: Optional[int] = None,
     ):
         """
         Enable Test-Time Augmentation (TTA) for inference.
@@ -841,6 +845,10 @@ class SemanticSegmentationLearner(BaseLearner):
             threshold=threshold,
             min_area_ratio=min_area_ratio,
             use_morphology=use_morphology,
+            resize_method=resize_method,
+            max_transforms=max_transforms,
+            transform_prob=transform_prob,
+            random_seed=random_seed,
         )
         
         # Store cache configuration

@@ -1003,6 +1003,10 @@ class MultiModalPredictor:
         use_morphology: bool = False,
         cache_dir: Optional[str] = None,
         resume_from_cache: bool = True,
+        resize_method: str = "bilinear",
+        max_transforms: Optional[int] = None,
+        transform_prob: float = 1.0,
+        random_seed: Optional[int] = None,
     ):
         """
         Enable Test-Time Augmentation (TTA) for inference.
@@ -1084,6 +1088,10 @@ class MultiModalPredictor:
             use_morphology=use_morphology,
             cache_dir=cache_dir,
             resume_from_cache=resume_from_cache,
+            resize_method=resize_method,
+            max_transforms=max_transforms,
+            transform_prob=transform_prob,
+            random_seed=random_seed,
         )
     
     def disable_tta(self):

@@ -87,6 +87,21 @@ if __name__ == "__main__":
                         help="Rotation angles in degrees for TTA (default: [0])")
     parser.add_argument("--tta_fusion", type=str, default="mean", choices=["mean", "weighted_mean"],
                         help="Fusion method for TTA predictions (default: 'mean')")
+    parser.add_argument("--tta_scale_ratios", type=float, nargs="+", default=None,
+                        help="Alias for --tta_scales when tuning multi-scale ratios (overrides tta_scales if set)")
+    parser.add_argument("--tta_resize_method", type=str, default="bilinear", choices=["bilinear", "bicubic"],
+                        help="Resize method for TTA scaling / inverse transforms (default: bilinear)")
+    parser.add_argument("--tta_augment_types", type=str, nargs="+", default=None,
+                        choices=["horizontal_flip", "vertical_flip", "rotate", "none"],
+                        help="TTA augment types for consistency experiments; if set, overrides flips/rotations defaults")
+    parser.add_argument("--tta_num_aug", type=int, default=None,
+                        help="Max number of TTA augmentations to keep (after prob filtering)")
+    parser.add_argument("--tta_prob", type=float, default=1.0,
+                        help="Keep probability for each TTA transform when building the set (0-1)")
+    parser.add_argument("--tta_multi_scale_weight", type=float, default=None,
+                        help="Weight for non-1.0 scales when using weighted_mean fusion (consistency multi-scale weight)")
+    parser.add_argument("--tta_random_seed", type=int, default=None,
+                        help="Random seed for sampling TTA transforms (defaults to --seed if not set)")
     parser.add_argument("--tta_threshold", type=float, default=0.5,
                         help="Threshold for binary segmentation in TTA (default: 0.5)")
     parser.add_argument("--tta_min_area", type=float, default=0.001,
@@ -169,25 +184,68 @@ if __name__ == "__main__":
 
     # Enable TTA if requested
     if args.tta_enable:
+        # Derive scales/augment set based on consistency hyperparams
+        tta_scales = args.tta_scale_ratios if args.tta_scale_ratios is not None else args.tta_scales
+        tta_flips = list(args.tta_flips)
+        tta_rotations = list(args.tta_rotations)
+        
+        if args.tta_augment_types:
+            # Build flips from augment types; always keep "none" to include identity
+            flips = ["none"]
+            if "horizontal_flip" in args.tta_augment_types:
+                flips.append("horizontal")
+            if "vertical_flip" in args.tta_augment_types:
+                flips.append("vertical")
+            # Remove duplicates while preserving order
+            tta_flips = list(dict.fromkeys(flips))
+            
+            if "rotate" not in args.tta_augment_types:
+                tta_rotations = [0]
+            elif tta_rotations == [0]:
+                # Default small-angle rotations if user wants rotate but didn't specify angles
+                tta_rotations = [-10.0, 0.0, 10.0]
+        
+        # Multi-scale fusion weights (consistency-style)
+        scale_weights = None
+        fusion_method = args.tta_fusion
+        if args.tta_multi_scale_weight is not None:
+            fusion_method = "weighted_mean"
+            scale_weights = {s: (1.0 if s == 1.0 else args.tta_multi_scale_weight) for s in tta_scales}
+        
+        tta_seed = args.tta_random_seed if args.tta_random_seed is not None else args.seed
+        
         print(f"\n{'='*60}")
         print(f"Enabling Test-Time Augmentation (TTA)")
-        print(f"  Scales: {args.tta_scales}")
-        print(f"  Flips: {args.tta_flips}")
-        print(f"  Rotations: {args.tta_rotations}")
-        print(f"  Fusion: {args.tta_fusion}")
-        print(f"  Total augmentations: {len(args.tta_scales) * len(args.tta_flips) * len(args.tta_rotations)}")
+        print(f"  Scales: {tta_scales}")
+        print(f"  Flips: {tta_flips}")
+        print(f"  Rotations: {tta_rotations}")
+        print(f"  Fusion: {fusion_method}")
+        if args.tta_multi_scale_weight is not None:
+            print(f"  Multi-scale weight (non-1.0 scales): {args.tta_multi_scale_weight}")
+        if args.tta_num_aug:
+            print(f"  Max aug count: {args.tta_num_aug}")
+        if args.tta_prob < 1.0:
+            print(f"  Transform keep prob: {args.tta_prob} (seed={tta_seed})")
+        print(f"  Resize: {args.tta_resize_method}")
+        total_aug = len(tta_scales) * len(tta_flips) * len(tta_rotations)
+        print(f"  Total augmentations (before sampling): {total_aug}")
         print(f"{'='*60}\n")
         
         predictor.enable_tta(
-            scales=args.tta_scales,
-            flips=args.tta_flips,
-            rotations=args.tta_rotations,
-            fusion_method=args.tta_fusion,
+            scales=tta_scales,
+            flips=tta_flips,
+            rotations=tta_rotations,
+            fusion_method=fusion_method,
+            scale_weights=scale_weights,
             threshold=args.tta_threshold,
             min_area_ratio=args.tta_min_area,
             use_morphology=args.tta_morphology,
             cache_dir=args.tta_cache_dir,
             resume_from_cache=not args.tta_no_resume,
+            resize_method=args.tta_resize_method,
+            max_transforms=args.tta_num_aug,
+            transform_prob=args.tta_prob,
+            random_seed=tta_seed,
         )
 
     # evaluation
