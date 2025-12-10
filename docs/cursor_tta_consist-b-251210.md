@@ -1,5 +1,5 @@
 # 实现TTA超参调优并记录
-_Exported on 12/10/2025 at 01:01:30 PST from Cursor (2.1.50)_
+_Exported on 12/10/2025 at 01:23:54 PST from Cursor (2.1.50)_
 
 ---
 
@@ -2932,4 +2932,153 @@ bash experiments_tta_tuning.sh all
 ```shellscript
 python analyze_tta_results.py --results_dir outputs
 ```
+
+---
+
+**User**
+
+图中所说的TTA和Multi-scale是两件事吗？有什么区别和联系？
+
+---
+
+**Cursor**
+
+### 先给个结论
+
+- **严格说：TTA 是一个大概念，Multi‑scale 是 TTA 里的一个“子类”/特例**。  
+- **在你截图和 `cursor_tta-251204.md` 的语境里**，作者为了方便调参，把它们拆成了两个“方向”：  
+  - **TTA 方向**：侧重“变形种类”的组合（翻转、旋转等）。  
+  - **Multi‑scale 方向**：侧重“尺度”这个维度（不同缩放倍率、缩放方式、权重）。
+
+所以不是两套毫不相关的东西，而是：**同一套“多视角一致性”思想下的两个维度**。
+
+---
+
+### 一、TTA 是什么？
+
+在那份文档里（以及你现在的实现中）：
+
+- **TTA（Test‑Time Augmentation）**：  
+  在**推理 / 测试阶段**，对**同一张图像**做多种增强 → 得到多次预测 → 再把这些预测融合成一个更稳、更鲁棒的结果。
+
+典型的 TTA 操作包括：
+
+- 几何增强：**水平翻转、垂直翻转、旋转 ±10°** 等  
+- 尺度变化：**缩放到不同分辨率**（这就是 Multi‑scale 的来源）  
+- 有时还会包括轻量的颜色 / 对比度变化（在医学场景一般较少用）
+
+在你的截图里，**TTA 方向超参**主要包括：
+
+- **`TTA_augment_types`**：有哪些变换（horizontal_flip / vertical_flip / rotate）  
+- **`TTA_steps / num_aug`**：总共做多少个增强版本（2~4）  
+- **`TTA_prob`**：对某个样本，是否启用增强的随机概率（0.5~1.0）
+
+> 换句话说：**TTA 关心的是「做几次」、「每次变成什么样」这两个问题**。
+
+---
+
+### 二、Multi‑scale 是什么？
+
+**Multi‑scale** 更具体：只关注“**尺度**”这个维度。
+
+- 做法：把同一张图像缩放到不同大小（比如 0.75×、1.0×、1.25×），在每个尺度上跑模型，再把这些尺度上的结果融合。
+- 动机：目标在不同尺度上的可见性、纹理细节不一样，多尺度预测可以让边界更稳，兼顾整体结构和细节。
+
+在截图里的 **Multi‑scale 方向超参**：
+
+- **`scale_ratios`**：比如 `[0.75, 1.0, 1.25]` 或 `[0.8, 1.0, 1.2]`  
+- **`resize_method`**：bilinear / bicubic 缩放方法  
+- **`multi_scale_weight`**：训练时 Multi‑scale Consistency Loss 的权重（0.1~0.2）
+
+> 换句话说：**Multi‑scale 只改变“放大/缩小多少”，其本质上是 TTA 中“缩放”这一种类型的变换，被单独拿出来重点调参。**
+
+---
+
+### 三、两者的区别
+
+可以从几个维度来看：
+
+1. **概念范围**
+   - **TTA**：大集合，包含各种增强：翻转、旋转、缩放、（有时）颜色扰动等。
+   - **Multi‑scale**：TTA 的一个特定子集：**只做“缩放”这一种几何变换**。
+
+2. **关注的维度**
+   - TTA 方向超参：  
+     - **“做几次、多复杂”**（num_aug / augment_types / prob）
+   - Multi‑scale 方向超参：  
+     - **“每次缩放到多大、用什么插值、在 loss 里权重多少”**（scale_ratios / resize_method / multi_scale_weight）
+
+3. **在你的实现里（当前代码）**
+   - `--tta_flips` / `--tta_rotations`：属于 **TTA 非 multi‑scale 部分**  
+   - `--tta_scales` + `--tta_resize_method`：属于 **TTA 里的 Multi‑scale**  
+   - `multi_scale_weight`：是**训练阶段**的 consistency loss 权重，不直接影响你现在写的测试时 TTA 代码，但思想是一样的——让不同尺度上的预测保持一致。
+
+---
+
+### 四、两者的联系（为什么文档写成“TTA / multi‑scale Consistency”）
+
+**联系的本质：都是“同一张图像的多视角一致性”**：
+
+- TTA：  
+  - 同一张图，通过不同“变换组合”（flip / rotate / scale...）  
+  - 模型在这些视角下应该给出一致的语义预测  
+  - 在测试时，通过平均或加权融合这些预测，提高鲁棒性
+  
+- Multi‑scale Consistency（训练时）：  
+  - 同一张图，在多个尺度上跑模型  
+  - 用 consistency loss（例如 KL、MSE、Dice/Iou 之间的差）  
+  - 强迫模型在不同尺度预测一致，使得模型**对尺度不敏感**
+
+所以文档中才写：
+
+> 针对 Consistency loss (TTA / multi‑scale)，只调 TTA / multi‑scale 方向的超参数
+
+意思就是：**不去动模型 backbone/optimizer 这些大结构，只沿着「多视角一致性」的两个轴线（TTA & Multi‑scale）做小范围调参**。
+
+---
+
+### 五、怎么在心里记住这俩的关系？
+
+可以用一个简单的图式来记：
+
+- **大圈：TTA（所有测试时增强）**
+  - 子圈：**Multi‑scale TTA（只改变尺度）**
+  - 子圈：Flip TTA（翻转）
+  - 子圈：Rotation TTA（旋转）
+  - …
+
+而在你这份方案里：
+
+- 把“**flip/rotate 这些通用 TTA**”当成 **TTA 方向**
+- 把“**只关注缩放的 multi‑scale**”当成 **Multi‑scale 方向**
+- 两个方向合在一起，构成一整套“Consistency Loss (TTA/multi‑scale)” 思路。
+
+---
+
+如果你愿意，我可以下一步帮你：  
+- 把**“只用 Multi‑scale 的 TTA 实验”**和**“只用翻转/旋转的 TTA 实验”**在命令行层面分组给你一套更清晰的对比方案，方便你直接跑实验看差异。
+
+---
+
+**User**
+
+是的，请把两者从实验执行上分开
+
+---
+
+**Cursor**
+
+已把实验执行维度拆分为「Multi‑scale ONLY」和「TTA（翻转/旋转）ONLY」，并在快速模式中也分别给出。主要改动：
+
+- `examples/automm/Conv-LoRA/experiments_tta_tuning.sh`
+  - 阶段 1：Multi‑scale ONLY（flips=none, rot=0），输出前缀 `exp_ms_...`
+  - 阶段 2：TTA Aug ONLY（scale=1.0，翻转/旋转），输出 `exp_2_flip_* / exp_2_rot_*`
+  - 快速模式：A=Multi‑scale ONLY、B=TTA ONLY、C=Combined
+
+执行示例（分离实验）：
+- Multi‑scale ONLY：`bash experiments_tta_tuning.sh 1`
+- TTA ONLY：`bash experiments_tta_tuning.sh 2`
+- 快速对比：`bash experiments_tta_tuning.sh quick`
+
+如果要同时跑完整流程（含后处理/组合）：`bash experiments_tta_tuning.sh all`。
 
