@@ -170,6 +170,26 @@ if __name__ == "__main__":
             hyperparameters=hyperparameters,
             label="label",
         )
+
+        # 打印当前实验的模型保存目录，便于后续通过 AutogluonModels 路径追溯到具体实验日志
+        try:
+            # MultiModalPredictor 会在内部根据时间戳生成类似 AutogluonModels/ag-YYYYMMDD_HHMMSS 的目录
+            model_path = predictor.path
+        except AttributeError:
+            # 兼容极端情况：如果未来接口变化，没有 path 属性，则显式提示
+            model_path = None
+
+        if model_path is not None:
+            print("\n========================================")
+            print("Training MultiModalPredictor")
+            print(f"  Task        : {dataset_name}")
+            print(f"  Save path   : {model_path}")
+            print("  (You can use this directory name to link back to the training log.)")
+            print("========================================\n")
+        else:
+            print("\n[Warning] MultiModalPredictor has no 'path' attribute. "
+                  "Model save directory cannot be printed.\n")
+
         predictor.fit(train_data=train_df, tuning_data=val_df, seed=args.seed)
 
     # Enable TTA if requested
