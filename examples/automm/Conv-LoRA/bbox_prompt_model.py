@@ -156,7 +156,16 @@ class BBoxRegressor(nn.Module):
 
     def __init__(self, pretrained: bool = True, dropout: float = 0.1):
         super().__init__()
-        backbone = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1 if pretrained else None)
+        weights = None
+        if pretrained:
+            try:
+                weights = models.ResNet18_Weights.IMAGENET1K_V1
+            except Exception as e:
+                # Fallback when weight download/check_hash fails (offline / mirror issue)
+                print(f"[Warning] Failed to load ResNet18 pretrained weights ({e}); using random init.")
+                weights = None
+
+        backbone = models.resnet18(weights=weights)
         in_features = backbone.fc.in_features
         backbone.fc = nn.Identity()
         self.backbone = backbone
