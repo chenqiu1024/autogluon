@@ -1,9 +1,12 @@
 import argparse
 import os
 
+import numpy as np
 import pandas as pd
+import torch
 
 from autogluon.multimodal import MultiModalPredictor
+from bbox_prompt_model import BBoxPromptPredictor
 
 
 def get_default_training_setting(dataset_name):
@@ -105,6 +108,16 @@ if __name__ == "__main__":
     parser.add_argument("--tta_box_prompt_mode", type=str, default="off",
                         choices=["off", "add", "replace"],
                         help="Use GT box as SAM box prompt (off/add/replace); box not transformed with TTA")
+    # BBox prompt configuration
+    parser.add_argument("--bbox_prompt_source", type=str, default="none",
+                        choices=["none", "gt", "predict"],
+                        help="Box prompt source: none (no prompt), gt (from mask), predict (from bbox model).")
+    parser.add_argument("--bbox_model_ckpt", type=str, default=None,
+                        help="Checkpoint for bbox predictor when bbox_prompt_source=predict.")
+    parser.add_argument("--bbox_model_image_size", type=int, default=320,
+                        help="Input size for bbox predictor inference.")
+    parser.add_argument("--bbox_preds_csv", type=str, default=None,
+                        help="Optional CSV with columns image,bbox_x1,bbox_y1,bbox_x2,bbox_y2 to attach prompts.")
     
     # Quick test / Debug parameters
     parser.add_argument("--debug", action="store_true",
@@ -221,6 +234,52 @@ if __name__ == "__main__":
             box_prompt_mode=args.tta_box_prompt_mode,
         )
 
+    # Optional bbox predictor for predicted box prompts
+    bbox_predictor = None
+    if args.bbox_prompt_source == "predict":
+        if not args.bbox_model_ckpt and not args.bbox_preds_csv:
+            raise ValueError("bbox_prompt_source=predict requires --bbox_model_ckpt or --bbox_preds_csv.")
+        if args.bbox_model_ckpt:
+            bbox_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            bbox_predictor = BBoxPromptPredictor(
+                ckpt_path=args.bbox_model_ckpt,
+                device=bbox_device,
+                image_size=args.bbox_model_image_size,
+            )
+        if args.tta_box_prompt_mode == "off":
+            print("[Warning] bbox_prompt_source=predict set but tta_box_prompt_mode=off; box prompts will be ignored.")
+
+    def attach_pred_boxes(df: pd.DataFrame) -> pd.DataFrame:
+        """Attach predicted or precomputed boxes to dataframe."""
+        df = df.copy()
+        if args.bbox_preds_csv:
+            preds = pd.read_csv(args.bbox_preds_csv)
+            merged = df.merge(preds, on="image", how="left")
+            if merged[["bbox_x1", "bbox_y1", "bbox_x2", "bbox_y2"]].isna().all().all():
+                preds["image_basename"] = preds["image"].apply(lambda p: os.path.basename(p))
+                merged["image_basename"] = merged["image"].apply(lambda p: os.path.basename(p))
+                merged = merged.merge(
+                    preds.drop(columns=["image"]), on="image_basename", how="left", suffixes=("", "_pred")
+                )
+                merged.drop(columns=["image_basename"], inplace=True)
+                for col in ["bbox_x1", "bbox_y1", "bbox_x2", "bbox_y2"]:
+                    pred_col = f"{col}_pred"
+                    if pred_col in merged.columns:
+                        merged[col] = merged[col].fillna(merged[pred_col])
+                        merged.drop(columns=[pred_col], inplace=True)
+            df = merged
+        elif bbox_predictor is not None:
+            boxes = []
+            for _, r in df.iterrows():
+                box = bbox_predictor.predict(r["image"])
+                boxes.append(box)
+            boxes = np.stack(boxes, axis=0)
+            df["bbox_x1"] = boxes[:, 0]
+            df["bbox_y1"] = boxes[:, 1]
+            df["bbox_x2"] = boxes[:, 2]
+            df["bbox_y2"] = boxes[:, 3]
+        return df
+
     # evaluation
     metric_file = os.path.join(args.output_dir, "metrics.txt")
     f = open(metric_file, "a")
@@ -240,6 +299,10 @@ if __name__ == "__main__":
             eval_metrics = ["ber"]
         else:
             eval_metrics = ["iou", "dice"]  # Evaluate both IoU and DICE
+
+        # Attach predicted bbox prompts if requested
+        if args.bbox_prompt_source == "predict" and (args.bbox_preds_csv or bbox_predictor):
+            test_df = attach_pred_boxes(test_df)
 
         res = predictor.evaluate(test_df, metrics=eval_metrics)
         print(f"Evaluation results for test dataset {dataset_name}: ", res)
@@ -263,6 +326,9 @@ if __name__ == "__main__":
                 test_df = test_df.head(args.quick_test)
                 print(f"\n🔍 QUICK TEST MODE: Processing only first {args.quick_test} images (out of {original_size}) for {per_dataset}\n")
             
+            if args.bbox_prompt_source == "predict" and (args.bbox_preds_csv or bbox_predictor):
+                test_df = attach_pred_boxes(test_df)
+
             res = predictor.evaluate(test_df, metrics=["sm", "fm", "em", "mae"])
             print(f"Evaluation results for test dataset {per_dataset}: ", res)
             f.write(f"Evaluation results for test dataset {per_dataset}: {res} \n")

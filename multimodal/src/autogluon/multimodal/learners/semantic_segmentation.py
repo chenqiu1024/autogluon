@@ -580,6 +580,12 @@ class SemanticSegmentationLearner(BaseLearner):
                 if xs.size > 0 and ys.size > 0:
                     gt_box = np.array([xs.min(), ys.min(), xs.max(), ys.max()], dtype=np.float32)
 
+            # If predicted boxes are provided in DataFrame, override gt_box
+            if {"bbox_x1", "bbox_y1", "bbox_x2", "bbox_y2"}.issubset(row.index):
+                vals = [row["bbox_x1"], row["bbox_y1"], row["bbox_x2"], row["bbox_y2"]]
+                if not any([v is None or (isinstance(v, float) and np.isnan(v)) for v in vals]):
+                    gt_box = np.array(vals, dtype=np.float32)
+
             # Predict with TTA
             if self._output_shape == 1:
                 # Binary segmentation
