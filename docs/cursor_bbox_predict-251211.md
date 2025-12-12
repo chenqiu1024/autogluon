@@ -1,5 +1,5 @@
 # 理解实验建议并讨论
-_Exported on 12/11/2025 at 23:19:10 PST from Cursor (2.2.17)_
+_Exported on 12/12/2025 at 00:31:08 PST from Cursor (2.2.17)_
 
 ---
 
@@ -211,4 +211,193 @@ To-do's from the plan have already been created. Do not create them again. Mark 
 
 测试：
 - 未实际跑训练/评估，需按上述命令自行验证。
+
+---
+
+**User**
+
+训练时发生错误。节选最后的日志如下：53%|█████▎    | 23.8M/44.7M [23:25<57:54, 6.31kB/s]
+ 53%|█████▎    | 23.8M/44.7M [23:40<57:54, 6.31kB/s]
+ 53%|█████▎    | 23.9M/44.7M [24:46<1:46:57, 3.40kB/s]
+ 53%|█████▎    | 23.9M/44.7M [25:00<1:46:57, 3.40kB/s]
+ 54%|█████▎    | 24.0M/44.7M [29:02<5:23:54, 1.12kB/s]
+ 54%|█████▎    | 24.0M/44.7M [29:02<25:06, 14.4kB/s]  
+Traceback (most recent call last):
+  File "/root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA/run_bbox_predictor.py", line 207, in <module>
+    main()
+  File "/root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA/run_bbox_predictor.py", line 117, in main
+    model = BBoxRegressor(pretrained=args.pretrained_backbone).to(device)
+  File "/root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA/bbox_prompt_model.py", line 159, in __init__
+    backbone = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1 if pretrained else None)
+  File "/root/autodl-tmp/envs/conv-lora/lib/python3.10/site-packages/torchvision/models/_utils.py", line 142, in wrapper
+    return fn(*args, **kwargs)
+  File "/root/autodl-tmp/envs/conv-lora/lib/python3.10/site-packages/torchvision/models/_utils.py", line 228, in inner_wrapper
+    return builder(*args, **kwargs)
+  File "/root/autodl-tmp/envs/conv-lora/lib/python3.10/site-packages/torchvision/models/resnet.py", line 705, in resnet18
+    return _resnet(BasicBlock, [2, 2, 2, 2], weights, progress, **kwargs)
+  File "/root/autodl-tmp/envs/conv-lora/lib/python3.10/site-packages/torchvision/models/resnet.py", line 301, in _resnet
+    model.load_state_dict(weights.get_state_dict(progress=progress, check_hash=True))
+  File "/root/autodl-tmp/envs/conv-lora/lib/python3.10/site-packages/torchvision/models/_api.py", line 91, in get_state_dict
+    return load_state_dict_from_url(self.url, *args, **kwargs)
+  File "/root/autodl-tmp/envs/conv-lora/lib/python3.10/site-packages/torch/hub.py", line 876, in load_state_dict_from_url
+    download_url_to_file(url, cached_file, hash_prefix, progress=progress)
+  File "/root/autodl-tmp/envs/conv-lora/lib/python3.10/site-packages/torch/hub.py", line 765, in download_url_to_file
+    raise RuntimeError(
+RuntimeError: invalid hash value (expected "f37072fd", got "4423d4b3954480fe4eaa24aecded3f69266d0ce66d3e19c90e887f58ebe40548")53%|█████▎    | 23.8M/44.7M [23:25<57:54, 6.31kB/s]
+ 53%|█████▎    | 23.8M/44.7M [23:40<57:54, 6.31kB/s]
+ 53%|█████▎    | 23.9M/44.7M [24:46<1:46:57, 3.40kB/s]
+ 53%|█████▎    | 23.9M/44.7M [25:00<1:46:57, 3.40kB/s]
+ 54%|█████▎    | 24.0M/44.7M [29:02<5:23:54, 1.12kB/s]
+ 54%|█████▎    | 24.0M/44.7M [29:02<25:06, 14.4kB/s]  
+Traceback (most recent call last):
+  File "/root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA/run_bbox_predictor.py", line 207, in <module>
+    main()
+  File "/root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA/run_bbox_predictor.py", line 117, in main
+    model = BBoxRegressor(pretrained=args.pretrained_backbone).to(device)
+  File "/root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA/bbox_prompt_model.py", line 159, in __init__
+    backbone = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1 if pretrained else None)
+  File "/root/autodl-tmp/envs/conv-lora/lib/python3.10/site-packages/torchvision/models/_utils.py", line 142, in wrapper
+    return fn(*args, **kwargs)
+  File "/root/autodl-tmp/envs/conv-lora/lib/python3.10/site-packages/torchvision/models/_utils.py", line 228, in inner_wrapper
+    return builder(*args, **kwargs)
+  File "/root/autodl-tmp/envs/conv-lora/lib/python3.10/site-packages/torchvision/models/resnet.py", line 705, in resnet18
+    return _resnet(BasicBlock, [2, 2, 2, 2], weights, progress, **kwargs)
+  File "/root/autodl-tmp/envs/conv-lora/lib/python3.10/site-packages/torchvision/models/resnet.py", line 301, in _resnet
+    model.load_state_dict(weights.get_state_dict(progress=progress, check_hash=True))
+  File "/root/autodl-tmp/envs/conv-lora/lib/python3.10/site-packages/torchvision/models/_api.py", line 91, in get_state_dict
+    return load_state_dict_from_url(self.url, *args, **kwargs)
+  File "/root/autodl-tmp/envs/conv-lora/lib/python3.10/site-packages/torch/hub.py", line 876, in load_state_dict_from_url
+    download_url_to_file(url, cached_file, hash_prefix, progress=progress)
+  File "/root/autodl-tmp/envs/conv-lora/lib/python3.10/site-packages/torch/hub.py", line 765, in download_url_to_file
+    raise RuntimeError(
+RuntimeError: invalid hash value (expected "f37072fd", got "4423d4b3954480fe4eaa24aecded3f69266d0ce66d3e19c90e887f58ebe40548")
+
+---
+
+**Cursor**
+
+问题原因：下载 ResNet18 预训练权重时校验哈希失败（常见于网络/镜像不稳定），导致 `models.resnet18` 构建失败。
+
+已做修复：
+- 在 `bbox_prompt_model.py` 的 `BBoxRegressor` 中对预训练权重加载加了 try/except，若下载或校验失败自动回退到随机初始化，并打印 Warning，不再因哈希错误崩溃。
+
+可选运行方式：
+- 继续用默认随机初始化（`--pretrained_backbone` 不加）。
+- 若要尝试预训练权重，可重跑命令加 `--pretrained_backbone`；如仍有网络问题，会自动降级到随机初始化，不会中断。
+
+---
+
+**User**
+
+再次跑仍然错：100%|██████████| 44.7M/44.7M [21:15<00:00, 29.1kB/s]
+100%|██████████| 44.7M/44.7M [21:15<00:00, 36.7kB/s]
+Traceback (most recent call last):
+  File "/root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA/run_bbox_predictor.py", line 207, in <module>
+    main()
+  File "/root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA/run_bbox_predictor.py", line 139, in main
+    train_loss = train_one_epoch(model, train_loader, optimizer, device)
+  File "/root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA/bbox_prompt_model.py", line 263, in train_one_epoch
+    for images, bboxes, has_box, _ in loader:
+  File "/root/autodl-tmp/envs/conv-lora/lib/python3.10/site-packages/torch/utils/data/dataloader.py", line 732, in __next__
+    data = self._next_data()
+  File "/root/autodl-tmp/envs/conv-lora/lib/python3.10/site-packages/torch/utils/data/dataloader.py", line 1506, in _next_data
+    return self._process_data(data, worker_id)
+  File "/root/autodl-tmp/envs/conv-lora/lib/python3.10/site-packages/torch/utils/data/dataloader.py", line 1541, in _process_data
+    data.reraise()
+  File "/root/autodl-tmp/envs/conv-lora/lib/python3.10/site-packages/torch/_utils.py", line 769, in reraise
+    raise exception
+RuntimeError: Caught RuntimeError in DataLoader worker process 0.
+Original Traceback (most recent call last):
+  File "/root/autodl-tmp/envs/conv-lora/lib/python3.10/site-packages/torch/utils/data/_utils/worker.py", line 349, in _worker_loop
+    data = fetcher.fetch(index)  # type: ignore[possibly-undefined]
+  File "/root/autodl-tmp/envs/conv-lora/lib/python3.10/site-packages/torch/utils/data/_utils/fetch.py", line 55, in fetch
+    return self.collate_fn(data)
+  File "/root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA/bbox_prompt_model.py", line 226, in collate_fn
+    images = torch.stack([b.image for b in batch], dim=0)
+RuntimeError: stack expects each tensor to be equal size, but got [3, 320, 426] at entry 0 and [3, 320, 481] at entry 1
+
+
+
+---
+
+**Cursor**
+
+报错原因：数据加载后图像尺寸不一致（320×426 和 320×481），`collate_fn` 在 `stack` 时失败。当前 `BBoxDataset._apply_transforms` 用 `TF.resize(img, self.image_size)`，这是“按短边缩放+保持纵横比”，不会变成固定方形，旋转后再缩放仍会保留比例，导致 batch 内尺寸不同。
+
+修复建议（任意一种）：
+1) 最简单：把图像和 mask 都改成固定方形缩放，例如：
+```python
+img = TF.resize(img, (self.image_size, self.image_size), interpolation=transforms.InterpolationMode.BILINEAR)
+mask = TF.resize(mask, (self.image_size, self.image_size), interpolation=transforms.InterpolationMode.NEAREST)
+```
+这样 batch 内尺寸一致，`stack` 不再报错。
+
+2) 如果想保持原比例，可在 `collate_fn` 前做 `pad_to_square`，或在 Dataset 里先 resize 短边，再用 pad/crop 到固定尺寸。但最简方案是直接改成固定方形缩放。
+
+临时绕过（不推荐长期）：在启动命令里加 `--image_size 320` 的同时，先把上述代码改成方形缩放，再重跑；或者把 `num_workers` 设为 0 方便调试。
+
+建议直接修改 `BBoxDataset._apply_transforms` 如方案 1，重跑训练。
+
+```python
+img = TF.resize(img, (self.image_size, self.image_size), interpolation=transforms.InterpolationMode.BILINEAR)
+mask = TF.resize(mask, (self.image_size, self.image_size), interpolation=transforms.InterpolationMode.NEAREST)
+```
+
+---
+
+**User**
+
+改成方形缩放的话不会影响到做分割吗？分割模型会不会因为输入的图像被缩放而造成性能不好？
+
+---
+
+**Cursor**
+
+不会影响分割推理本身：bbox 模型的方形缩放只发生在 bbox 训练/推理的数据管线，预测出的坐标会再按原图尺寸还原（乘以原始 w/h），然后作为 box prompt 喂给 SAM。分割模型仍然吃原图（或其内部预处理尺寸），不会因为 bbox 侧的缩放而直接降性能。
+
+需要注意的是，方形缩放会对 bbox 模型的输入产生形变，可能略微影响 bbox 精度。如果担心形变，可以改用“等比例缩放后补边到方形”（letterbox/pad-to-square），既保证 batch 尺寸一致，又不拉伸图像；输出坐标仍按补边后的尺寸归一化，恢复时去掉 padding 即可。
+
+另外，分割管线里本身也有统一尺寸的预处理（例如 TTA/模型 image_size），所以对 SAM/分割而言这是常规做法，不是新增的额外缩放。
+
+---
+
+**User**
+
+好的，请按方案1实现代码
+
+---
+
+**Cursor**
+
+我目前处于问答模式，不能直接改代码。你可以按方案 1 在 `bbox_prompt_model.py` 的 `BBoxDataset._apply_transforms` 内把 resize 改成固定方形，例如：
+
+```python
+img = TF.resize(img, (self.image_size, self.image_size), interpolation=transforms.InterpolationMode.BILINEAR)
+mask = TF.resize(mask, (self.image_size, self.image_size), interpolation=transforms.InterpolationMode.NEAREST)
+```
+
+这样 batch 内尺寸一致，DataLoader 不再因大小不同报错。如果需要我代为修改，请切回 Agent 模式。
+
+```python
+img = TF.resize(img, (self.image_size, self.image_size), interpolation=transforms.InterpolationMode.BILINEAR)
+mask = TF.resize(mask, (self.image_size, self.image_size), interpolation=transforms.InterpolationMode.NEAREST)
+```
+
+---
+
+**User**
+
+请修改
+
+---
+
+**Cursor**
+
+已按方案 1 将 bbox 数据集的缩放改为固定方形，保证 batch 内尺寸一致：
+
+- 文件：`examples/automm/Conv-LoRA/bbox_prompt_model.py`
+- 位置：`BBoxDataset._apply_transforms`
+- 修改：`TF.resize(img, (image_size, image_size), ...)` 与 mask 同步，避免 DataLoader stack 尺寸不一致错误。
+
+可以重新运行训练脚本验证。
 

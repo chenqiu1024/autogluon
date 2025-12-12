@@ -112,8 +112,17 @@ class BBoxDataset(Dataset):
                 angle = random.uniform(-self.rotation_deg, self.rotation_deg)
                 img = TF.rotate(img, angle, interpolation=transforms.InterpolationMode.BILINEAR)
                 mask = TF.rotate(mask, angle, interpolation=transforms.InterpolationMode.NEAREST)
-        img = TF.resize(img, self.image_size, interpolation=transforms.InterpolationMode.BILINEAR)
-        mask = TF.resize(mask, self.image_size, interpolation=transforms.InterpolationMode.NEAREST)
+        # 固定方形缩放，确保 batch 内尺寸一致，避免 DataLoader stack 报错
+        img = TF.resize(
+            img,
+            (self.image_size, self.image_size),
+            interpolation=transforms.InterpolationMode.BILINEAR,
+        )
+        mask = TF.resize(
+            mask,
+            (self.image_size, self.image_size),
+            interpolation=transforms.InterpolationMode.NEAREST,
+        )
         return img, mask
 
     def __getitem__(self, idx: int) -> BBoxSample:
