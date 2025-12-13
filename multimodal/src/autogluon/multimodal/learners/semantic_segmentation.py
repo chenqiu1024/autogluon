@@ -383,7 +383,11 @@ class SemanticSegmentationLearner(BaseLearner):
             return img_tensor
         
         # Create a prediction function for TTA
-        def predict_fn(image: np.ndarray, box_prompt: Optional[np.ndarray] = None, box_ref_shape: Optional[Tuple[int, int]] = None) -> np.ndarray:
+        def predict_fn(
+            image: np.ndarray,
+            box_prompt: Optional[np.ndarray] = None,
+            box_ref_shape: Optional[Tuple[int, int]] = None,
+        ) -> np.ndarray:
             """
             Prediction function for a single image used by TTA.
             
@@ -415,35 +419,54 @@ class SemanticSegmentationLearner(BaseLearner):
                 box_scaled = np.clip(box_scaled, 0, model.image_size - 1)
                 box_tensor = torch.from_numpy(box_scaled).to(device).unsqueeze(0).unsqueeze(0)  # (1,1,4)
             
-            # Forward pass
-            with torch.no_grad():
+            def forward_prob(optional_box_tensor: Optional[torch.Tensor]) -> np.ndarray:
                 # Create batch dict for model
                 # Need to provide a dummy label for model's forward pass
                 batch = {
-                    model.prefix + '_image': img_tensor,
-                    model.prefix + '_label': torch.zeros((1, model.image_size, model.image_size), 
-                                                         dtype=torch.long, device=device)
+                    model.prefix + "_image": img_tensor,
+                    model.prefix + "_label": torch.zeros(
+                        (1, model.image_size, model.image_size), dtype=torch.long, device=device
+                    ),
                 }
-                if box_tensor is not None and self._tta_box_prompt_mode in ["add", "replace"]:
-                    batch[model.box_key] = box_tensor
+                if optional_box_tensor is not None:
+                    batch[model.box_key] = optional_box_tensor
                 outputs = model(batch)
-                
-                # Extract logits
+
                 logits = outputs[model.prefix][LOGITS]
-                
-                # Convert to probabilities and immediately move to CPU
                 if self._output_shape == 1:
                     # Binary segmentation - remove channel dim
                     prob = torch.sigmoid(logits[0, 0]).cpu().numpy().copy()
                 else:
                     # Multi-class segmentation
                     prob = torch.softmax(logits[0], dim=0).cpu().numpy().copy()
-                
+
                 # Free GPU memory immediately and aggressively
-                del img_tensor, batch, outputs, logits
+                del batch, outputs, logits
+                return prob
+
+            # Forward pass
+            with torch.no_grad():
+                mode = getattr(self, "_tta_box_prompt_mode", "off")
+                if mode == "off" or box_tensor is None:
+                    # No box prompt
+                    prob = forward_prob(None)
+                elif mode == "replace":
+                    # Use only box-prompted prediction
+                    prob = forward_prob(box_tensor)
+                elif mode == "add":
+                    # Fuse base prediction + box-prompted prediction (treat box as an extra inference view)
+                    prob_base = forward_prob(None)
+                    prob_box = forward_prob(box_tensor)
+                    prob = ((prob_base + prob_box) / 2.0).astype(np.float32, copy=False)
+                    del prob_base, prob_box
+                else:
+                    raise ValueError(f"Unknown tta_box_prompt_mode: {mode}")
+
+                # Free GPU memory immediately and aggressively
+                del img_tensor
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()  # Wait for GPU to finish
-            
+
             return prob
         
         # Complete Sanity Check 3: Test TTA on first image

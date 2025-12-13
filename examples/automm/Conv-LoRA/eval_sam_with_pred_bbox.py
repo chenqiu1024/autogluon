@@ -46,15 +46,6 @@ from tqdm import tqdm
 
 from bbox_prompt_model import BBoxPromptPredictor
 
-_orig_torch_load = torch.load
-
-def _safe_torch_load(*args, **kwargs):
-    # 如果调用者没显式传 weights_only，就强制设为 False
-    kwargs.setdefault("weights_only", False)
-    return _orig_torch_load(*args, **kwargs)
-
-torch.load = _safe_torch_load
-
 try:
     from segment_anything import SamPredictor, sam_model_registry
 except ImportError as e:
