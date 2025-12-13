@@ -1,5 +1,5 @@
 # ISIC2017 SAM segmentation with predicted bboxes
-_Exported on 12/13/2025 at 14:38:54 PST from Cursor (2.2.20)_
+_Exported on 12/13/2025 at 15:29:51 PST from Cursor (2.2.20)_
 
 ---
 
@@ -300,4 +300,190 @@ python3 examples/automm/Conv-LoRA/eval_sam_with_pred_bbox.py \
 - `--tta_box_prompt_mode add`
 
 两者现在会产生**不同的推理行为**（`add` 计算量约增加 1 倍，因为每个 TTA 视角要多跑一次无框前向）。
+
+---
+
+**User**
+
+回到训练时添加bbox prompt的话题：推理时 box prompt 的策略是 add , 预测框的平均 DICE 大概0.6442(在ISIC2017 test集上)，请更具体地判断“该偏向 GT/噪声/预测框”哪一种训练配比更合适，并且实现出相应的脚本代码，告诉我应该执行什么命令以启动训练。
+
+---
+
+**Cursor**
+
+已实现训练阶段的 box prompt 混合策略（写在 `multimodal/src/autogluon/multimodal/optim/lit_semantic_seg.py` 的 `_shared_step` 内）：  
+- 仅在 **训练** 时启用，验证/测试不受影响。  
+- 批级随机策略（基于你提供的预测框 Dice≈0.644，推理 `add`）：  
+  - `p(no prompt)=0.2`  
+  - `p(GT box)=0.3`  
+  - `p(noisy box)=0.5`（噪声幅度 12% bbox 宽高，等比例平移/缩放后裁剪）  
+- 同一批次采用同一种模式，避免批内不一致。  
+- box 直接来自当前 batch 的 mask（已含数据增广后的尺寸），无额外依赖。
+
+### 为什么这样配比？
+- 推理用 `add`，预测框 Dice≈0.64：训练时要 **主要对齐“有噪声的框”场景**（0.5），同时保留部分 **理想框**（0.3）提升上限，并保留 **无框**（0.2）维持鲁棒性和无 prompt 场景的性能。
+
+### 训练命令示例（沿用原脚本，无需新增参数）
+```bash
+python3 examples/automm/Conv-LoRA/run_semantic_segmentation.py \
+  --task isic2017 \
+  --output_dir outputs/seg_train_box_mix \
+  --rank 3 --expert_num 8 \
+  --batch_size 4 --per_gpu_batch_size 1 \
+  --num_gpus 1
+```
+（其余超参按你现有习惯补齐即可）
+
+### 推理/评估（保持你当前策略：预测框 + `add`）
+- 若在线用 bbox 模型预测框：
+```bash
+python3 examples/automm/Conv-LoRA/run_semantic_segmentation.py \
+  --task isic2017 --eval \
+  --ckpt_path <SEG_CKPT> \
+  --tta_enable \
+  --tta_box_prompt_mode add \
+  --bbox_prompt_source predict \
+  --bbox_model_ckpt outputs/bbox_predict-251212/best_bbox.pth \
+  --bbox_model_image_size 320
+```
+- 若已有 bbox 预测 CSV：
+```bash
+python3 examples/automm/Conv-LoRA/run_semantic_segmentation.py \
+  --task isic2017 --eval \
+  --ckpt_path <SEG_CKPT> \
+  --tta_enable \
+  --tta_box_prompt_mode add \
+  --bbox_prompt_source predict \
+  --bbox_preds_csv outputs/bbox_predict-251212/test_bbox_preds.csv
+```
+
+### 代码要点（训练侧）
+- 位置：`multimodal/src/autogluon/multimodal/optim/lit_semantic_seg.py`  
+- 逻辑：在训练批次中按上述概率选择 no/gt/noisy 三种模式，计算/扰动 bbox 后塞入 `batch[self.model.box_key]`，SAM 前向即可使用。验证/推理不改动。
+
+```shellscript
+python3 examples/automm/Conv-LoRA/run_semantic_segmentation.py \
+  --task isic2017 \
+  --output_dir outputs/seg_train_box_mix \
+  --rank 3 --expert_num 8 \
+  --batch_size 4 --per_gpu_batch_size 1 \
+  --num_gpus 1
+```
+
+```shellscript
+python3 examples/automm/Conv-LoRA/run_semantic_segmentation.py \
+  --task isic2017 --eval \
+  --ckpt_path <SEG_CKPT> \
+  --tta_enable \
+  --tta_box_prompt_mode add \
+  --bbox_prompt_source predict \
+  --bbox_model_ckpt outputs/bbox_predict-251212/best_bbox.pth \
+  --bbox_model_image_size 320
+```
+
+```shellscript
+python3 examples/automm/Conv-LoRA/run_semantic_segmentation.py \
+  --task isic2017 --eval \
+  --ckpt_path <SEG_CKPT> \
+  --tta_enable \
+  --tta_box_prompt_mode add \
+  --bbox_prompt_source predict \
+  --bbox_preds_csv outputs/bbox_predict-251212/test_bbox_preds.csv
+```
+
+---
+
+**User**
+
+训练时加入box prompt混合策略你是在multimodal/src/autogluon/multimodal/optim/lit_semantic_seg.py 里写死的吗？应该让它可以根据需要开启，并且批级随机策略的概率分布也应该有可选调节的参数
+
+---
+
+**Cursor**
+
+已修复：训练时的 box prompt 不再写死，改为可配置开关与概率。
+
+**实现要点**
+- `lit_semantic_seg.py`：训练阶段读取 `train_box_prompt_cfg`，支持 `mode=off/gt/noisy/mix`，`p_no/p_gt/p_noisy`（mix 时归一化），`noise_frac`。默认 `mode=off`。
+- `SemanticSegmentationLearner`：保存 `_train_box_prompt_cfg`，构建 `LitModule` 时传入。
+- `run_semantic_segmentation.py` 新增 CLI：
+  - `--train_box_prompt_mode {off,gt,noisy,mix}` (默认 off)
+  - `--train_box_prob_no_prompt` (默认 0.2)
+  - `--train_box_prob_gt` (默认 0.3)
+  - `--train_box_prob_noisy` (默认 0.5)
+  - `--train_box_noise_frac` (默认 0.12)
+
+**推荐配置（与你的场景对齐：推理用 add，预测框 Dice≈0.644）**
+- `--train_box_prompt_mode mix`
+- `--train_box_prob_no_prompt 0.2 --train_box_prob_gt 0.3 --train_box_prob_noisy 0.5`
+- `--train_box_noise_frac 0.12`
+
+**训练命令示例**
+```bash
+python3 examples/automm/Conv-LoRA/run_semantic_segmentation.py \
+  --task isic2017 \
+  --output_dir outputs/seg_train_box_mix \
+  --rank 3 --expert_num 8 \
+  --batch_size 4 --per_gpu_batch_size 1 --num_gpus 1 \
+  --train_box_prompt_mode mix \
+  --train_box_prob_no_prompt 0.2 \
+  --train_box_prob_gt 0.3 \
+  --train_box_prob_noisy 0.5 \
+  --train_box_noise_frac 0.12
+```
+
+**推理（保持你当前策略：预测框 + add）**
+- 在线预测框：
+```bash
+python3 examples/automm/Conv-LoRA/run_semantic_segmentation.py \
+  --task isic2017 --eval \
+  --ckpt_path <SEG_CKPT> \
+  --tta_enable --tta_box_prompt_mode add \
+  --bbox_prompt_source predict \
+  --bbox_model_ckpt outputs/bbox_predict-251212/best_bbox.pth \
+  --bbox_model_image_size 320
+```
+- 预生成框 CSV：
+```bash
+python3 examples/automm/Conv-LoRA/run_semantic_segmentation.py \
+  --task isic2017 --eval \
+  --ckpt_path <SEG_CKPT> \
+  --tta_enable --tta_box_prompt_mode add \
+  --bbox_prompt_source predict \
+  --bbox_preds_csv outputs/bbox_predict-251212/test_bbox_preds.csv
+```
+
+如需调节概率/噪声，只改上述 CLI 即可；默认 `off`，不会改变现有训练行为。
+
+```shellscript
+python3 examples/automm/Conv-LoRA/run_semantic_segmentation.py \
+  --task isic2017 \
+  --output_dir outputs/seg_train_box_mix \
+  --rank 3 --expert_num 8 \
+  --batch_size 4 --per_gpu_batch_size 1 --num_gpus 1 \
+  --train_box_prompt_mode mix \
+  --train_box_prob_no_prompt 0.2 \
+  --train_box_prob_gt 0.3 \
+  --train_box_prob_noisy 0.5 \
+  --train_box_noise_frac 0.12
+```
+
+```shellscript
+python3 examples/automm/Conv-LoRA/run_semantic_segmentation.py \
+  --task isic2017 --eval \
+  --ckpt_path <SEG_CKPT> \
+  --tta_enable --tta_box_prompt_mode add \
+  --bbox_prompt_source predict \
+  --bbox_model_ckpt outputs/bbox_predict-251212/best_bbox.pth \
+  --bbox_model_image_size 320
+```
+
+```shellscript
+python3 examples/automm/Conv-LoRA/run_semantic_segmentation.py \
+  --task isic2017 --eval \
+  --ckpt_path <SEG_CKPT> \
+  --tta_enable --tta_box_prompt_mode add \
+  --bbox_prompt_source predict \
+  --bbox_preds_csv outputs/bbox_predict-251212/test_bbox_preds.csv
+```
 

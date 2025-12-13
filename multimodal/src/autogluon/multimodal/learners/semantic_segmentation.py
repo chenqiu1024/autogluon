@@ -73,6 +73,15 @@ class SemanticSegmentationLearner(BaseLearner):
             else:
                 self._output_shape = infer_output_shape
 
+        # Training-time box prompt configuration (used when constructing LitModule)
+        self._train_box_prompt_cfg = {
+            "mode": "off",       # off / gt / noisy / mix
+            "p_no": 0.0,
+            "p_gt": 0.0,
+            "p_noisy": 0.0,
+            "noise_frac": 0.12,
+        }
+
     def get_semantic_segmentation_class_num(self, sample_data_path):
         """
         Get the number of classes for given data.
@@ -808,12 +817,14 @@ class SemanticSegmentationLearner(BaseLearner):
                 model=model,
                 model_postprocess_fn=model_postprocess_fn,
                 trainable_param_names=peft_param_names,
+                train_box_prompt_cfg=self._train_box_prompt_cfg,
                 **optim_kwargs,
             )
         else:
             return SemanticSegmentationLitModule(
                 model=self._model,
                 model_postprocess_fn=self._model_postprocess_fn,
+                train_box_prompt_cfg=self._train_box_prompt_cfg,
                 **optim_kwargs,
             )
 
