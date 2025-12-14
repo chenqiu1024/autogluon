@@ -92,6 +92,7 @@ class SemanticSegmentationLitModule(LitModule):
         if self.training:
             cfg = self.train_box_prompt_cfg or {}
             mode = cfg.get("mode", "off")
+            box_mode = None
             if mode != "off":
                 p_no = max(float(cfg.get("p_no", 0.0)), 0.0)
                 p_gt = max(float(cfg.get("p_gt", 0.0)), 0.0)
@@ -113,7 +114,9 @@ class SemanticSegmentationLitModule(LitModule):
                     box_mode = mode
 
             def _compute_gt_boxes(mask: torch.Tensor) -> torch.Tensor:
-                """mask: (B,H,W) int/long -> boxes (B,4) in pixel coords."""
+                """mask: (B,H,W) or (B,1,H,W) int/long -> boxes (B,4) in pixel coords."""
+                if mask.dim() == 4 and mask.shape[1] == 1:
+                    mask = mask[:, 0, :, :]
                 b, h, w = mask.shape
                 boxes = torch.zeros((b, 4), device=mask.device, dtype=torch.float32)
                 for i in range(b):

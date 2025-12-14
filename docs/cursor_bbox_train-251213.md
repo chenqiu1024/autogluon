@@ -1,5 +1,5 @@
 # ISIC2017 SAM segmentation with predicted bboxes
-_Exported on 12/13/2025 at 15:29:51 PST from Cursor (2.2.20)_
+_Exported on 12/13/2025 at 16:32:57 PST from Cursor (2.2.20)_
 
 ---
 
@@ -485,5 +485,129 @@ python3 examples/automm/Conv-LoRA/run_semantic_segmentation.py \
   --tta_enable --tta_box_prompt_mode add \
   --bbox_prompt_source predict \
   --bbox_preds_csv outputs/bbox_predict-251212/test_bbox_preds.csv
+```
+
+---
+
+**User**
+
+执行`python3 run_semantic_segmentation.py \
+  --task isic2017 \
+  --output_dir outputs/seg_train_box_mix-251213 \
+  --rank 3 --expert_num 8 \
+  --batch_size 4 --per_gpu_batch_size 1 --num_gpus 1 \
+  --decoder_attn_lora_enable \
+  --decoder_attn_lora_r 8 \
+  --train_box_prompt_mode mix \
+  --train_box_prob_no_prompt 0.2 \
+  --train_box_prob_gt 0.3 \
+  --train_box_prob_noisy 0.5 \
+  --train_box_noise_frac 0.12`时卡住了：`Epoch 0:   0%|          | 3/2000 [00:01<19:01,  1.75it/s]
+Epoch 0:   0%|          | 3/2000 [00:01<19:02,  1.75it/s]Traceback (most recent call last):
+  File "/root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA/run_semantic_segmentation.py", line 259, in <module>
+    predictor.fit(train_data=train_df, tuning_data=val_df, seed=args.seed)
+  File "/root/autodl-tmp/works/autogluon/multimodal/src/autogluon/multimodal/predictor.py", line 540, in fit
+    self._learner.fit(
+  File "/root/autodl-tmp/works/autogluon/multimodal/src/autogluon/multimodal/learners/base.py", line 665, in fit
+    fit_returns = self.execute_fit()
+  File "/root/autodl-tmp/works/autogluon/multimodal/src/autogluon/multimodal/learners/base.py", line 577, in execute_fit
+    attributes = self.fit_per_run(**self._fit_args)
+  File "/root/autodl-tmp/works/autogluon/multimodal/src/autogluon/multimodal/learners/base.py", line 1358, in fit_per_run
+    self.run_trainer(
+  File "/root/autodl-tmp/works/autogluon/multimodal/src/autogluon/multimodal/learners/base.py", line 1211, in run_trainer
+    trainer.fit(
+  File "/root/autodl-tmp/envs/conv-lora/lib/python3.10/site-packages/lightning/pytorch/trainer/trainer.py", line 560, in fit
+    call._call_and_handle_interrupt(
+  File "/root/autodl-tmp/envs/conv-lora/lib/python3.10/site-packages/lightning/pytorch/trainer/call.py", line 49, in _call_and_handle_interrupt
+    return trainer_fn(*args, **kwargs)
+  File "/root/autodl-tmp/envs/conv-lora/lib/python3.10/site-packages/lightning/pytorch/trainer/trainer.py", line 598, in _fit_impl
+    self._run(model, ckpt_path=ckpt_path)
+  File "/root/autodl-tmp/envs/conv-lora/lib/python3.10/site-packages/lightning/pytorch/trainer/trainer.py", line 1011, in _run
+    results = self._run_stage()
+  File "/root/autodl-tmp/envs/conv-lora/lib/python3.10/site-packages/lightning/pytorch/trainer/trainer.py", line 1055, in _run_stage
+    self.fit_loop.run()
+  File "/root/autodl-tmp/envs/conv-lora/lib/python3.10/site-packages/lightning/pytorch/loops/fit_loop.py", line 216, in run
+    self.advance()
+  File "/root/autodl-tmp/envs/conv-lora/lib/python3.10/site-packages/lightning/pytorch/loops/fit_loop.py", line 458, in advance
+    self.epoch_loop.run(self._data_fetcher)
+  File "/root/autodl-tmp/envs/conv-lora/lib/python3.10/site-packages/lightning/pytorch/loops/training_epoch_loop.py", line 152, in run
+    self.advance(data_fetcher)
+  File "/root/autodl-tmp/envs/conv-lora/lib/python3.10/site-packages/lightning/pytorch/loops/training_epoch_loop.py", line 348, in advance
+    batch_output = self.automatic_optimization.run(trainer.optimizers[0], batch_idx, kwargs)
+  File "/root/autodl-tmp/envs/conv-lora/lib/python3.10/site-packages/lightning/pytorch/loops/optimization/automatic.py", line 192, in run
+    self._optimizer_step(batch_idx, closure)
+  File "/root/autodl-tmp/envs/conv-lora/lib/python3.10/site-packages/lightning/pytorch/loops/optimization/automatic.py", line 270, in _optimizer_step
+    call._call_lightning_module_hook(
+  File "/root/autodl-tmp/envs/conv-lora/lib/python3.10/site-packages/lightning/pytorch/trainer/call.py", line 177, in _call_lightning_module_hook
+    output = fn(*args, **kwargs)
+  File "/root/autodl-tmp/envs/conv-lora/lib/python3.10/site-packages/lightning/pytorch/core/module.py", line 1366, in optimizer_step
+    optimizer.step(closure=optimizer_closure)
+  File "/root/autodl-tmp/envs/conv-lora/lib/python3.10/site-packages/lightning/pytorch/core/optimizer.py", line 154, in step
+    step_output = self._strategy.optimizer_step(self._optimizer, closure, **kwargs)
+  File "/root/autodl-tmp/envs/conv-lora/lib/python3.10/site-packages/lightning/pytorch/strategies/strategy.py", line 239, in optimizer_step
+    return self.precision_plugin.optimizer_step(optimizer, model=model, closure=closure, **kwargs)
+  File "/root/autodl-tmp/envs/conv-lora/lib/python3.10/site-packages/lightning/pytorch/plugins/precision/amp.py", line 79, in optimizer_step
+    closure_result = closure()
+  File "/root/autodl-tmp/envs/conv-lora/lib/python3.10/site-packages/lightning/pytorch/loops/optimization/automatic.py", line 146, in __call__
+    self._result = self.closure(*args, **kwargs)
+  File "/root/autodl-tmp/envs/conv-lora/lib/python3.10/site-packages/torch/utils/_contextlib.py", line 120, in decorate_context
+    return func(*args, **kwargs)
+  File "/root/autodl-tmp/envs/conv-lora/lib/python3.10/site-packages/lightning/pytorch/loops/optimization/automatic.py", line 131, in closure
+    step_output = self._step_fn()
+  File "/root/autodl-tmp/envs/conv-lora/lib/python3.10/site-packages/lightning/pytorch/loops/optimization/automatic.py", line 319, in _training_step
+    training_step_output = call._call_strategy_hook(trainer, "training_step", *kwargs.values())
+  File "/root/autodl-tmp/envs/conv-lora/lib/python3.10/site-packages/lightning/pytorch/trainer/call.py", line 329, in _call_strategy_hook
+    output = fn(*args, **kwargs)
+  File "/root/autodl-tmp/envs/conv-lora/lib/python3.10/site-packages/lightning/pytorch/strategies/strategy.py", line 391, in training_step
+    return self.lightning_module.training_step(*args, **kwargs)
+  File "/root/autodl-tmp/works/autogluon/multimodal/src/autogluon/multimodal/optim/lit_semantic_seg.py", line 253, in training_step
+    output, loss = self._shared_step(batch)
+  File "/root/autodl-tmp/works/autogluon/multimodal/src/autogluon/multimodal/optim/lit_semantic_seg.py", line 153, in _shared_step
+    gt_boxes = _compute_gt_boxes(label)
+  File "/root/autodl-tmp/works/autogluon/multimodal/src/autogluon/multimodal/optim/lit_semantic_seg.py", line 117, in _compute_gt_boxes
+    b, h, w = mask.shape
+ValueError: too many values to unpack (expected 3)
+
+Epoch 0:   0%|          | 3/2000 [00:04<45:25,  0.73it/s]`，是怎么回事？
+
+---
+
+**Cursor**
+
+问题原因：训练阶段取 GT 框时假设标签张量形状是 `(B,H,W)`，实际是 `(B,1,H,W)`，导致拆包报错；同时 `mode=off` 时未初始化 `box_mode` 也不安全。
+
+修复（已提交到代码）：
+- 在 `_compute_gt_boxes` 中兼容 `(B,1,H,W)`，自动去掉通道维。
+- 初始化 `box_mode=None`，只有在 `mode!=off` 时才赋值，避免未定义访问。
+
+请重跑同一命令即可：
+```bash
+python3 examples/automm/Conv-LoRA/run_semantic_segmentation.py \
+  --task isic2017 \
+  --output_dir outputs/seg_train_box_mix-251213 \
+  --rank 3 --expert_num 8 \
+  --batch_size 4 --per_gpu_batch_size 1 --num_gpus 1 \
+  --decoder_attn_lora_enable \
+  --decoder_attn_lora_r 8 \
+  --train_box_prompt_mode mix \
+  --train_box_prob_no_prompt 0.2 \
+  --train_box_prob_gt 0.3 \
+  --train_box_prob_noisy 0.5 \
+  --train_box_noise_frac 0.12
+```
+
+```shellscript
+python3 examples/automm/Conv-LoRA/run_semantic_segmentation.py \
+  --task isic2017 \
+  --output_dir outputs/seg_train_box_mix-251213 \
+  --rank 3 --expert_num 8 \
+  --batch_size 4 --per_gpu_batch_size 1 --num_gpus 1 \
+  --decoder_attn_lora_enable \
+  --decoder_attn_lora_r 8 \
+  --train_box_prompt_mode mix \
+  --train_box_prob_no_prompt 0.2 \
+  --train_box_prob_gt 0.3 \
+  --train_box_prob_noisy 0.5 \
+  --train_box_noise_frac 0.12
 ```
 
