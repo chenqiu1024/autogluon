@@ -274,6 +274,9 @@ class SAMForSemanticSegmentation(nn.Module):
         image_norm: Optional[str] = None,
         adapter_enabled: bool = False,
         adapter_dim: int = 64,
+        decoder_attention_lora_r: int = 0,
+        decoder_attention_lora_alpha: int = 1,
+        decoder_attention_lora_dropout: float = 0.0,
     ):
         """
         Load a pretrained Segment Anything Model (SAM).
@@ -305,6 +308,13 @@ class SAMForSemanticSegmentation(nn.Module):
             Whether to enable standard Adapter modules in the vision encoder.
         adapter_dim
             The dimension of the adapter bottleneck.
+        decoder_attention_lora_r
+            LoRA rank for decoder attention layers. If 0 (default), LoRA is disabled.
+            Recommended value: 8 for parameter-efficient fine-tuning.
+        decoder_attention_lora_alpha
+            LoRA scaling factor for decoder attention. Default: 1.
+        decoder_attention_lora_dropout
+            Dropout probability for LoRA in decoder attention. Default: 0.0.
         """
 
         super().__init__()
@@ -313,6 +323,9 @@ class SAMForSemanticSegmentation(nn.Module):
         self.checkpoint_name = checkpoint_name
         self.num_classes = num_classes
         self.frozen_layers = frozen_layers
+        self.decoder_attention_lora_r = decoder_attention_lora_r
+        self.decoder_attention_lora_alpha = decoder_attention_lora_alpha
+        self.decoder_attention_lora_dropout = decoder_attention_lora_dropout
 
         self.device = None
         self.name_to_id = {}
@@ -359,15 +372,33 @@ class SAMForSemanticSegmentation(nn.Module):
 
     def _load_checkpoint(self, checkpoint_name):
         if self.pretrained:
+            # Load configuration and inject decoder attention LoRA parameters
+            try:
+                config = SamConfig.from_pretrained(checkpoint_name, local_files_only=True)
+            except:
+                config = SamConfig.from_pretrained(checkpoint_name)
+            
+            # Inject LoRA parameters into mask decoder config
+            config.mask_decoder_config.decoder_attention_lora_r = self.decoder_attention_lora_r
+            config.mask_decoder_config.decoder_attention_lora_alpha = self.decoder_attention_lora_alpha
+            config.mask_decoder_config.decoder_attention_lora_dropout = self.decoder_attention_lora_dropout
+            
             # Try to load from local cache first to avoid network issues
             try:
-                self.model = SamModel.from_pretrained(checkpoint_name, local_files_only=True)
+                self.model = SamModel.from_pretrained(checkpoint_name, config=config, local_files_only=True)
                 logger.info(f"Loaded model from local cache: {checkpoint_name}")
             except Exception as e:
                 logger.info(f"Local cache not found, downloading from Hugging Face: {checkpoint_name}")
-            self.model = SamModel.from_pretrained(checkpoint_name)
+                self.model = SamModel.from_pretrained(checkpoint_name, config=config)
+            
+            if self.decoder_attention_lora_r > 0:
+                logger.info(f"Decoder Attention LoRA enabled: r={self.decoder_attention_lora_r}, "
+                          f"alpha={self.decoder_attention_lora_alpha}, dropout={self.decoder_attention_lora_dropout}")
         else:
             configuration = SamConfig(name_or_path=checkpoint_name)
+            configuration.mask_decoder_config.decoder_attention_lora_r = self.decoder_attention_lora_r
+            configuration.mask_decoder_config.decoder_attention_lora_alpha = self.decoder_attention_lora_alpha
+            configuration.mask_decoder_config.decoder_attention_lora_dropout = self.decoder_attention_lora_dropout
             self.model = SamModel(configuration)
 
     def save(self, save_path: str = "./"):
@@ -402,6 +433,10 @@ class SAMForSemanticSegmentation(nn.Module):
     def class_label_key(self):
         return f"{self.prefix}_{CLASS_LABEL}"
 
+    @property
+    def box_key(self):
+        return f"{self.prefix}_box"
+
     def train(self, mode: bool = True):
         super().train(mode)
         for module in self.modules():
@@ -429,7 +464,12 @@ class SAMForSemanticSegmentation(nn.Module):
         """
         # binary
         if self.num_classes == 1:
-            rets = self.model(batch[self.image_key], multimask_output=False, output_moe_loss=self.output_moe_loss)
+            rets = self.model(
+                batch[self.image_key],
+                input_boxes=batch.get(self.box_key, None),
+                multimask_output=False,
+                output_moe_loss=self.output_moe_loss,
+            )
             pred_masks = rets.pred_masks[:, 0, :, :, :]
             pred_masks = F.interpolate(
                 pred_masks, (self.image_size, self.image_size), mode="bilinear", align_corners=False
@@ -440,7 +480,12 @@ class SAMForSemanticSegmentation(nn.Module):
                 rets_dict = {self.prefix: {LOGITS: pred_masks, LABEL: batch[self.label_key]}}
         # multi-class
         else:
-            rets = self.model(batch[self.image_key], multimask_output=False, output_moe_loss=self.output_moe_loss)
+            rets = self.model(
+                batch[self.image_key],
+                input_boxes=batch.get(self.box_key, None),
+                multimask_output=False,
+                output_moe_loss=self.output_moe_loss,
+            )
             rets, class_predictions = rets
             pred_masks = rets.pred_masks[:, 0, :, :, :]
             pred_classes = class_predictions[:, 0, :, :]

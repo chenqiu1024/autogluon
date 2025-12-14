@@ -41,13 +41,34 @@ class TTATransform:
         """Apply inverse transformation to mask prediction."""
         raise NotImplementedError
 
+    def transform_box(self, box: np.ndarray, image_shape: Tuple[int, int]) -> np.ndarray:
+        """Transform a box [x1, y1, x2, y2] under this augmentation."""
+        return box
+
 
 class ScaleTransform(TTATransform):
     """Multi-scale transformation."""
     
-    def __init__(self, scale: float):
+    def __init__(self, scale: float, resize_method: str = "bilinear"):
+        """
+        Parameters
+        ----------
+        scale : float
+            Scale factor for resizing
+        resize_method : str
+            Resize interpolation method: "bilinear" or "bicubic"
+        """
         super().__init__()
         self.scale = scale
+        self.resize_method = resize_method.lower()
+        
+        # Map resize method to PIL constant
+        if self.resize_method == "bilinear":
+            self.pil_resample = Image.BILINEAR
+        elif self.resize_method == "bicubic":
+            self.pil_resample = Image.BICUBIC
+        else:
+            raise ValueError(f"Unknown resize_method: {resize_method}. Use 'bilinear' or 'bicubic'")
     
     def apply(self, image: np.ndarray) -> np.ndarray:
         """Scale image using PIL (memory efficient)."""
@@ -77,8 +98,8 @@ class ScaleTransform(TTATransform):
                 image_uint8 = image
             pil_img = Image.fromarray(image_uint8)
         
-        # Resize
-        scaled_pil = pil_img.resize((new_w, new_h), Image.BILINEAR)
+        # Resize with specified method
+        scaled_pil = pil_img.resize((new_w, new_h), self.pil_resample)
         scaled = np.array(scaled_pil).copy()  # Explicit copy
         
         # Explicitly close PIL images to free memory IMMEDIATELY
@@ -90,6 +111,10 @@ class ScaleTransform(TTATransform):
             scaled = scaled.astype(np.float32) / 255.0
         
         return scaled
+
+    def transform_box(self, box: np.ndarray, image_shape: Tuple[int, int]) -> np.ndarray:
+        x1, y1, x2, y2 = box.astype(np.float32)
+        return np.array([x1 * self.scale, y1 * self.scale, x2 * self.scale, y2 * self.scale], dtype=np.float32)
     
     def apply_inverse_mask(self, mask: np.ndarray) -> np.ndarray:
         """Resize mask back to original size (memory efficient)."""
@@ -105,7 +130,7 @@ class ScaleTransform(TTATransform):
             # Scale to 0-255 range for PIL
             mask_uint8 = (mask * 255).astype(np.uint8) if mask.max() <= 1.0 else mask.astype(np.uint8)
             mask_pil = Image.fromarray(mask_uint8, mode='L')
-            resized_pil = mask_pil.resize((new_w, new_h), Image.BILINEAR)
+            resized_pil = mask_pil.resize((new_w, new_h), self.pil_resample)
             resized = np.array(resized_pil).astype(np.float32).copy()
             
             # Close PIL images IMMEDIATELY
@@ -123,7 +148,7 @@ class ScaleTransform(TTATransform):
                 mask_ch = mask[i]
                 mask_uint8 = (mask_ch * 255).astype(np.uint8) if mask_ch.max() <= 1.0 else mask_ch.astype(np.uint8)
                 mask_pil = Image.fromarray(mask_uint8, mode='L')
-                resized_pil = mask_pil.resize((new_w, new_h), Image.BILINEAR)
+                resized_pil = mask_pil.resize((new_w, new_h), self.pil_resample)
                 resized[i] = np.array(resized_pil).astype(np.float32)
                 
                 # Close PIL images IMMEDIATELY
@@ -174,6 +199,19 @@ class FlipTransform(TTATransform):
             else:  # (C, H, W)
                 return np.flip(mask, axis=1).copy()
 
+    def transform_box(self, box: np.ndarray, image_shape: Tuple[int, int]) -> np.ndarray:
+        h, w = image_shape
+        x1, y1, x2, y2 = box.astype(np.float32)
+        if self.flip_type == "horizontal":
+            x1_new = (w - 1) - x2
+            x2_new = (w - 1) - x1
+            return np.array([x1_new, y1, x2_new, y2], dtype=np.float32)
+        elif self.flip_type == "vertical":
+            y1_new = (h - 1) - y2
+            y2_new = (h - 1) - y1
+            return np.array([x1, y1_new, x2, y2_new], dtype=np.float32)
+        return box
+
 
 class RotateTransform(TTATransform):
     """Small angle rotation using PIL (faster than scipy)."""
@@ -218,6 +256,25 @@ class RotateTransform(TTATransform):
             rotated = rotated.astype(np.float32) / 255.0
         
         return rotated
+
+    def transform_box(self, box: np.ndarray, image_shape: Tuple[int, int]) -> np.ndarray:
+        if self.angle == 0:
+            return box
+        h, w = image_shape
+        cx, cy = (w - 1) / 2.0, (h - 1) / 2.0
+        x1, y1, x2, y2 = box.astype(np.float32)
+        corners = np.array([[x1, y1], [x2, y1], [x1, y2], [x2, y2]], dtype=np.float32)
+        theta = np.deg2rad(self.angle)
+        rot = np.array([[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]], dtype=np.float32)
+        shifted = corners - np.array([cx, cy], dtype=np.float32)
+        rotated = (shifted @ rot.T) + np.array([cx, cy], dtype=np.float32)
+        x_min, y_min = rotated[:, 0].min(), rotated[:, 1].min()
+        x_max, y_max = rotated[:, 0].max(), rotated[:, 1].max()
+        x_min = np.clip(x_min, 0, w - 1)
+        y_min = np.clip(y_min, 0, h - 1)
+        x_max = np.clip(x_max, 0, w - 1)
+        y_max = np.clip(y_max, 0, h - 1)
+        return np.array([x_min, y_min, x_max, y_max], dtype=np.float32)
     
     def apply_inverse_mask(self, mask: np.ndarray) -> np.ndarray:
         """Rotate mask back (inverse rotation) using PIL."""
@@ -283,6 +340,16 @@ class ComposedTransform(TTATransform):
             result = t.apply_inverse_mask(result)
         return result
 
+    def transform_box(self, box: np.ndarray, image_shape: Tuple[int, int]) -> np.ndarray:
+        cur_box = box
+        cur_shape = image_shape
+        for t in self.transforms:
+            cur_box = t.transform_box(cur_box, cur_shape)
+            if isinstance(t, ScaleTransform):
+                h, w = cur_shape
+                cur_shape = (int(h * t.scale), int(w * t.scale))
+        return cur_box
+
 
 class TTAPredictor:
     """
@@ -306,6 +373,7 @@ class TTAPredictor:
         threshold: float = 0.5,
         min_area_ratio: float = 0.001,
         use_morphology: bool = False,
+        resize_method: str = "bilinear",
     ):
         """
         Parameters
@@ -330,6 +398,9 @@ class TTAPredictor:
             Remove connected components with area < min_area_ratio * image_area.
         use_morphology : bool
             Whether to apply morphological closing for smoothing.
+        resize_method : str
+            Resize interpolation method: "bilinear" or "bicubic".
+            Recommended: "bilinear" for speed, "bicubic" for quality.
         """
         self.scales = scales
         self.flips = flips
@@ -338,6 +409,7 @@ class TTAPredictor:
         self.threshold = threshold
         self.min_area_ratio = min_area_ratio
         self.use_morphology = use_morphology
+        self.resize_method = resize_method
         
         # Setup scale weights
         if scale_weights is None and fusion_method == "weighted_mean":
@@ -368,7 +440,7 @@ class TTAPredictor:
                 for rotate in self.rotations:
                     # Create composed transform
                     t = ComposedTransform([
-                        ScaleTransform(scale),
+                        ScaleTransform(scale, resize_method=self.resize_method),
                         FlipTransform(flip),
                         RotateTransform(rotate),
                     ])
@@ -388,6 +460,8 @@ class TTAPredictor:
         image: np.ndarray,
         predict_fn,
         return_probs: bool = True,
+        box_prompt: Optional[np.ndarray] = None,
+        box_ref_shape: Optional[Tuple[int, int]] = None,
     ) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
         """
         Perform TTA prediction on a single image.
@@ -418,11 +492,14 @@ class TTAPredictor:
         
         # Apply each transform and collect predictions
         for idx, (transform, weight) in enumerate(self.transforms):
-            # Transform image
+            # Transform image & box together
             transformed_img = transform.apply(image)
+            transformed_box = None
+            if box_prompt is not None:
+                transformed_box = transform.transform_box(box_prompt, image.shape[:2])
             
             # Get prediction (should be probability or logit)
-            pred = predict_fn(transformed_img)
+            pred = predict_fn(transformed_img, transformed_box, transformed_img.shape[:2])
             
             # Free transformed image immediately
             del transformed_img

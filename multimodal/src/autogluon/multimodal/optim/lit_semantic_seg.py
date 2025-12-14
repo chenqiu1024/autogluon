@@ -24,9 +24,17 @@ class SemanticSegmentationLitModule(LitModule):
     - Integrates contrastive loss for better expert selection
     """
     
-    def __init__(self, *args, gspo_trainer=None, **kwargs):
+    def __init__(self, *args, gspo_trainer=None, train_box_prompt_cfg=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.gspo_trainer = gspo_trainer
+        # Training-time box prompt config (dict with keys: mode, p_no, p_gt, p_noisy, noise_frac)
+        self.train_box_prompt_cfg = train_box_prompt_cfg or {
+            "mode": "off",
+            "p_no": 0.0,
+            "p_gt": 0.0,
+            "p_noisy": 0.0,
+            "noise_frac": 0.12,
+        }
 
     def _compute_loss(self, output: Dict, label: torch.Tensor, **kwargs):
         loss = 0
@@ -74,6 +82,83 @@ class SemanticSegmentationLitModule(LitModule):
         batch: Dict,
     ):
         label = batch[self.model.label_key]
+
+        # -------- Train-time box prompt injection (configurable) --------
+        # 控制项：self.train_box_prompt_cfg = {
+        #   mode: off / gt / noisy / mix,
+        #   p_no, p_gt, p_noisy: 仅在 mode=mix 时生效并会归一化,
+        #   noise_frac: 噪声扰动比例（相对 bbox 宽高）
+        # }
+        if self.training:
+            cfg = self.train_box_prompt_cfg or {}
+            mode = cfg.get("mode", "off")
+            box_mode = None
+            if mode != "off":
+                p_no = max(float(cfg.get("p_no", 0.0)), 0.0)
+                p_gt = max(float(cfg.get("p_gt", 0.0)), 0.0)
+                p_noisy = max(float(cfg.get("p_noisy", 0.0)), 0.0)
+                noise_frac = float(cfg.get("noise_frac", 0.12))
+
+                if mode == "mix":
+                    total = p_no + p_gt + p_noisy
+                    if total > 0:
+                        p_no, p_gt, p_noisy = [x / total for x in (p_no, p_gt, p_noisy)]
+                    r = torch.rand(1).item()
+                    if r < p_no:
+                        box_mode = "off"
+                    elif r < p_no + p_gt:
+                        box_mode = "gt"
+                    else:
+                        box_mode = "noisy"
+                else:
+                    box_mode = mode
+
+            def _compute_gt_boxes(mask: torch.Tensor) -> torch.Tensor:
+                """mask: (B,H,W) or (B,1,H,W) int/long -> boxes (B,4) in pixel coords."""
+                if mask.dim() == 4 and mask.shape[1] == 1:
+                    mask = mask[:, 0, :, :]
+                b, h, w = mask.shape
+                boxes = torch.zeros((b, 4), device=mask.device, dtype=torch.float32)
+                for i in range(b):
+                    ys, xs = torch.nonzero(mask[i] > 0, as_tuple=True)
+                    if xs.numel() == 0:
+                        continue
+                    x1, x2 = xs.min(), xs.max()
+                    y1, y2 = ys.min(), ys.max()
+                    boxes[i] = torch.tensor([x1, y1, x2, y2], device=mask.device, dtype=torch.float32)
+                return boxes
+
+            def _jitter_boxes(boxes: torch.Tensor, h: int, w: int, frac: float = 0.12) -> torch.Tensor:
+                """Uniform jitter relative to box size."""
+                jittered = boxes.clone()
+                for i in range(jittered.shape[0]):
+                    x1, y1, x2, y2 = jittered[i]
+                    if x2 <= x1 or y2 <= y1:
+                        continue
+                    bw = (x2 - x1).clamp(min=1.0)
+                    bh = (y2 - y1).clamp(min=1.0)
+                    dx = bw * frac
+                    dy = bh * frac
+                    rx1 = (torch.rand(1, device=boxes.device) * 2 - 1) * dx
+                    ry1 = (torch.rand(1, device=boxes.device) * 2 - 1) * dy
+                    rx2 = (torch.rand(1, device=boxes.device) * 2 - 1) * dx
+                    ry2 = (torch.rand(1, device=boxes.device) * 2 - 1) * dy
+                    x1n = torch.clamp(x1 + rx1, 0, w - 1)
+                    y1n = torch.clamp(y1 + ry1, 0, h - 1)
+                    x2n = torch.clamp(x2 + rx2, 0, w - 1)
+                    y2n = torch.clamp(y2 + ry2, 0, h - 1)
+                    jittered[i] = torch.stack(
+                        [torch.min(x1n, x2n), torch.min(y1n, y2n), torch.max(x1n, x2n), torch.max(y1n, y2n)]
+                    ).squeeze()
+                return jittered
+
+            if box_mode in ["gt", "noisy"]:
+                gt_boxes = _compute_gt_boxes(label)
+                h, w = label.shape[-2], label.shape[-1]
+                if box_mode == "noisy":
+                    gt_boxes = _jitter_boxes(gt_boxes, h=h, w=w, frac=noise_frac)
+                if not (gt_boxes.sum(dim=1) == 0).all():
+                    batch[self.model.box_key] = gt_boxes.unsqueeze(1)  # (B,1,4)
         # prepare_targets
         output = run_model(self.model, batch)
         if isinstance(self.loss_func, Mask2FormerLoss):
