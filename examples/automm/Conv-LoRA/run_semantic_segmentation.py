@@ -71,6 +71,12 @@ if __name__ == "__main__":
     parser.add_argument("--gspo_warmup_epochs", type=int, default=5, help="Number of epochs before enabling GSPO")
     parser.add_argument("--gspo_contrastive_weight", type=float, default=0.1, help="Weight for contrastive loss in GSPO")
     parser.add_argument("--gspo_quality_momentum", type=float, default=0.9, help="Momentum for expert quality history")
+    # GSPO reward / loss shaping hyper-parameters (可选，带默认值)
+    parser.add_argument("--lambda_smooth", type=float, default=0.1, help="Smoothness loss weight (λ_smooth)")
+    parser.add_argument("--lambda_boundary", type=float, default=0.3, help="Boundary loss weight (λ_boundary)")
+    parser.add_argument("--w_boundary", type=float, default=0.3, help="Boundary reward weight (w_boundary)")
+    parser.add_argument("--w_smooth", type=float, default=0.1, help="Smoothness reward weight (w_smooth)")
+    parser.add_argument("--w_thin", type=float, default=0.05, help="Thin-structure reward weight (w_thin)")
     
     # Adapter parameters
     parser.add_argument("--adapter_enable", action="store_true", help="Enable standard Adapter modules")
@@ -145,6 +151,12 @@ if __name__ == "__main__":
             "optim.lora.gspo_quality_momentum": args.gspo_quality_momentum,
             "optim.lora.gspo_warmup_epochs": args.gspo_warmup_epochs,
             "optim.lora.gspo_contrastive_weight": args.gspo_contrastive_weight,
+            # GSPO reward / loss shaping
+            "optim.gspo.lambda_smooth": args.lambda_smooth,
+            "optim.gspo.lambda_boundary": args.lambda_boundary,
+            "optim.gspo.w_boundary": args.w_boundary,
+            "optim.gspo.w_smooth": args.w_smooth,
+            "optim.gspo.w_thin": args.w_thin,
         })
 
     # Adapter configuration

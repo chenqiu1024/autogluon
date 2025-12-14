@@ -42,6 +42,11 @@ class GSPOConvLoRATrainer:
         contrastive_weight: float = 0.1,
         quality_metric: str = 'iou',
         advantage_temperature: float = 5.0,
+        lambda_smooth: float = 0.1,
+        lambda_boundary: float = 0.3,
+        w_boundary: float = 0.3,
+        w_smooth: float = 0.1,
+        w_thin: float = 0.05,
     ):
         self.predictor = predictor
         self.group_size = group_size
@@ -49,6 +54,12 @@ class GSPOConvLoRATrainer:
         self.contrastive_weight = contrastive_weight
         self.quality_metric = quality_metric
         self.advantage_temperature = advantage_temperature
+        # Reward / loss shaping hyper-parameters
+        self.lambda_smooth = lambda_smooth
+        self.lambda_boundary = lambda_boundary
+        self.w_boundary = w_boundary
+        self.w_smooth = w_smooth
+        self.w_thin = w_thin
         
         # Statistics tracking
         self.expert_performance_log = defaultdict(list)
@@ -108,6 +119,69 @@ class GSPOConvLoRATrainer:
         
         # Both: average of IoU and DICE
         return (iou + dice) / 2.0
+
+    def _prepare_binary_masks(
+        self, pred_masks: torch.Tensor, gt_masks: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Convert logits/probabilities to single-channel probability maps for
+        boundary/smoothness computation.
+        """
+        # Ensure channel dimension
+        if pred_masks.dim() == 3:
+            pred_masks = pred_masks.unsqueeze(1)
+        if gt_masks.dim() == 3:
+            gt_masks = gt_masks.unsqueeze(1)
+
+        if pred_masks.shape[1] > 1:
+            # Use the maximum class probability as the foreground probability
+            pred_probs = torch.softmax(pred_masks, dim=1).max(dim=1, keepdim=True).values
+        else:
+            pred_probs = torch.sigmoid(pred_masks)
+
+        if gt_masks.shape[1] > 1:
+            gt_probs = torch.argmax(gt_masks, dim=1, keepdim=True).float()
+        else:
+            gt_probs = gt_masks.float()
+
+        return pred_probs, gt_probs
+
+    def _boundary_map(self, masks: torch.Tensor) -> torch.Tensor:
+        """
+        Approximate boundary map via spatial gradients.
+        """
+        grad_x = torch.abs(masks[..., :, 1:] - masks[..., :, :-1])
+        grad_y = torch.abs(masks[..., 1:, :] - masks[..., :-1, :])
+        grad_x = torch.nn.functional.pad(grad_x, (0, 1, 0, 0))
+        grad_y = torch.nn.functional.pad(grad_y, (0, 0, 0, 1))
+        return torch.clamp(grad_x + grad_y, 0.0, 1.0)
+
+    def compute_smoothness_loss(self, pred_probs: torch.Tensor) -> torch.Tensor:
+        """
+        Laplacian smoothness loss (per-sample).
+        """
+        lap_kernel = torch.tensor([[0, 1, 0], [1, -4, 1], [0, 1, 0]], device=pred_probs.device, dtype=pred_probs.dtype)
+        lap_kernel = lap_kernel.view(1, 1, 3, 3)
+        lap = torch.nn.functional.conv2d(pred_probs, lap_kernel, padding=1)
+        return (lap ** 2).mean(dim=(1, 2, 3))
+
+    def compute_boundary_loss(self, pred_probs: torch.Tensor, gt_probs: torch.Tensor) -> torch.Tensor:
+        """
+        L1 difference between predicted and GT boundary maps (per-sample).
+        """
+        pred_edge = self._boundary_map(pred_probs)
+        gt_edge = self._boundary_map(gt_probs)
+        return torch.mean(torch.abs(pred_edge - gt_edge), dim=(1, 2, 3))
+
+    def compute_thin_reward(self, pred_probs: torch.Tensor, gt_probs: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+        """
+        Dice-style reward on boundary skeletons (per-sample).
+        """
+        pred_edge = self._boundary_map(pred_probs)
+        gt_edge = self._boundary_map(gt_probs)
+        intersection = (pred_edge * gt_edge).flatten(1).sum(dim=1)
+        union = pred_edge.flatten(1).sum(dim=1) + gt_edge.flatten(1).sum(dim=1)
+        return (2 * intersection + eps) / (union + eps)
     
     def gspo_group_training_step(
         self,
@@ -134,6 +208,10 @@ class GSPOConvLoRATrainer:
         
         group_predictions = []
         group_quality_scores = []
+        group_base_quality_scores = []
+        group_smooth_losses = []
+        group_boundary_losses = []
+        group_thin_rewards = []
         group_moe_losses = []
         group_selected_experts = []
         group_seg_losses = []
@@ -145,16 +223,36 @@ class GSPOConvLoRATrainer:
             with torch.set_grad_enabled(True):
                 pred_masks, moe_loss, selected_experts = forward_fn(images)
             
+            pred_probs, gt_probs = self._prepare_binary_masks(pred_masks, masks_gt)
+            smooth_loss = self.compute_smoothness_loss(pred_probs)
+            boundary_loss = self.compute_boundary_loss(pred_probs, gt_probs)
+            thin_reward = self.compute_thin_reward(pred_probs, gt_probs)
+
             # Compute quality scores
             quality = self.compute_segmentation_quality(
                 pred_masks, masks_gt, metric=self.quality_metric
             )
+            shaped_quality = (
+                quality
+                + self.w_boundary * (1.0 - boundary_loss.detach())
+                - self.w_smooth * smooth_loss.detach()
+                + self.w_thin * thin_reward.detach()
+            )
             
             # Compute segmentation loss
             seg_loss = loss_fn(pred_masks, masks_gt)
+            seg_loss = (
+                seg_loss
+                + self.lambda_smooth * smooth_loss.mean()
+                + self.lambda_boundary * boundary_loss.mean()
+            )
             
             group_predictions.append(pred_masks)
-            group_quality_scores.append(quality)
+            group_quality_scores.append(shaped_quality)
+            group_base_quality_scores.append(quality)
+            group_smooth_losses.append(smooth_loss.detach())
+            group_boundary_losses.append(boundary_loss.detach())
+            group_thin_rewards.append(thin_reward.detach())
             group_moe_losses.append(moe_loss)
             group_selected_experts.append(selected_experts)
             group_seg_losses.append(seg_loss)
@@ -203,6 +301,10 @@ class GSPOConvLoRATrainer:
             'moe_loss': total_moe_loss.item(),
             'contrastive_loss': contrastive_loss.item(),
             'avg_quality': quality_tensor.mean().item(),
+            'avg_quality_base': torch.stack(group_base_quality_scores).mean().item(),
+            'avg_smooth_loss': torch.stack(group_smooth_losses).mean().item(),
+            'avg_boundary_loss': torch.stack(group_boundary_losses).mean().item(),
+            'avg_thin_reward': torch.stack(group_thin_rewards).mean().item(),
             'quality_variance': quality_tensor.var().item(),
             'max_advantage': advantages.max().item(),
             'min_advantage': advantages.min().item(),

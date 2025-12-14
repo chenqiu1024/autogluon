@@ -1,5 +1,7 @@
+import importlib.util
 import logging
 import os
+from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Union, Callable
 
 import matplotlib.pyplot as plt
@@ -754,11 +756,15 @@ class SemanticSegmentationLearner(BaseLearner):
         distillation_kwargs=None,
         is_train=True,
     ):
+        gspo_trainer = None
+        if is_train:
+            gspo_trainer = self._maybe_create_gspo_trainer()
         if is_train:
             return SemanticSegmentationLitModule(
                 model=model,
                 model_postprocess_fn=model_postprocess_fn,
                 trainable_param_names=peft_param_names,
+                gspo_trainer=gspo_trainer,
                 **optim_kwargs,
             )
         else:
@@ -767,6 +773,60 @@ class SemanticSegmentationLearner(BaseLearner):
                 model_postprocess_fn=self._model_postprocess_fn,
                 **optim_kwargs,
             )
+
+    def _maybe_create_gspo_trainer(self):
+        """
+        Auto-create GSPO trainer if the config enables GSPO.
+        The trainer implementation lives in examples/automm/Conv-LoRA/gspo_trainer.py.
+        """
+        if self._config is None:
+            return None
+
+        lora_cfg = getattr(self._config.optim, "lora", None)
+        if not lora_cfg or not getattr(lora_cfg, "gspo_enabled", False):
+            return None
+
+        gspo_cfg = getattr(self._config.optim, "gspo", None)
+        lambda_smooth = getattr(gspo_cfg, "lambda_smooth", 0.1) if gspo_cfg else 0.1
+        lambda_boundary = getattr(gspo_cfg, "lambda_boundary", 0.3) if gspo_cfg else 0.3
+        w_boundary = getattr(gspo_cfg, "w_boundary", 0.3) if gspo_cfg else 0.3
+        w_smooth = getattr(gspo_cfg, "w_smooth", 0.1) if gspo_cfg else 0.1
+        w_thin = getattr(gspo_cfg, "w_thin", 0.05) if gspo_cfg else 0.05
+
+        # Dynamically load GSPOConvLoRATrainer from examples path.
+        examples_root = Path(__file__).resolve().parents[3] / "examples" / "automm" / "Conv-LoRA" / "gspo_trainer.py"
+        if not examples_root.exists():
+            logger.warning("GSPO is enabled but gspo_trainer.py not found at %s; GSPO will be skipped.", examples_root)
+            return None
+
+        spec = importlib.util.spec_from_file_location("autogluon_multimodal.gspo_trainer", examples_root)
+        if spec is None or spec.loader is None:
+            logger.warning("Failed to load GSPO trainer spec from %s; GSPO will be skipped.", examples_root)
+            return None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)  # type: ignore
+        GSPOConvLoRATrainer = getattr(module, "GSPOConvLoRATrainer", None)
+        if GSPOConvLoRATrainer is None:
+            logger.warning("GSPOConvLoRATrainer not found in %s; GSPO will be skipped.", examples_root)
+            return None
+
+        try:
+            return GSPOConvLoRATrainer(
+                predictor=None,  # Not required by current implementation
+                group_size=getattr(lora_cfg, "gspo_group_size", 3),
+                warmup_epochs=getattr(lora_cfg, "gspo_warmup_epochs", 5),
+                contrastive_weight=getattr(lora_cfg, "gspo_contrastive_weight", 0.1),
+                quality_metric="iou",
+                advantage_temperature=5.0,
+                lambda_smooth=lambda_smooth,
+                lambda_boundary=lambda_boundary,
+                w_boundary=w_boundary,
+                w_smooth=w_smooth,
+                w_thin=w_thin,
+            )
+        except Exception as e:
+            logger.warning("Failed to instantiate GSPOConvLoRATrainer: %s; GSPO will be skipped.", e)
+            return None
 
     def on_predict_start(self, data: pd.DataFrame):
         data = self.data_to_df(data=data)
