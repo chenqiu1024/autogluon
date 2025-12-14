@@ -157,6 +157,9 @@ if __name__ == "__main__":
     parser.add_argument("--lr", type=float, default=None,
                         help="Learning rate (default: auto based on task, typically 1e-4 or 3e-4)")
     
+    # Decoder Adapter parameters
+    parser.add_argument("--decoder_adapter_enable", action="store_true", help="Enable MLP-Adapter modules in the mask decoder")
+    parser.add_argument("--decoder_adapter_dim", type=int, default=64, help="Dimension of the decoder adapter bottleneck")
     args = parser.parse_args()
 
     dataset_name = args.task
@@ -213,7 +216,7 @@ if __name__ == "__main__":
 
     # Adapter configuration
     if args.adapter_enable:
-        print(f"Enabling Standard Adapters with dim={args.adapter_dim}")
+        print(f"Enabling Standard Encoder Adapters with dim={args.adapter_dim}")
         hyperparameters.update({
             "model.sam.adapter_enabled": True,
             "model.sam.adapter_dim": args.adapter_dim,
@@ -227,6 +230,14 @@ if __name__ == "__main__":
             "model.sam.decoder_attention_lora_r": args.decoder_attn_lora_r,
             "model.sam.decoder_attention_lora_alpha": args.decoder_attn_lora_alpha,
             "model.sam.decoder_attention_lora_dropout": args.decoder_attn_lora_dropout,
+        })
+        
+    # Decoder Adapter configuration
+    if args.decoder_adapter_enable:
+        print(f"Enabling Decoder MLP-Adapters with dim={args.decoder_adapter_dim}")
+        hyperparameters.update({
+            "model.sam.decoder_adapter_enabled": True,
+            "model.sam.decoder_adapter_dim": args.decoder_adapter_dim,
         })
 
     if args.eval:  # load a checkpoint for evaluation

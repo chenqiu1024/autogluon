@@ -146,3 +146,253 @@ GeLU 激活 - 来自现代 Transformer 实践 ✓
 因此，整体策略就是：  
 **在“概念层面”尽量忠实于原始 Adapter 设计，在“实现与训练动力学层面”根据你这个实验的特殊场景做有针对性的改造。**
 
+
+## Mask Decoder 中 MLP-Adapter 详细设计与实验说明
+
+### 1. 整体模型结构与适配模块分布
+
+- **整体数据流**（语义分割）：
+
+```text
+输入图像
+  ↓
+SAM Vision Encoder（ViT 主干，冻结）
+  ├─ Conv-LoRA（Attention 中 qkv 线性层，含 MoE-Conv + GSPO）
+  └─ Encoder-Adapter（可选，插在每个 SamVisionLayer 的 MLP 之后）
+  ↓
+image_embeddings  (B, C, H', W')
+  ↓
+SAM Mask Decoder（Two-Way Transformer）
+  ├─ Token Self-Attn & Cross-Attn (queries ↔ image_embeddings)
+  ├─ Decoder MLP-Adapter（本次新增，插在 queries 的 MLP 之后）
+  └─ Upsampling + Hypernetworks + IoU Head
+  ↓
+低分辨率 mask + IoU 评分 (+ 多类 logits)
+  ↓
+上采样到原图尺寸 → 语义分割输出
+```
+
+- **PEFT 模块分工**：
+  - **Conv-LoRA**：作用在 Vision Encoder 的 Attention（空间维度适配，多专家 + GSPO）。
+  - **Encoder-Adapter**：作用在 Vision Encoder 的 MLP（通道维度适配）。
+  - **Decoder-Adapter（本次新增）**：作用在 Mask Decoder Two-Way Block 的 MLP（解码阶段的语义/边界适配）。
+
+### 2. Decoder-Adapter 的网络结构与插入位置
+
+- **子模块类型：AdapterLayer**
+  - 结构：`Linear(C → r) → GELU → Linear(r → C)`，其中：
+    - **C**：Two-Way Block 中 token 的 hidden_size；
+    - **r**：`decoder_adapter_dim`（默认 64）。
+  - 与 Vision Encoder 中使用的 Adapter 保持同一风格（bottleneck + GELU）。
+
+- **插入位置：SamTwoWayAttentionBlock 中的 MLP 路径**
+
+简化前后对比（只画 queries 分支）：
+
+```text
+原始 Two-Way Block (queries 路径):
+
+queries
+  ↓ Self-Attn (+PE)
+  ↓ Cross-Attn token→image
+  ↓ LayerNorm2
+  ↓
+MLP(queries)
+  ↓
+queries = queries + mlp_out
+  ↓
+LayerNorm3
+  ↓
+Cross-Attn image→token
+
+加入 Decoder-Adapter 后:
+
+queries
+  ↓ Self-Attn (+PE)
+  ↓ Cross-Attn token→image
+  ↓ LayerNorm2
+  ↓
+mlp_out = MLP(queries)
+if adapter_queries is not None:
+    adapter_out = AdapterLayer(queries)
+    queries = queries + mlp_out + adapter_out
+else:
+    queries = queries + mlp_out
+  ↓
+LayerNorm3
+  ↓
+Cross-Attn image→token
+```
+
+- **作用方式**：
+  - 与 Encoder-Adapter 类似，Decoder-Adapter 也是**并行集成**在 MLP 上；
+  - 输入为当前层的 `queries`，即点 token / mask token 的隐表示；
+  - 输出是对 MLP 输出的**通道方向校正项**，直接影响后续 Cross-Attn image→token 以及最终 mask/head 的表示。
+
+### 3. 配置与脚本：从零开始跑完整实验
+
+#### 3.1 配置项（YAML）
+
+在 `model.default.yaml` 中，SAM 配置新增：
+
+```yaml
+model:
+  sam:
+    ...
+    adapter_enabled: False
+    adapter_dim: 64
+    decoder_adapter_enabled: False
+    decoder_adapter_dim: 64
+```
+
+- **含义**：
+  - `adapter_enabled` / `adapter_dim`：控制 Vision Encoder 中的标准 Adapter（已存在）。
+  - `decoder_adapter_enabled` / `decoder_adapter_dim`：控制 Mask Decoder 中的 MLP-Adapter（本次新增）。
+  - 默认均为 `False` 和 `64`，保证在不显式开启时行为与旧版完全一致。
+
+#### 3.2 训练脚本与命令行参数
+
+训练入口仍然是：
+
+- `examples/automm/Conv-LoRA/run_semantic_segmentation.py`
+
+新增/更新的关键 CLI 参数：
+
+- **基础模型与 Conv-LoRA / GSPO**：
+  - **`--task`**：数据集名称（`polyp`, `leaf_disease_segmentation`, `camo_sem_seg`, `isic2017`, `road_segmentation`, `SBU-shadow`）
+  - **`--rank`**：Conv-LoRA 低秩 r（如 3）
+  - **`--expert_num`**：Conv-LoRA MoE-Conv 专家数（如 8）
+  - **`--gspo_enable`**：是否启用 GSPO 训练
+  - 其他如 `--gspo_group_size`, `--gspo_warmup_epochs`, `--gspo_contrastive_weight`, `--gspo_quality_momentum` 对应论文中的 GSPO 超参。
+
+- **Encoder-Adapter（已存在）**：
+  - **`--adapter_enable`**：启用 Vision Encoder 中的标准 Adapter
+  - **`--adapter_dim`**：Encoder-Adapter bottleneck 维度（默认 64）
+
+- **Decoder-Adapter（本次新增）**：
+  - **`--decoder_adapter_enable`**：
+    - 启用 Mask Decoder Two-Way Block 中的 MLP-Adapter；
+    - 内部等价于配置 `model.sam.decoder_adapter_enabled = True`。
+  - **`--decoder_adapter_dim`**：
+    - Decoder-Adapter bottleneck 维度（默认 64）；
+    - 内部等价于 `model.sam.decoder_adapter_dim = 64`。
+
+脚本会把上述参数写入 `hyperparameters`，最终由 `MultiModalPredictor` 构建含 Conv-LoRA + GSPO + 各类 Adapter 的 SAM 语义分割模型。
+
+#### 3.3 从训练到评估的完整流程示例（以 ISIC2017 为例）
+
+- **1）准备数据集 CSV**（遵循现有 Conv-LoRA 示例的约定）：
+  - `datasets/isic2017/isic2017/train.csv`
+  - `datasets/isic2017/isic2017/val.csv`
+  - `datasets/isic2017/isic2017/test.csv`
+  - 每个 CSV 至少包含 `image`, `label` 两列（文件名相对路径）。
+
+- **2）训练 + 自动评估（单条命令完成）**
+
+- **基线：Conv-LoRA + GSPO（无任何 Adapter）**：
+
+```bash
+cd examples/automm/Conv-LoRA
+
+python3 run_semantic_segmentation.py \
+    --task isic2017 \
+    --rank 3 \
+    --expert_num 8 \
+    --gspo_enable \
+    --output_dir outputs/baseline_conv_lora_gspo
+```
+
+- **只启用 Decoder-Adapter（验证 Decoder 的额外贡献）**：
+
+```bash
+python3 run_semantic_segmentation.py \
+    --task isic2017 \
+    --rank 3 \
+    --expert_num 8 \
+    --gspo_enable \
+    --decoder_adapter_enable \
+    --decoder_adapter_dim 64 \
+    --output_dir outputs/decoder_adapter_only
+```
+
+- **Encoder-Adapter + Decoder-Adapter（双路径通道适配）**：
+
+```bash
+python3 run_semantic_segmentation.py \
+    --task isic2017 \
+    --rank 3 \
+    --expert_num 8 \
+    --gspo_enable \
+    --adapter_enable \
+    --adapter_dim 64 \
+    --decoder_adapter_enable \
+    --decoder_adapter_dim 64 \
+    --output_dir outputs/encoder_decoder_adapter
+```
+
+脚本会在训练完成后自动：
+
+- 在 `outputs/.../metrics.txt` 中写入测试集评估结果；
+- 对于 ISIC2017 这类任务，默认评估 `iou` 和 `dice`。
+
+### 4. Decoder-Adapter 相关参数说明（总结版）
+
+- **结构相关**：
+  - **`decoder_adapter_enabled` / `--decoder_adapter_enable`**：
+    - `False`：Mask Decoder 使用原始结构；
+    - `True`：在每个 Two-Way Block 的 MLP 上并行挂载 MLP-Adapter。
+  - **`decoder_adapter_dim` / `--decoder_adapter_dim`**：
+    - Bottleneck 维度 r，控制 Decoder-Adapter 容量与参数量；
+    - 推荐初始值 64，可在 32–128 范围内做调参。
+
+- **与其它 PEFT 模块的关系**：
+  - **Conv-LoRA**：
+    - 控制 Attention 中 qkv 的卷积型低秩适配（空间维度）；
+    - 通过 `--rank`, `--expert_num`, `--gspo_*` 等参数配置。
+  - **Encoder-Adapter**：
+    - 控制 Vision Encoder 中 MLP 的通道适配（特征编码阶段）；
+    - 通过 `--adapter_enable`, `--adapter_dim`。
+  - **Decoder-Adapter**（本次新增）：
+    - 控制 Mask Decoder 中 MLP 的通道适配（解码/预测阶段）；
+    - 通过 `--decoder_adapter_enable`, `--decoder_adapter_dim`。
+
+### 5. 消融实验设计（推荐表）
+
+- **基础组合（单任务，如 ISIC2017）**：
+
+- **1）仅 Conv-LoRA + GSPO（无 Adapter）**：
+  - 目标：获得论文 Conv-LoRA + GSPO 的强基线；
+  - 命令：只加 `--gspo_enable`，不加任何 `adapter_*` 参数。
+
+- **2）Conv-LoRA + Encoder-Adapter**：
+  - 目标：验证在编码阶段加通道 Adapter 的收益；
+  - 命令：`--adapter_enable --adapter_dim 64`，不加 `--decoder_adapter_enable`。
+
+- **3）Conv-LoRA + Decoder-Adapter（本次核心）**：
+  - 目标：验证只在解码阶段加 Adapter 的收益；
+  - 命令：`--decoder_adapter_enable --decoder_adapter_dim 64`，不加 `--adapter_enable`。
+
+- **4）Conv-LoRA + Encoder-Adapter + Decoder-Adapter（全量）**：
+  - 目标：验证双路径 Adapter 与 Conv-LoRA 的协同增益；
+  - 命令：同时加 `--adapter_enable` 与 `--decoder_adapter_enable`。
+
+- **指标与期望现象**：
+  - **指标**：
+    - 主：IoU、Dice；
+    - 辅：可关注小目标、边界区域的局部可视化。
+  - **理想趋势**（示意）：
+    - 3）> 1）：证明 Decoder-Adapter 在解码阶段带来额外收益；
+    - 2）> 1）：证明 Encoder-Adapter 在编码阶段有效；
+    - 4）≥ max(2,3)：证明双路径 Adapter 与 Conv-LoRA / GSPO 有协同效果。
+
+### 6. 实践建议与注意事项
+
+- **调参顺序**：
+  - 先在固定 Conv-LoRA + GSPO 配置下，只调节 `decoder_adapter_dim`（如 32 / 64 / 96）；
+  - 若收益稳定，再考虑联合调节 Encoder-Adapter 与 Decoder-Adapter 的维度。
+
+- **稳定性**：
+  - Decoder-Adapter 内部沿用零初始化和残差并行设计；
+  - 在不开启时，行为与旧模型严格一致，适合逐步打开消融。
+
+整体而言，Decoder-Adapter 把 Adapter 的“通道适配”能力从 **特征编码阶段（Vision Encoder）扩展到了解码预测阶段（Mask Decoder）**，为医学语义分割提供了一个更完整的、端到端的 PEFT 适配路径。  

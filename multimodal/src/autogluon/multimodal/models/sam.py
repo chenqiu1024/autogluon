@@ -277,6 +277,8 @@ class SAMForSemanticSegmentation(nn.Module):
         decoder_attention_lora_r: int = 0,
         decoder_attention_lora_alpha: int = 1,
         decoder_attention_lora_dropout: float = 0.0,
+        decoder_adapter_enabled: bool = False,
+        decoder_adapter_dim: int = 64,
     ):
         """
         Load a pretrained Segment Anything Model (SAM).
@@ -330,6 +332,12 @@ class SAMForSemanticSegmentation(nn.Module):
         self.device = None
         self.name_to_id = {}
 
+        # Store adapter configs
+        self.adapter_enabled = adapter_enabled
+        self.adapter_dim = adapter_dim
+        self.decoder_adapter_enabled = decoder_adapter_enabled
+        self.decoder_adapter_dim = decoder_adapter_dim
+
         self._load_checkpoint(checkpoint_name)
 
         freeze_model_layers(self.model, self.frozen_layers)
@@ -338,12 +346,12 @@ class SAMForSemanticSegmentation(nn.Module):
         self.config = self.model.config
         self.image_mean, self.image_std = image_mean_std(image_norm)
 
-        # Inject Adapters if enabled
-        if adapter_enabled:
-            logger.info(f"Injecting Adapters with dim={adapter_dim} into Vision Encoder")
+        # Inject Adapters into vision encoder if enabled
+        if self.adapter_enabled:
+            logger.info(f"Injecting Adapters with dim={self.adapter_dim} into Vision Encoder")
             for layer in self.model.vision_encoder.layers:
                 # Manually create and assign adapter since config didn't have it at init time
-                layer.adapter = AdapterLayer(self.config.hidden_size, adapter_dim)
+                layer.adapter = AdapterLayer(self.config.hidden_size, self.adapter_dim)
 
 
         self.model.mask_decoder.num_mask_tokens = num_mask_tokens
@@ -378,6 +386,11 @@ class SAMForSemanticSegmentation(nn.Module):
             except:
                 config = SamConfig.from_pretrained(checkpoint_name)
             
+            # Propagate decoder adapter settings into mask decoder config (if present)
+            if hasattr(config, "mask_decoder_config") and config.mask_decoder_config is not None:
+                config.mask_decoder_config.decoder_adapter_enabled = self.decoder_adapter_enabled
+                config.mask_decoder_config.decoder_adapter_dim = self.decoder_adapter_dim
+
             # Inject LoRA parameters into mask decoder config
             config.mask_decoder_config.decoder_attention_lora_r = self.decoder_attention_lora_r
             config.mask_decoder_config.decoder_attention_lora_alpha = self.decoder_attention_lora_alpha
@@ -395,11 +408,15 @@ class SAMForSemanticSegmentation(nn.Module):
                 logger.info(f"Decoder Attention LoRA enabled: r={self.decoder_attention_lora_r}, "
                           f"alpha={self.decoder_attention_lora_alpha}, dropout={self.decoder_attention_lora_dropout}")
         else:
-            configuration = SamConfig(name_or_path=checkpoint_name)
-            configuration.mask_decoder_config.decoder_attention_lora_r = self.decoder_attention_lora_r
-            configuration.mask_decoder_config.decoder_attention_lora_alpha = self.decoder_attention_lora_alpha
-            configuration.mask_decoder_config.decoder_attention_lora_dropout = self.decoder_attention_lora_dropout
-            self.model = SamModel(configuration)
+            config = SamConfig(name_or_path=checkpoint_name)
+            if hasattr(config, "mask_decoder_config") and config.mask_decoder_config is not None:
+                config.mask_decoder_config.decoder_adapter_enabled = self.decoder_adapter_enabled
+                config.mask_decoder_config.decoder_adapter_dim = self.decoder_adapter_dim
+
+            config.mask_decoder_config.decoder_attention_lora_r = self.decoder_attention_lora_r
+            config.mask_decoder_config.decoder_attention_lora_alpha = self.decoder_attention_lora_alpha
+            config.mask_decoder_config.decoder_attention_lora_dropout = self.decoder_attention_lora_dropout
+            self.model = SamModel(config)
 
     def save(self, save_path: str = "./"):
         self.model.save_pretrained(save_path)

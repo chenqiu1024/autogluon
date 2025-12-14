@@ -328,6 +328,14 @@ class SamTwoWayAttentionBlock(nn.Module):
 
         self.mlp = SamMLPBlock(config)
         self.layer_norm3 = nn.LayerNorm(self.hidden_size, eps=self.layer_norm_eps)
+        
+        # Decoder MLP-Adapter on queries (optional, config-driven)
+        self.adapter_queries = None
+        # Prefer explicit decoder-specific flags, but fall back to generic adapter flags if provided
+        decoder_adapter_enabled = getattr(config, "decoder_adapter_enabled", False)
+        decoder_adapter_dim = getattr(config, "decoder_adapter_dim", getattr(config, "adapter_dim", 64))
+        if decoder_adapter_enabled:
+            self.adapter_queries = AdapterLayer(self.hidden_size, decoder_adapter_dim)
 
         self.layer_norm4 = nn.LayerNorm(self.hidden_size, eps=self.layer_norm_eps)
         self.cross_attn_image_to_token = SamAttention(config, downsample_rate=attention_downsample_rate,
@@ -364,9 +372,13 @@ class SamTwoWayAttentionBlock(nn.Module):
 
         queries = self.layer_norm2(queries)
 
-        # MLP block
+        # MLP block + optional parallel Adapter on queries
         mlp_out = self.mlp(queries)
-        queries = queries + mlp_out
+        if self.adapter_queries is not None:
+            adapter_out = self.adapter_queries(queries)
+            queries = queries + mlp_out + adapter_out
+        else:
+            queries = queries + mlp_out
         queries = self.layer_norm3(queries)
 
         # Cross attention block, image embedding attending to tokens
