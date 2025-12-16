@@ -136,8 +136,9 @@ if __name__ == "__main__":
                         help="Optional CSV with columns image,bbox_x1,bbox_y1,bbox_x2,bbox_y2 to attach prompts.")
     # Training-time box prompt mixing (default off)
     parser.add_argument("--train_box_prompt_mode", type=str, default="off",
-                        choices=["off", "gt", "noisy", "mix"],
-                        help="Training-time box prompt injection: off/gt/noisy/mix (default off).")
+                        choices=["off", "gt", "noisy", "mix", "predict"],
+                        help="Training-time box prompt injection: off/gt/noisy/mix/predict (default off). "
+                             "predict: use bbox predictor model to generate box prompts from images.")
     parser.add_argument("--train_box_prob_no_prompt", type=float, default=0.2,
                         help="When mode=mix, probability of no prompt.")
     parser.add_argument("--train_box_prob_gt", type=float, default=0.3,
@@ -146,6 +147,10 @@ if __name__ == "__main__":
                         help="When mode=mix, probability of noisy GT box prompt.")
     parser.add_argument("--train_box_noise_frac", type=float, default=0.12,
                         help="Noisy box jitter fraction relative to box size (e.g., 0.12 => ±12%).")
+    parser.add_argument("--train_bbox_model_ckpt", type=str, default=None,
+                        help="Checkpoint for bbox predictor when train_box_prompt_mode=predict.")
+    parser.add_argument("--train_bbox_model_image_size", type=int, default=320,
+                        help="Input size for bbox predictor during training (when train_box_prompt_mode=predict).")
     
     # Quick test / Debug parameters
     parser.add_argument("--debug", action="store_true",
@@ -259,6 +264,20 @@ if __name__ == "__main__":
             "p_noisy": args.train_box_prob_noisy,
             "noise_frac": args.train_box_noise_frac,
         }
+
+        # Setup bbox predictor for training if mode=predict
+        if args.train_box_prompt_mode == "predict":
+            if not args.train_bbox_model_ckpt:
+                raise ValueError("train_box_prompt_mode=predict requires --train_bbox_model_ckpt.")
+            train_bbox_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            train_bbox_predictor = BBoxPromptPredictor(
+                ckpt_path=args.train_bbox_model_ckpt,
+                device=train_bbox_device,
+                image_size=args.train_bbox_model_image_size,
+            )
+            predictor._learner._train_bbox_predictor = train_bbox_predictor
+            print(f"\n[Info] Training-time bbox predictor loaded from: {args.train_bbox_model_ckpt}")
+            print(f"       Input size: {args.train_bbox_model_image_size}\n")
 
         # 打印当前实验的模型保存目录，便于后续通过 AutogluonModels 路径追溯到具体实验日志
         try:

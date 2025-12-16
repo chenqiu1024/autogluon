@@ -77,12 +77,14 @@ class SemanticSegmentationLearner(BaseLearner):
 
         # Training-time box prompt configuration (used when constructing LitModule)
         self._train_box_prompt_cfg = {
-            "mode": "off",       # off / gt / noisy / mix
+            "mode": "off",       # off / gt / noisy / mix / predict
             "p_no": 0.0,
             "p_gt": 0.0,
             "p_noisy": 0.0,
             "noise_frac": 0.12,
         }
+        # BBoxPromptPredictor instance for "predict" mode (set via external config)
+        self._train_bbox_predictor = None
 
     def get_semantic_segmentation_class_num(self, sample_data_path):
         """
@@ -824,6 +826,7 @@ class SemanticSegmentationLearner(BaseLearner):
                 trainable_param_names=peft_param_names,
                 gspo_trainer=gspo_trainer,
                 train_box_prompt_cfg=self._train_box_prompt_cfg,
+                train_bbox_predictor=self._train_bbox_predictor,
                 **optim_kwargs,
             )
         else:
@@ -831,6 +834,7 @@ class SemanticSegmentationLearner(BaseLearner):
                 model=self._model,
                 model_postprocess_fn=self._model_postprocess_fn,
                 train_box_prompt_cfg=self._train_box_prompt_cfg,
+                train_bbox_predictor=self._train_bbox_predictor,
                 **optim_kwargs,
             )
 

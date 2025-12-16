@@ -24,10 +24,10 @@ class SemanticSegmentationLitModule(LitModule):
     - Integrates contrastive loss for better expert selection
     """
     
-    def __init__(self, *args, gspo_trainer=None, train_box_prompt_cfg=None, **kwargs):
+    def __init__(self, *args, gspo_trainer=None, train_box_prompt_cfg=None, train_bbox_predictor=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.gspo_trainer = gspo_trainer
-        # Training-time box prompt config (dict with keys: mode, p_no, p_gt, p_noisy, noise_frac)
+        # Training-time box prompt config (dict with keys: mode, p_no, p_gt, p_noisy, noise_frac, bbox_predictor)
         self.train_box_prompt_cfg = train_box_prompt_cfg or {
             "mode": "off",
             "p_no": 0.0,
@@ -35,6 +35,8 @@ class SemanticSegmentationLitModule(LitModule):
             "p_noisy": 0.0,
             "noise_frac": 0.12,
         }
+        # BBoxPromptPredictor instance for "predict" mode
+        self.train_bbox_predictor = train_bbox_predictor
 
     def _compute_loss(self, output: Dict, label: torch.Tensor, **kwargs):
         loss = 0
@@ -85,10 +87,11 @@ class SemanticSegmentationLitModule(LitModule):
 
         # -------- Train-time box prompt injection (configurable) --------
         # 控制项：self.train_box_prompt_cfg = {
-        #   mode: off / gt / noisy / mix,
+        #   mode: off / gt / noisy / mix / predict,
         #   p_no, p_gt, p_noisy: 仅在 mode=mix 时生效并会归一化,
         #   noise_frac: 噪声扰动比例（相对 bbox 宽高）
         # }
+        # mode=predict: 使用 self.train_bbox_predictor 预测框作为 box prompt
         if self.training:
             cfg = self.train_box_prompt_cfg or {}
             mode = cfg.get("mode", "off")
@@ -110,6 +113,8 @@ class SemanticSegmentationLitModule(LitModule):
                         box_mode = "gt"
                     else:
                         box_mode = "noisy"
+                elif mode == "predict":
+                    box_mode = "predict"
                 else:
                     box_mode = mode
 
@@ -152,6 +157,64 @@ class SemanticSegmentationLitModule(LitModule):
                     ).squeeze()
                 return jittered
 
+            def _predict_boxes_from_images(image_paths: list, target_h: int, target_w: int) -> torch.Tensor:
+                """Use BBoxPromptPredictor to predict boxes from image paths.
+                
+                Args:
+                    image_paths: List of image file paths
+                    target_h: Target image height (model input size)
+                    target_w: Target image width (model input size)
+                
+                Returns:
+                    boxes: (B, 4) tensor in pixel coords, scaled to target_h x target_w
+                """
+                import numpy as np
+                from PIL import Image
+                
+                if self.train_bbox_predictor is None:
+                    raise ValueError("train_bbox_predictor is required for mode='predict'")
+                
+                b = len(image_paths)
+                boxes = torch.zeros((b, 4), device=label.device, dtype=torch.float32)
+                
+                for i, img_path in enumerate(image_paths):
+                    if not img_path:
+                        continue
+                    try:
+                        # predict() returns bbox in original image pixels: (x1, y1, x2, y2)
+                        bbox_px = self.train_bbox_predictor.predict(img_path)
+                        if bbox_px is None:
+                            continue
+                        
+                        # Get original image size to scale bbox to target size
+                        with Image.open(img_path) as img:
+                            orig_w, orig_h = img.size
+                        
+                        # Scale bbox from original coords to target coords
+                        scale_x = target_w / orig_w
+                        scale_y = target_h / orig_h
+                        x1 = bbox_px[0] * scale_x
+                        y1 = bbox_px[1] * scale_y
+                        x2 = bbox_px[2] * scale_x
+                        y2 = bbox_px[3] * scale_y
+                        
+                        # Clamp to valid range
+                        x1 = max(0, min(x1, target_w - 1))
+                        y1 = max(0, min(y1, target_h - 1))
+                        x2 = max(0, min(x2, target_w - 1))
+                        y2 = max(0, min(y2, target_h - 1))
+                        
+                        # Ensure x1 < x2 and y1 < y2
+                        x1, x2 = min(x1, x2), max(x1, x2)
+                        y1, y2 = min(y1, y2), max(y1, y2)
+                        
+                        boxes[i] = torch.tensor([x1, y1, x2, y2], device=label.device, dtype=torch.float32)
+                    except Exception as e:
+                        logger.warning(f"Failed to predict bbox for {img_path}: {e}")
+                        continue
+                
+                return boxes
+
             if box_mode in ["gt", "noisy"]:
                 gt_boxes = _compute_gt_boxes(label)
                 h, w = label.shape[-2], label.shape[-1]
@@ -159,6 +222,15 @@ class SemanticSegmentationLitModule(LitModule):
                     gt_boxes = _jitter_boxes(gt_boxes, h=h, w=w, frac=noise_frac)
                 if not (gt_boxes.sum(dim=1) == 0).all():
                     batch[self.model.box_key] = gt_boxes.unsqueeze(1)  # (B,1,4)
+            elif box_mode == "predict":
+                # Get image paths from batch
+                image_path_key = self.model.image_path_key
+                image_paths = batch.get(image_path_key, [])
+                if image_paths:
+                    h, w = label.shape[-2], label.shape[-1]
+                    pred_boxes = _predict_boxes_from_images(image_paths, target_h=h, target_w=w)
+                    if not (pred_boxes.sum(dim=1) == 0).all():
+                        batch[self.model.box_key] = pred_boxes.unsqueeze(1)  # (B,1,4)
         # prepare_targets
         output = run_model(self.model, batch)
         if isinstance(self.loss_func, Mask2FormerLoss):

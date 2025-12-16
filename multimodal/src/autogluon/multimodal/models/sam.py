@@ -454,6 +454,10 @@ class SAMForSemanticSegmentation(nn.Module):
     def box_key(self):
         return f"{self.prefix}_box"
 
+    @property
+    def image_path_key(self):
+        return f"{self.prefix}_image_path"
+
     def train(self, mode: bool = True):
         super().train(mode)
         for module in self.modules():

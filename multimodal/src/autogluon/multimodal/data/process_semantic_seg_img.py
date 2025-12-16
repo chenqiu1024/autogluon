@@ -13,6 +13,7 @@ from ..constants import (
     CLASS_LABEL,
     COLUMN,
     IMAGE,
+    IMAGE_PATH,
     IMAGE_VALID_NUM,
     LABEL,
     MASK_LABEL,
@@ -121,6 +122,10 @@ class SemanticSegImageProcessor(ImageProcessor):
     def class_label_key(self):
         return f"{self.prefix}_{CLASS_LABEL}"
 
+    @property
+    def image_path_key(self):
+        return f"{self.prefix}_{IMAGE_PATH}"
+
     def collate_fn(self, image_column_names: Optional[List] = None, per_gpu_batch_size: Optional[int] = None) -> Dict:
         """
         Collate images into a batch. Here it pads images since the image number may
@@ -141,6 +146,7 @@ class SemanticSegImageProcessor(ImageProcessor):
             {
                 self.image_key: PadCollator(pad_val=0),
                 self.label_key: PadCollator(pad_val=0),
+                self.image_path_key: ListCollator(),  # Store image paths for train-time bbox prediction
             }
         )
 
@@ -241,10 +247,14 @@ class SemanticSegImageProcessor(ImageProcessor):
                     gt_masks_per_category.append(per_gt_masks_per_category)
                     gt_classes.append(per_gt_classes)
 
+        # Get the first image path for train-time bbox prediction
+        image_path = per_col_image_features[0] if len(per_col_image_features) > 0 else ""
+        
         ret.update(
             {
                 self.image_key: images[0] if len(images) != 0 else torch.tensor([]),
                 self.label_key: gts[0] if len(gts) != 0 else torch.tensor([]),
+                self.image_path_key: image_path,  # Store image path for train-time bbox prediction
             }
         )
         if self.num_classes > 1:
