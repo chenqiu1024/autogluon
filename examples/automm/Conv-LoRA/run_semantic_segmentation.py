@@ -1,9 +1,12 @@
 import argparse
 import os
 
+import numpy as np
 import pandas as pd
+import torch
 
 from autogluon.multimodal import MultiModalPredictor
+from bbox_prompt_model import BBoxPromptPredictor
 
 
 def get_default_training_setting(dataset_name):
@@ -89,14 +92,19 @@ if __name__ == "__main__":
     # TTA (Test-Time Augmentation) parameters
     parser.add_argument("--tta_enable", action="store_true", help="Enable Test-Time Augmentation for evaluation")
     parser.add_argument("--tta_scales", type=float, nargs="+", default=[0.75, 1.0, 1.25], 
-                        help="Scale factors for multi-scale TTA (default: [0.75, 1.0, 1.25])")
+                        help="Scale factors for multi-scale TTA (default: [0.75, 1.0, 1.25]). "
+                             "Recommended: [0.75, 1.0, 1.25] or [0.8, 1.0, 1.2]")
     parser.add_argument("--tta_flips", type=str, nargs="+", default=["none", "horizontal"],
                         choices=["none", "horizontal", "vertical"],
                         help="Flip types for TTA (default: ['none', 'horizontal'])")
     parser.add_argument("--tta_rotations", type=float, nargs="+", default=[0],
-                        help="Rotation angles in degrees for TTA (default: [0])")
+                        help="Rotation angles in degrees for TTA (default: [0]). "
+                             "Recommended: [0] for fast, or [-10, 0, 10] for better")
     parser.add_argument("--tta_fusion", type=str, default="mean", choices=["mean", "weighted_mean"],
                         help="Fusion method for TTA predictions (default: 'mean')")
+    parser.add_argument("--tta_resize_method", type=str, default="bilinear", choices=["bilinear", "bicubic"],
+                        help="Resize interpolation method for multi-scale TTA (default: 'bilinear'). "
+                             "bilinear: faster, bicubic: higher quality")
     parser.add_argument("--tta_threshold", type=float, default=0.5,
                         help="Threshold for binary segmentation in TTA (default: 0.5)")
     parser.add_argument("--tta_min_area", type=float, default=0.001,
@@ -107,6 +115,31 @@ if __name__ == "__main__":
                         help="Directory to cache TTA predictions for resume (default: None, no caching)")
     parser.add_argument("--tta_no_resume", action="store_true",
                         help="Disable resume from cache (start fresh even if cache exists)")
+    parser.add_argument("--tta_box_prompt_mode", type=str, default="off",
+                        choices=["off", "add", "replace"],
+                        help="Use GT box as SAM box prompt (off/add/replace); box not transformed with TTA")
+    # BBox prompt configuration
+    parser.add_argument("--bbox_prompt_source", type=str, default="none",
+                        choices=["none", "gt", "predict"],
+                        help="Box prompt source: none (no prompt), gt (from mask), predict (from bbox model).")
+    parser.add_argument("--bbox_model_ckpt", type=str, default=None,
+                        help="Checkpoint for bbox predictor when bbox_prompt_source=predict.")
+    parser.add_argument("--bbox_model_image_size", type=int, default=320,
+                        help="Input size for bbox predictor inference.")
+    parser.add_argument("--bbox_preds_csv", type=str, default=None,
+                        help="Optional CSV with columns image,bbox_x1,bbox_y1,bbox_x2,bbox_y2 to attach prompts.")
+    # Training-time box prompt mixing (default off)
+    parser.add_argument("--train_box_prompt_mode", type=str, default="off",
+                        choices=["off", "gt", "noisy", "mix"],
+                        help="Training-time box prompt injection: off/gt/noisy/mix (default off).")
+    parser.add_argument("--train_box_prob_no_prompt", type=float, default=0.2,
+                        help="When mode=mix, probability of no prompt.")
+    parser.add_argument("--train_box_prob_gt", type=float, default=0.3,
+                        help="When mode=mix, probability of GT box prompt.")
+    parser.add_argument("--train_box_prob_noisy", type=float, default=0.5,
+                        help="When mode=mix, probability of noisy GT box prompt.")
+    parser.add_argument("--train_box_noise_frac", type=float, default=0.12,
+                        help="Noisy box jitter fraction relative to box size (e.g., 0.12 => ±12%).")
     
     # Quick test / Debug parameters
     parser.add_argument("--debug", action="store_true",
@@ -194,6 +227,35 @@ if __name__ == "__main__":
             hyperparameters=hyperparameters,
             label="label",
         )
+
+        # Configure training-time box prompt mixing
+        predictor._learner._train_box_prompt_cfg = {
+            "mode": args.train_box_prompt_mode,
+            "p_no": args.train_box_prob_no_prompt,
+            "p_gt": args.train_box_prob_gt,
+            "p_noisy": args.train_box_prob_noisy,
+            "noise_frac": args.train_box_noise_frac,
+        }
+
+        # 打印当前实验的模型保存目录，便于后续通过 AutogluonModels 路径追溯到具体实验日志
+        try:
+            # MultiModalPredictor 会在内部根据时间戳生成类似 AutogluonModels/ag-YYYYMMDD_HHMMSS 的目录
+            model_path = predictor.path
+        except AttributeError:
+            # 兼容极端情况：如果未来接口变化，没有 path 属性，则显式提示
+            model_path = None
+
+        if model_path is not None:
+            print("\n========================================")
+            print("Training MultiModalPredictor")
+            print(f"  Task        : {dataset_name}")
+            print(f"  Save path   : {model_path}")
+            print("  (You can use this directory name to link back to the training log.)")
+            print("========================================\n")
+        else:
+            print("\n[Warning] MultiModalPredictor has no 'path' attribute. "
+                  "Model save directory cannot be printed.\n")
+
         predictor.fit(train_data=train_df, tuning_data=val_df, seed=args.seed)
 
     # Enable TTA if requested
@@ -204,6 +266,7 @@ if __name__ == "__main__":
         print(f"  Flips: {args.tta_flips}")
         print(f"  Rotations: {args.tta_rotations}")
         print(f"  Fusion: {args.tta_fusion}")
+        print(f"  Resize method: {args.tta_resize_method}")
         print(f"  Total augmentations: {len(args.tta_scales) * len(args.tta_flips) * len(args.tta_rotations)}")
         print(f"{'='*60}\n")
         
@@ -212,12 +275,60 @@ if __name__ == "__main__":
             flips=args.tta_flips,
             rotations=args.tta_rotations,
             fusion_method=args.tta_fusion,
+            resize_method=args.tta_resize_method,
             threshold=args.tta_threshold,
             min_area_ratio=args.tta_min_area,
             use_morphology=args.tta_morphology,
             cache_dir=args.tta_cache_dir,
             resume_from_cache=not args.tta_no_resume,
+            box_prompt_mode=args.tta_box_prompt_mode,
         )
+
+    # Optional bbox predictor for predicted box prompts
+    bbox_predictor = None
+    if args.bbox_prompt_source == "predict":
+        if not args.bbox_model_ckpt and not args.bbox_preds_csv:
+            raise ValueError("bbox_prompt_source=predict requires --bbox_model_ckpt or --bbox_preds_csv.")
+        if args.bbox_model_ckpt:
+            bbox_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            bbox_predictor = BBoxPromptPredictor(
+                ckpt_path=args.bbox_model_ckpt,
+                device=bbox_device,
+                image_size=args.bbox_model_image_size,
+            )
+        if args.tta_box_prompt_mode == "off":
+            print("[Warning] bbox_prompt_source=predict set but tta_box_prompt_mode=off; box prompts will be ignored.")
+
+    def attach_pred_boxes(df: pd.DataFrame) -> pd.DataFrame:
+        """Attach predicted or precomputed boxes to dataframe."""
+        df = df.copy()
+        if args.bbox_preds_csv:
+            preds = pd.read_csv(args.bbox_preds_csv)
+            merged = df.merge(preds, on="image", how="left")
+            if merged[["bbox_x1", "bbox_y1", "bbox_x2", "bbox_y2"]].isna().all().all():
+                preds["image_basename"] = preds["image"].apply(lambda p: os.path.basename(p))
+                merged["image_basename"] = merged["image"].apply(lambda p: os.path.basename(p))
+                merged = merged.merge(
+                    preds.drop(columns=["image"]), on="image_basename", how="left", suffixes=("", "_pred")
+                )
+                merged.drop(columns=["image_basename"], inplace=True)
+                for col in ["bbox_x1", "bbox_y1", "bbox_x2", "bbox_y2"]:
+                    pred_col = f"{col}_pred"
+                    if pred_col in merged.columns:
+                        merged[col] = merged[col].fillna(merged[pred_col])
+                        merged.drop(columns=[pred_col], inplace=True)
+            df = merged
+        elif bbox_predictor is not None:
+            boxes = []
+            for _, r in df.iterrows():
+                box = bbox_predictor.predict(r["image"])
+                boxes.append(box)
+            boxes = np.stack(boxes, axis=0)
+            df["bbox_x1"] = boxes[:, 0]
+            df["bbox_y1"] = boxes[:, 1]
+            df["bbox_x2"] = boxes[:, 2]
+            df["bbox_y2"] = boxes[:, 3]
+        return df
 
     # evaluation
     metric_file = os.path.join(args.output_dir, "metrics.txt")
@@ -238,6 +349,10 @@ if __name__ == "__main__":
             eval_metrics = ["ber"]
         else:
             eval_metrics = ["iou", "dice"]  # Evaluate both IoU and DICE
+
+        # Attach predicted bbox prompts if requested
+        if args.bbox_prompt_source == "predict" and (args.bbox_preds_csv or bbox_predictor):
+            test_df = attach_pred_boxes(test_df)
 
         res = predictor.evaluate(test_df, metrics=eval_metrics)
         print(f"Evaluation results for test dataset {dataset_name}: ", res)
@@ -261,6 +376,9 @@ if __name__ == "__main__":
                 test_df = test_df.head(args.quick_test)
                 print(f"\n🔍 QUICK TEST MODE: Processing only first {args.quick_test} images (out of {original_size}) for {per_dataset}\n")
             
+            if args.bbox_prompt_source == "predict" and (args.bbox_preds_csv or bbox_predictor):
+                test_df = attach_pred_boxes(test_df)
+
             res = predictor.evaluate(test_df, metrics=["sm", "fm", "em", "mae"])
             print(f"Evaluation results for test dataset {per_dataset}: ", res)
             f.write(f"Evaluation results for test dataset {per_dataset}: {res} \n")

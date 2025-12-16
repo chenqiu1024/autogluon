@@ -1001,8 +1001,10 @@ class MultiModalPredictor:
         threshold: float = 0.5,
         min_area_ratio: float = 0.001,
         use_morphology: bool = False,
+        resize_method: str = "bilinear",
         cache_dir: Optional[str] = None,
         resume_from_cache: bool = True,
+        box_prompt_mode: str = "off",
     ):
         """
         Enable Test-Time Augmentation (TTA) for inference.
@@ -1033,6 +1035,9 @@ class MultiModalPredictor:
             Remove connected components with area < min_area_ratio * image_area.
         use_morphology : bool, default = False
             Whether to apply morphological closing for smoothing.
+        resize_method : str, default = "bilinear"
+            Resize interpolation method: "bilinear" or "bicubic".
+            Recommended: "bilinear" for speed, "bicubic" for quality.
         cache_dir : Optional[str], default = None
             Directory to cache TTA predictions for resume (default: None, no caching).
             Useful for long-running evaluations that might be interrupted.
@@ -1082,8 +1087,10 @@ class MultiModalPredictor:
             threshold=threshold,
             min_area_ratio=min_area_ratio,
             use_morphology=use_morphology,
+            resize_method=resize_method,
             cache_dir=cache_dir,
             resume_from_cache=resume_from_cache,
+            box_prompt_mode=box_prompt_mode,
         )
     
     def disable_tta(self):
