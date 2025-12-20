@@ -358,6 +358,8 @@ class SemanticSegmentationLitModule(LitModule):
         
         This method generates multiple predictions per image and uses
         group-level advantage functions to weight the losses.
+        
+        Extended to support Encoder Adapter quality feedback when gspo_adapter_enabled=True.
         """
         images = batch[self.model.image_key] if hasattr(self.model, 'image_key') else batch['image']
         labels = batch[self.model.label_key]
@@ -398,7 +400,7 @@ class SemanticSegmentationLitModule(LitModule):
             loss_fn=loss_fn,
         )
         
-        # Update expert quality feedback
+        # Update expert quality feedback (Conv-LoRA MoE)
         if selected_experts_groups:
             quality_scores = [
                 self.gspo_trainer.compute_segmentation_quality(
@@ -409,5 +411,9 @@ class SemanticSegmentationLitModule(LitModule):
             self.gspo_trainer.update_expert_feedback(
                 selected_experts_groups, quality_scores, self.model
             )
+            
+            # Update Adapter quality feedback (GSPO-Adapter extension)
+            if hasattr(self.gspo_trainer, 'gspo_adapter_enabled') and self.gspo_trainer.gspo_adapter_enabled:
+                self.gspo_trainer.update_adapter_feedback(quality_scores, self.model)
         
         return loss, metrics, selected_experts_groups

@@ -274,6 +274,9 @@ class SAMForSemanticSegmentation(nn.Module):
         image_norm: Optional[str] = None,
         adapter_enabled: bool = False,
         adapter_dim: int = 64,
+        adapter_gspo_enabled: bool = False,
+        adapter_gspo_momentum: float = 0.9,
+        adapter_gspo_scale_adaptation: bool = False,
         decoder_attention_lora_r: int = 0,
         decoder_attention_lora_alpha: int = 1,
         decoder_attention_lora_dropout: float = 0.0,
@@ -335,6 +338,9 @@ class SAMForSemanticSegmentation(nn.Module):
         # Store adapter configs
         self.adapter_enabled = adapter_enabled
         self.adapter_dim = adapter_dim
+        self.adapter_gspo_enabled = adapter_gspo_enabled
+        self.adapter_gspo_momentum = adapter_gspo_momentum
+        self.adapter_gspo_scale_adaptation = adapter_gspo_scale_adaptation
         self.decoder_adapter_enabled = decoder_adapter_enabled
         self.decoder_adapter_dim = decoder_adapter_dim
 
@@ -348,10 +354,22 @@ class SAMForSemanticSegmentation(nn.Module):
 
         # Inject Adapters into vision encoder if enabled
         if self.adapter_enabled:
-            logger.info(f"Injecting Adapters with dim={self.adapter_dim} into Vision Encoder")
+            gspo_info = ""
+            if self.adapter_gspo_enabled:
+                gspo_info = f", GSPO enabled (momentum={self.adapter_gspo_momentum}"
+                if self.adapter_gspo_scale_adaptation:
+                    gspo_info += ", scale_adaptation=True"
+                gspo_info += ")"
+            logger.info(f"Injecting Adapters with dim={self.adapter_dim} into Vision Encoder{gspo_info}")
             for layer in self.model.vision_encoder.layers:
-                # Manually create and assign adapter since config didn't have it at init time
-                layer.adapter = AdapterLayer(self.config.hidden_size, self.adapter_dim)
+                # Create adapter with GSPO parameters if enabled
+                layer.adapter = AdapterLayer(
+                    in_features=self.config.hidden_size, 
+                    adapter_dim=self.adapter_dim,
+                    gspo_enabled=self.adapter_gspo_enabled,
+                    gspo_momentum=self.adapter_gspo_momentum,
+                    gspo_scale_adaptation=self.adapter_gspo_scale_adaptation,
+                )
 
 
         self.model.mask_decoder.num_mask_tokens = num_mask_tokens

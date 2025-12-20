@@ -76,3 +76,7 @@ optim:
     w_boundary: 0.3
     w_smooth: 0.1
     w_thin: 0.05
+    # GSPO-Adapter extension parameters
+    adapter_enabled: False  # Enable GSPO quality feedback for Encoder Adapters
+    adapter_momentum: 0.9   # Momentum for adapter quality history updates
+    adapter_scale_adaptation: False  # Enable adaptive scale based on quality (Phase 2)

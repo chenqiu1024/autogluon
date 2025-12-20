@@ -22,16 +22,58 @@ def identity(x):
 
 class AdapterLayer(nn.Module):
     """
-    Standard Bottleneck Adapter Layer.
+    Standard Bottleneck Adapter Layer with optional GSPO enhancement.
     Structure: Linear(d, r) -> Activation -> Linear(r, d) -> Scale
+    
+    GSPO Enhancement (when gspo_enabled=True):
+    - Tracks quality history for quality-aware adaptation
+    - Supports contribution score for adaptive scaling (Phase 2)
+    - Can be extended to MoE architecture (Phase 3)
+    
+    Parameters
+    ----------
+    in_features : int
+        Input feature dimension (e.g., 1280 for SAM ViT-Huge)
+    adapter_dim : int
+        Bottleneck dimension (e.g., 64)
+    scale : float
+        Initial scale factor (default 1.0)
+    dropout : float
+        Dropout probability (default 0.0)
+    gspo_enabled : bool
+        Whether to enable GSPO quality tracking (default False)
+    gspo_momentum : float
+        Momentum for quality history updates (default 0.9)
+    gspo_scale_adaptation : bool
+        Whether to enable adaptive scale based on quality (Phase 2, default False)
     """
-    def __init__(self, in_features, adapter_dim, scale=1.0, dropout=0.0):
+    def __init__(
+        self, 
+        in_features, 
+        adapter_dim, 
+        scale=1.0, 
+        dropout=0.0,
+        gspo_enabled=False,
+        gspo_momentum=0.9,
+        gspo_scale_adaptation=False,
+    ):
         super().__init__()
         self.down_proj = nn.Linear(in_features, adapter_dim)
         self.activation = nn.GELU()
         self.up_proj = nn.Linear(adapter_dim, in_features)
         self.scale = nn.Parameter(torch.tensor(scale))
         self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+        
+        # GSPO enhancement
+        self.gspo_enabled = gspo_enabled
+        self.gspo_momentum = gspo_momentum
+        self.gspo_scale_adaptation = gspo_scale_adaptation
+        
+        if gspo_enabled:
+            # Quality tracking buffers
+            self.register_buffer("quality_history", torch.tensor(0.5))
+            self.register_buffer("contribution_score", torch.tensor(1.0))
+            self.register_buffer("update_count", torch.tensor(0))
         
         self.reset_parameters()
 
@@ -45,7 +87,60 @@ class AdapterLayer(nn.Module):
         down = self.down_proj(x)
         act = self.activation(down)
         up = self.up_proj(act)
-        return self.dropout(up) * self.scale
+        
+        # GSPO Phase 2: Adaptive scale based on quality history
+        if self.gspo_enabled and self.gspo_scale_adaptation and self.training:
+            effective_scale = self.scale * self.contribution_score
+        else:
+            effective_scale = self.scale
+            
+        return self.dropout(up) * effective_scale
+    
+    def update_quality_feedback(self, quality_score: torch.Tensor):
+        """
+        GSPO: Update quality history based on actual performance.
+        
+        This provides the feedback loop for quality-aware adaptation.
+        Called by GSPOConvLoRATrainer after each training step.
+        
+        Args:
+            quality_score: Scalar tensor containing quality metric (e.g., IoU)
+        """
+        if not self.gspo_enabled:
+            return
+        
+        with torch.no_grad():
+            # Convert to scalar if needed
+            if quality_score.numel() > 1:
+                quality_score = quality_score.mean()
+            quality_value = quality_score.item()
+            
+            # Momentum update of quality history
+            self.quality_history = (
+                self.gspo_momentum * self.quality_history +
+                (1 - self.gspo_momentum) * quality_value
+            )
+            
+            # Update contribution score (Phase 2)
+            # Maps quality history [0, 1] to contribution score via sigmoid
+            # quality_history = 0.5 -> score = 0.5 (neutral)
+            # quality_history > 0.5 -> score > 0.5 (increase contribution)
+            # quality_history < 0.5 -> score < 0.5 (decrease contribution)
+            self.contribution_score = torch.sigmoid(
+                (self.quality_history - 0.5) * 4.0  # Amplification factor
+            )
+            
+            self.update_count += 1
+    
+    def get_gspo_stats(self):
+        """Return GSPO statistics for logging."""
+        if not self.gspo_enabled:
+            return {}
+        return {
+            "quality_history": self.quality_history.item(),
+            "contribution_score": self.contribution_score.item(),
+            "update_count": self.update_count.item(),
+        }
 
 
 

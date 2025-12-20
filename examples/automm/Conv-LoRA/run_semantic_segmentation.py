@@ -85,6 +85,14 @@ if __name__ == "__main__":
     parser.add_argument("--adapter_enable", action="store_true", help="Enable standard Adapter modules")
     parser.add_argument("--adapter_dim", type=int, default=64, help="Dimension of the adapter bottleneck")
     
+    # GSPO-Adapter extension parameters (Phase 1-2)
+    parser.add_argument("--gspo_adapter_enable", action="store_true", 
+                        help="Enable GSPO quality feedback for Encoder Adapters (Phase 1)")
+    parser.add_argument("--gspo_adapter_momentum", type=float, default=0.9, 
+                        help="Momentum for adapter quality history updates")
+    parser.add_argument("--gspo_adapter_scale_adaptation", action="store_true",
+                        help="Enable adaptive scale based on quality history (Phase 2)")
+    
     # Decoder Attention LoRA parameters (LoRA on Attention)
     parser.add_argument("--decoder_attn_lora_enable", action="store_true", 
                         help="Enable LoRA on decoder attention Q/K/V projections")
@@ -226,6 +234,25 @@ if __name__ == "__main__":
             "model.sam.adapter_enabled": True,
             "model.sam.adapter_dim": args.adapter_dim,
         })
+        
+        # GSPO-Adapter extension configuration (Phase 1-2)
+        if args.gspo_adapter_enable:
+            if not args.gspo_enable:
+                print("Warning: --gspo_adapter_enable requires --gspo_enable. Enabling GSPO automatically.")
+                args.gspo_enable = True
+            print(f"Enabling GSPO-Adapter extension with momentum={args.gspo_adapter_momentum}")
+            hyperparameters.update({
+                "optim.gspo.adapter_enabled": True,
+                "optim.gspo.adapter_momentum": args.gspo_adapter_momentum,
+            })
+            # Pass scale adaptation to model config
+            if args.gspo_adapter_scale_adaptation:
+                print("Enabling GSPO-Adapter scale adaptation (Phase 2)")
+                hyperparameters.update({
+                    "optim.gspo.adapter_scale_adaptation": True,
+                    "model.sam.adapter_gspo_enabled": True,
+                    "model.sam.adapter_gspo_scale_adaptation": True,
+                })
     
     # Decoder Attention LoRA configuration
     if args.decoder_attn_lora_enable:

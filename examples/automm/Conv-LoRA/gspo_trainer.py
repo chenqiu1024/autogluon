@@ -1,14 +1,19 @@
 """
-GSPO (Group Sequence Policy Optimization) Trainer for Conv-LoRA
+GSPO (Group Sequence Policy Optimization) Trainer for Conv-LoRA and Adapters
 
 This module implements the GSPO training strategy that enhances Conv-LoRA's
 MoE mechanism through group-level optimization and quality-aware feedback.
+
+Extended to support Encoder Adapters (Phase 1-3):
+- Phase 1: Unified advantage weighting (adapters receive same quality-weighted gradients)
+- Phase 2: Adapter scale adaptation (contribution score based on quality history)
+- Phase 3: Adapter MoE architecture (optional, multiple adapter variants)
 
 Key components:
 1. Group-level sampling: Generate multiple predictions per image
 2. Advantage function: Compute relative quality within groups
 3. Contrastive loss: Pull high-quality predictions together, push low-quality apart
-4. Quality feedback: Update expert selection based on actual performance
+4. Quality feedback: Update expert selection AND adapter quality based on actual performance
 """
 
 import torch
@@ -47,6 +52,9 @@ class GSPOConvLoRATrainer:
         w_boundary: float = 0.3,
         w_smooth: float = 0.1,
         w_thin: float = 0.05,
+        # GSPO-Adapter extension parameters
+        gspo_adapter_enabled: bool = False,
+        gspo_adapter_momentum: float = 0.9,
     ):
         self.predictor = predictor
         self.group_size = group_size
@@ -61,9 +69,14 @@ class GSPOConvLoRATrainer:
         self.w_smooth = w_smooth
         self.w_thin = w_thin
         
+        # GSPO-Adapter extension (Phase 1-2)
+        self.gspo_adapter_enabled = gspo_adapter_enabled
+        self.gspo_adapter_momentum = gspo_adapter_momentum
+        
         # Statistics tracking
         self.expert_performance_log = defaultdict(list)
         self.group_quality_history = []
+        self.adapter_quality_log = []  # Track adapter quality over time
         self.current_epoch = 0
         
     def is_gspo_active(self, epoch: int) -> bool:
@@ -409,15 +422,81 @@ class GSPOConvLoRATrainer:
                 for moe_gate in moe_gates:
                     moe_gate.update_quality_history(selected_experts, quality)
     
+    def update_adapter_feedback(
+        self,
+        quality_scores: List[torch.Tensor],
+        model
+    ):
+        """
+        GSPO-Adapter Extension: Update adapter quality history based on GSPO feedback.
+        
+        This method is called after each GSPO training step to provide quality feedback
+        to all AdapterLayer modules in the model.
+        
+        Args:
+            quality_scores: List of quality score tensors from each group [G] of [B]
+            model: The model containing AdapterLayer modules
+        """
+        if not self.gspo_adapter_enabled:
+            return
+        
+        # Compute average quality across groups
+        if not quality_scores:
+            return
+            
+        avg_quality = torch.stack([q.mean() for q in quality_scores]).mean()
+        
+        # Collect all AdapterLayer modules from the model
+        adapters = []
+        for name, module in model.named_modules():
+            # Check if this is an AdapterLayer with GSPO enabled
+            if hasattr(module, 'update_quality_feedback') and hasattr(module, 'gspo_enabled'):
+                if module.gspo_enabled:
+                    adapters.append((name, module))
+        
+        if not adapters:
+            return
+        
+        # Update each adapter with quality feedback
+        for name, adapter in adapters:
+            adapter.update_quality_feedback(avg_quality)
+        
+        # Log adapter quality for analysis
+        self.adapter_quality_log.append({
+            'epoch': self.current_epoch,
+            'avg_quality': avg_quality.item(),
+            'num_adapters': len(adapters),
+        })
+    
+    def get_adapter_stats(self, model) -> Dict:
+        """
+        Get GSPO statistics from all adapters in the model.
+        
+        Args:
+            model: The model containing AdapterLayer modules
+            
+        Returns:
+            Dictionary with adapter statistics
+        """
+        stats = {}
+        for name, module in model.named_modules():
+            if hasattr(module, 'get_gspo_stats'):
+                adapter_stats = module.get_gspo_stats()
+                if adapter_stats:
+                    stats[name] = adapter_stats
+        return stats
+    
     def get_statistics(self) -> Dict:
         """Get training statistics for analysis."""
         return {
             'expert_performance': dict(self.expert_performance_log),
             'group_quality_history': self.group_quality_history,
+            'adapter_quality_log': self.adapter_quality_log,
         }
     
     def reset_statistics(self):
         """Reset accumulated statistics."""
         self.expert_performance_log.clear()
         self.group_quality_history.clear()
+        self.adapter_quality_log.clear()
 
