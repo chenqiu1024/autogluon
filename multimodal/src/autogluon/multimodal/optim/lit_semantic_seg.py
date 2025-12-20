@@ -24,9 +24,24 @@ class SemanticSegmentationLitModule(LitModule):
     - Integrates contrastive loss for better expert selection
     """
     
-    def __init__(self, *args, gspo_trainer=None, train_box_prompt_cfg=None, train_bbox_predictor=None, **kwargs):
+    def __init__(
+        self,
+        *args,
+        gspo_trainer=None,
+        gspo_adapter_cfg=None,
+        train_box_prompt_cfg=None,
+        train_bbox_predictor=None,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         self.gspo_trainer = gspo_trainer
+        # GSPO-Adapter extension config (encoder adapters only).
+        # Defaults keep backward compatibility: encoder adapters are NOT trained during GSPO-active steps.
+        self.gspo_adapter_cfg = gspo_adapter_cfg or {
+            "train_encoder_adapter": False,
+            "encoder_adapter_noise_std": 0.0,
+            "encoder_adapter_gate_noise_std": 0.0,
+        }
         # Training-time box prompt config (dict with keys: mode, p_no, p_gt, p_noisy, noise_frac, bbox_predictor)
         self.train_box_prompt_cfg = train_box_prompt_cfg or {
             "mode": "off",
@@ -359,8 +374,20 @@ class SemanticSegmentationLitModule(LitModule):
         This method generates multiple predictions per image and uses
         group-level advantage functions to weight the losses.
         """
-        images = batch[self.model.image_key] if hasattr(self.model, 'image_key') else batch['image']
+        images = batch[self.model.image_key] if hasattr(self.model, "image_key") else batch["image"]
         labels = batch[self.model.label_key]
+
+        # GSPO-Adapter extension:
+        # - Enable GSPO mode on encoder adapters (adds exploration noise / gate sampling if configured)
+        # - Optionally freeze encoder adapters during GSPO-active steps (default behavior)
+        prev_requires_grad = None
+        self._set_encoder_adapters_gspo_mode(
+            active=True,
+            adapter_noise_std=float(self.gspo_adapter_cfg.get("encoder_adapter_noise_std", 0.0)),
+            gate_noise_std=float(self.gspo_adapter_cfg.get("encoder_adapter_gate_noise_std", 0.0)),
+        )
+        if not bool(self.gspo_adapter_cfg.get("train_encoder_adapter", False)):
+            prev_requires_grad = self._set_encoder_adapter_requires_grad(trainable=False)
         
         # Define forward function for GSPO
         def forward_fn(images):
@@ -377,8 +404,8 @@ class SemanticSegmentationLitModule(LitModule):
             
             # Extract selected experts if available
             selected_experts = None
-            if hasattr(output[self.model.prefix], 'selected_experts'):
-                selected_experts = output[self.model.prefix]['selected_experts']
+            if isinstance(output.get(self.model.prefix, None), dict) and "selected_experts" in output[self.model.prefix]:
+                selected_experts = output[self.model.prefix]["selected_experts"]
             
             return logits, moe_loss, selected_experts
         
@@ -390,13 +417,19 @@ class SemanticSegmentationLitModule(LitModule):
             else:
                 return self.loss_func(input=predictions, target=targets)
         
-        # Run GSPO group training
-        loss, metrics, selected_experts_groups = self.gspo_trainer.gspo_group_training_step(
-            images=images,
-            masks_gt=labels,
-            forward_fn=forward_fn,
-            loss_fn=loss_fn,
-        )
+        try:
+            # Run GSPO group training
+            loss, metrics, selected_experts_groups = self.gspo_trainer.gspo_group_training_step(
+                images=images,
+                masks_gt=labels,
+                forward_fn=forward_fn,
+                loss_fn=loss_fn,
+            )
+        finally:
+            # Restore adapter grad states and disable GSPO mode
+            if prev_requires_grad is not None:
+                self._restore_requires_grad(prev_requires_grad)
+            self._set_encoder_adapters_gspo_mode(active=False)
         
         # Update expert quality feedback
         if selected_experts_groups:
@@ -411,3 +444,41 @@ class SemanticSegmentationLitModule(LitModule):
             )
         
         return loss, metrics, selected_experts_groups
+
+    def _iter_encoder_adapter_named_modules(self):
+        """
+        Yield (name, module) for encoder adapters only (exclude decoder adapters).
+        We match by module name path to avoid touching decoder adapter modules.
+        """
+        for name, module in self.model.named_modules():
+            if "vision_encoder.layers" in name and name.endswith(".adapter"):
+                yield name, module
+
+    def _set_encoder_adapters_gspo_mode(self, active: bool, adapter_noise_std: float = 0.0, gate_noise_std: float = 0.0):
+        for _, m in self._iter_encoder_adapter_named_modules():
+            if hasattr(m, "set_gspo_mode"):
+                # GatedAdapterLayer.set_gspo_mode(active, gate_noise_std, adapter_noise_std)
+                try:
+                    m.set_gspo_mode(active=active, gate_noise_std=gate_noise_std, adapter_noise_std=adapter_noise_std)
+                except TypeError:
+                    # AdapterLayer.set_gspo_mode(active, noise_std)
+                    m.set_gspo_mode(active=active, noise_std=adapter_noise_std)
+
+    def _set_encoder_adapter_requires_grad(self, trainable: bool) -> Dict[str, bool]:
+        """
+        Set requires_grad for encoder adapter parameters. Returns a dict for restoration.
+        """
+        prev: Dict[str, bool] = {}
+        for name, m in self._iter_encoder_adapter_named_modules():
+            for p_name, p in m.named_parameters(recurse=True):
+                key = f"{name}.{p_name}"
+                prev[key] = p.requires_grad
+                p.requires_grad = bool(trainable)
+        return prev
+
+    def _restore_requires_grad(self, prev: Dict[str, bool]):
+        for name, m in self._iter_encoder_adapter_named_modules():
+            for p_name, p in m.named_parameters(recurse=True):
+                key = f"{name}.{p_name}"
+                if key in prev:
+                    p.requires_grad = prev[key]

@@ -84,6 +84,30 @@ if __name__ == "__main__":
     # Adapter parameters
     parser.add_argument("--adapter_enable", action="store_true", help="Enable standard Adapter modules")
     parser.add_argument("--adapter_dim", type=int, default=64, help="Dimension of the adapter bottleneck")
+
+    # GSPO-Adapter extension (encoder adapters only)
+    parser.add_argument(
+        "--gspo_train_encoder_adapter",
+        action="store_true",
+        help="When GSPO is active, also train Vision Encoder adapters (default: False => adapters frozen during GSPO steps).",
+    )
+    parser.add_argument(
+        "--gspo_encoder_adapter_noise_std",
+        type=float,
+        default=0.0,
+        help="Stage 1: exploration noise std added to encoder adapter outputs during GSPO rollouts (default: 0.0).",
+    )
+    parser.add_argument(
+        "--gspo_encoder_adapter_gate_enable",
+        action="store_true",
+        help="Stage 2: use gated encoder adapters (policy-like per-sample scalar gate).",
+    )
+    parser.add_argument(
+        "--gspo_encoder_adapter_gate_noise_std",
+        type=float,
+        default=0.0,
+        help="Stage 2: exploration noise std added to gated-adapter gate logits during GSPO rollouts (default: 0.0).",
+    )
     
     # Decoder Attention LoRA parameters (LoRA on Attention)
     parser.add_argument("--decoder_attn_lora_enable", action="store_true", 
@@ -217,6 +241,10 @@ if __name__ == "__main__":
             "optim.gspo.w_boundary": args.w_boundary,
             "optim.gspo.w_smooth": args.w_smooth,
             "optim.gspo.w_thin": args.w_thin,
+            # GSPO-Adapter extension (encoder adapters only)
+            "optim.gspo.train_encoder_adapter": args.gspo_train_encoder_adapter,
+            "optim.gspo.encoder_adapter_noise_std": args.gspo_encoder_adapter_noise_std,
+            "optim.gspo.encoder_adapter_gate_noise_std": args.gspo_encoder_adapter_gate_noise_std,
         })
 
     # Adapter configuration
@@ -226,6 +254,18 @@ if __name__ == "__main__":
             "model.sam.adapter_enabled": True,
             "model.sam.adapter_dim": args.adapter_dim,
         })
+
+    # Stage 2: gated encoder adapter (policy-like). This only changes model structure if adapters are enabled.
+    if args.gspo_encoder_adapter_gate_enable:
+        print(
+            f"Enabling Gated Encoder Adapters (policy) with gate_noise_std={args.gspo_encoder_adapter_gate_noise_std}"
+        )
+        hyperparameters.update(
+            {
+                "model.sam.encoder_adapter_gate_enabled": True,
+                "model.sam.encoder_adapter_gate_noise_std": args.gspo_encoder_adapter_gate_noise_std,
+            }
+        )
     
     # Decoder Attention LoRA configuration
     if args.decoder_attn_lora_enable:

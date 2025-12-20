@@ -825,6 +825,7 @@ class SemanticSegmentationLearner(BaseLearner):
                 model_postprocess_fn=model_postprocess_fn,
                 trainable_param_names=peft_param_names,
                 gspo_trainer=gspo_trainer,
+                gspo_adapter_cfg=self._get_gspo_adapter_cfg() if is_train else None,
                 train_box_prompt_cfg=self._train_box_prompt_cfg,
                 train_bbox_predictor=self._train_bbox_predictor,
                 **optim_kwargs,
@@ -845,6 +846,29 @@ class SemanticSegmentationLearner(BaseLearner):
         """
         if self._config is None:
             return None
+
+    def _get_gspo_adapter_cfg(self) -> Dict:
+        """
+        GSPO-Adapter extension config (encoder adapters only).
+
+        Defaults are chosen to be fully backward-compatible:
+        - train_encoder_adapter: False => encoder adapters are frozen during GSPO-active steps
+        - noise stds default to 0.0 => no extra exploration injected
+        """
+        cfg = {
+            "train_encoder_adapter": False,
+            "encoder_adapter_noise_std": 0.0,
+            "encoder_adapter_gate_noise_std": 0.0,
+        }
+        if self._config is None:
+            return cfg
+        gspo_cfg = getattr(self._config.optim, "gspo", None)
+        if gspo_cfg is None:
+            return cfg
+        cfg["train_encoder_adapter"] = bool(getattr(gspo_cfg, "train_encoder_adapter", False))
+        cfg["encoder_adapter_noise_std"] = float(getattr(gspo_cfg, "encoder_adapter_noise_std", 0.0))
+        cfg["encoder_adapter_gate_noise_std"] = float(getattr(gspo_cfg, "encoder_adapter_gate_noise_std", 0.0))
+        return cfg
 
         lora_cfg = getattr(self._config.optim, "lora", None)
         if not lora_cfg or not getattr(lora_cfg, "gspo_enabled", False):

@@ -34,7 +34,7 @@ from transformers.models.sam.configuration_sam import (
     SamVisionConfig,
 )
 from transformers.utils import ModelOutput, add_start_docstrings, add_start_docstrings_to_model_forward, logging
-from ..adaptation_layers import AdapterLayer, LoRALinear
+from ..adaptation_layers import AdapterLayer, GatedAdapterLayer, LoRALinear
 
 logger = logging.get_logger(__name__)
 
@@ -946,7 +946,17 @@ class SamVisionLayer(nn.Module):
         self.adapter = None
         if hasattr(config, "adapter_enabled") and config.adapter_enabled:
             adapter_dim = getattr(config, "adapter_dim", 64)
-            self.adapter = AdapterLayer(config.hidden_size, adapter_dim)
+            # Optional GSPO encoder adapter policy (gated adapter). Decoder adapters are handled elsewhere.
+            encoder_gate_enabled = getattr(config, "encoder_adapter_gate_enabled", False)
+            encoder_gate_noise_std = getattr(config, "encoder_adapter_gate_noise_std", 0.0)
+            if encoder_gate_enabled:
+                self.adapter = GatedAdapterLayer(
+                    in_features=config.hidden_size,
+                    adapter_dim=adapter_dim,
+                    gate_noise_std=encoder_gate_noise_std,
+                )
+            else:
+                self.adapter = AdapterLayer(config.hidden_size, adapter_dim)
 
 
     def window_partition(self, hidden_states: torch.Tensor, window_size: int) -> Tuple[torch.Tensor, Tuple[int, int]]:

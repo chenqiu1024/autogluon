@@ -265,6 +265,9 @@ model:
     ignore_label: 255
     adapter_enabled: False
     adapter_dim: 64
+    # GSPO-Adapter extension (encoder only; kept here to build the correct adapter module type)
+    encoder_adapter_gate_enabled: False
+    encoder_adapter_gate_noise_std: 0.0
     decoder_attention_lora_r: 0
     decoder_attention_lora_alpha: 1
     decoder_attention_lora_dropout: 0.0

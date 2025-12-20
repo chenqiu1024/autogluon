@@ -76,3 +76,10 @@ optim:
     w_boundary: 0.3
     w_smooth: 0.1
     w_thin: 0.05
+    # GSPO-Adapter extension (encoder adapters only; decoder adapters excluded by design)
+    # When False (default), encoder adapters will be frozen during GSPO-active epochs/steps.
+    train_encoder_adapter: False
+    # Stage 1: add small exploration noise on adapter outputs during GSPO rollouts
+    encoder_adapter_noise_std: 0.0
+    # Stage 2: gated adapter policy exploration noise (applies only if model.sam.encoder_adapter_gate_enabled=True)
+    encoder_adapter_gate_noise_std: 0.0

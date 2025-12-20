@@ -7,7 +7,7 @@ from torch import nn
 from transformers import SamConfig
 
 from ..constants import CLASS_LABEL, CLASS_LOGITS, COLUMN, IMAGE, IMAGE_VALID_NUM, LABEL, LOGITS, MASK_LABEL, MOE_LOSS
-from .adaptation_layers import ConvLoRALinear, AdapterLayer
+from .adaptation_layers import ConvLoRALinear, AdapterLayer, GatedAdapterLayer
 from .custom_hf_models.modeling_sam_for_conv_lora import SamImageSegmentationOutput, SamModel
 from .utils import assign_layer_ids, freeze_model_layers, image_mean_std
 
@@ -349,9 +349,18 @@ class SAMForSemanticSegmentation(nn.Module):
         # Inject Adapters into vision encoder if enabled
         if self.adapter_enabled:
             logger.info(f"Injecting Adapters with dim={self.adapter_dim} into Vision Encoder")
+            encoder_gate_enabled = getattr(self.config, "encoder_adapter_gate_enabled", False)
+            encoder_gate_noise_std = getattr(self.config, "encoder_adapter_gate_noise_std", 0.0)
             for layer in self.model.vision_encoder.layers:
                 # Manually create and assign adapter since config didn't have it at init time
-                layer.adapter = AdapterLayer(self.config.hidden_size, self.adapter_dim)
+                if encoder_gate_enabled:
+                    layer.adapter = GatedAdapterLayer(
+                        in_features=self.config.hidden_size,
+                        adapter_dim=self.adapter_dim,
+                        gate_noise_std=encoder_gate_noise_std,
+                    )
+                else:
+                    layer.adapter = AdapterLayer(self.config.hidden_size, self.adapter_dim)
 
 
         self.model.mask_decoder.num_mask_tokens = num_mask_tokens

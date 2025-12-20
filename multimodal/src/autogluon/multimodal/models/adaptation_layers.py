@@ -32,6 +32,10 @@ class AdapterLayer(nn.Module):
         self.up_proj = nn.Linear(adapter_dim, in_features)
         self.scale = nn.Parameter(torch.tensor(scale))
         self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+
+        # GSPO adapter extension (default off; activated by training loop via set_gspo_mode)
+        self._gspo_active = False
+        self._gspo_noise_std = 0.0
         
         self.reset_parameters()
 
@@ -45,7 +49,80 @@ class AdapterLayer(nn.Module):
         down = self.down_proj(x)
         act = self.activation(down)
         up = self.up_proj(act)
+        # Optional GSPO exploration noise (only when explicitly enabled)
+        if self._gspo_active and self.training and self._gspo_noise_std and self._gspo_noise_std > 0:
+            up = up + torch.randn_like(up) * self._gspo_noise_std
         return self.dropout(up) * self.scale
+
+    def set_gspo_mode(self, active: bool, noise_std: Optional[float] = None):
+        """
+        Enable/disable GSPO-specific behavior for this Adapter.
+        This is intentionally a no-op unless called by the training loop.
+        """
+        self._gspo_active = bool(active)
+        if noise_std is not None:
+            self._gspo_noise_std = float(noise_std)
+
+
+class GatedAdapterLayer(nn.Module):
+    """
+    Encoder Adapter with an input-conditioned gate (policy-like scalar per sample).
+
+    Design goal:
+    - When GSPO is active: add stochasticity to the gate logits for exploration across group rollouts.
+    - When GSPO is inactive: use deterministic gate (no sampling noise).
+
+    Input formats supported:
+    - [B, H, W, C] (SAM vision tokens)
+    - [B, L, C] (generic tokens)
+    """
+
+    def __init__(
+        self,
+        in_features: int,
+        adapter_dim: int,
+        scale: float = 1.0,
+        dropout: float = 0.0,
+        gate_noise_std: float = 0.0,
+    ):
+        super().__init__()
+        self.adapter = AdapterLayer(in_features=in_features, adapter_dim=adapter_dim, scale=scale, dropout=dropout)
+        self.gate = nn.Linear(in_features, 1)
+        # Initialize gate to near-open (sigmoid(0)=0.5); training can learn stronger/ weaker gating.
+        nn.init.zeros_(self.gate.weight)
+        nn.init.zeros_(self.gate.bias)
+
+        self._gspo_active = False
+        self._gate_noise_std = float(gate_noise_std)
+
+    def set_gspo_mode(self, active: bool, gate_noise_std: Optional[float] = None, adapter_noise_std: Optional[float] = None):
+        self._gspo_active = bool(active)
+        if gate_noise_std is not None:
+            self._gate_noise_std = float(gate_noise_std)
+        # Propagate adapter exploration noise if requested
+        self.adapter.set_gspo_mode(active=active, noise_std=adapter_noise_std)
+
+    def _pool(self, x: torch.Tensor) -> torch.Tensor:
+        if x.dim() == 4:
+            # [B,H,W,C] -> [B,C]
+            return x.mean(dim=(1, 2))
+        if x.dim() == 3:
+            # [B,L,C] -> [B,C]
+            return x.mean(dim=1)
+        raise ValueError(f"Unsupported input shape for GatedAdapterLayer: {tuple(x.shape)}")
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        pooled = self._pool(x)
+        logits = self.gate(pooled)  # [B,1]
+        if self._gspo_active and self.training and self._gate_noise_std and self._gate_noise_std > 0:
+            logits = logits + torch.randn_like(logits) * self._gate_noise_std
+        gate = torch.sigmoid(logits)  # [B,1]
+
+        out = self.adapter(x)
+        # Broadcast gate to match out shape
+        while gate.dim() < out.dim():
+            gate = gate.unsqueeze(1)
+        return out * gate
 
 
 
