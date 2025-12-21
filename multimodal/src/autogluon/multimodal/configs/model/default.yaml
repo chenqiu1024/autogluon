@@ -271,6 +271,9 @@ model:
     decoder_attention_lora_r: 0
     decoder_attention_lora_alpha: 1
     decoder_attention_lora_dropout: 0.0
+    gspo_lora_attention_enabled: False  # Enable GSPO quality feedback for LoRA on Attention
+    gspo_lora_attention_momentum: 0.9   # Momentum for LoRA quality history
+    gspo_lora_attention_scale_adaptation: False  # Enable adaptive scaling based on quality
     decoder_adapter_enabled: False
     decoder_adapter_dim: 64
 

@@ -282,6 +282,10 @@ class SAMForSemanticSegmentation(nn.Module):
         decoder_attention_lora_dropout: float = 0.0,
         decoder_adapter_enabled: bool = False,
         decoder_adapter_dim: int = 64,
+        # GSPO-LoRA on Attention parameters (NEW)
+        gspo_lora_attention_enabled: bool = False,
+        gspo_lora_attention_momentum: float = 0.9,
+        gspo_lora_attention_scale_adaptation: bool = False,
     ):
         """
         Load a pretrained Segment Anything Model (SAM).
@@ -343,6 +347,11 @@ class SAMForSemanticSegmentation(nn.Module):
         self.adapter_gspo_scale_adaptation = adapter_gspo_scale_adaptation
         self.decoder_adapter_enabled = decoder_adapter_enabled
         self.decoder_adapter_dim = decoder_adapter_dim
+        
+        # Store GSPO-LoRA on Attention configs (NEW)
+        self.gspo_lora_attention_enabled = gspo_lora_attention_enabled
+        self.gspo_lora_attention_momentum = gspo_lora_attention_momentum
+        self.gspo_lora_attention_scale_adaptation = gspo_lora_attention_scale_adaptation
 
         self._load_checkpoint(checkpoint_name)
 
@@ -414,6 +423,11 @@ class SAMForSemanticSegmentation(nn.Module):
             config.mask_decoder_config.decoder_attention_lora_alpha = self.decoder_attention_lora_alpha
             config.mask_decoder_config.decoder_attention_lora_dropout = self.decoder_attention_lora_dropout
             
+            # Inject GSPO-LoRA parameters into mask decoder config (NEW)
+            config.mask_decoder_config.gspo_lora_enabled = self.gspo_lora_attention_enabled
+            config.mask_decoder_config.gspo_lora_momentum = self.gspo_lora_attention_momentum
+            config.mask_decoder_config.gspo_lora_scale_adaptation = self.gspo_lora_attention_scale_adaptation
+            
             # Try to load from local cache first to avoid network issues
             try:
                 self.model = SamModel.from_pretrained(checkpoint_name, config=config, local_files_only=True)
@@ -423,8 +437,14 @@ class SAMForSemanticSegmentation(nn.Module):
                 self.model = SamModel.from_pretrained(checkpoint_name, config=config)
             
             if self.decoder_attention_lora_r > 0:
+                gspo_info = ""
+                if self.gspo_lora_attention_enabled:
+                    gspo_info = f", GSPO enabled (momentum={self.gspo_lora_attention_momentum}"
+                    if self.gspo_lora_attention_scale_adaptation:
+                        gspo_info += ", scale_adaptation=True"
+                    gspo_info += ")"
                 logger.info(f"Decoder Attention LoRA enabled: r={self.decoder_attention_lora_r}, "
-                          f"alpha={self.decoder_attention_lora_alpha}, dropout={self.decoder_attention_lora_dropout}")
+                          f"alpha={self.decoder_attention_lora_alpha}, dropout={self.decoder_attention_lora_dropout}{gspo_info}")
         else:
             config = SamConfig(name_or_path=checkpoint_name)
             if hasattr(config, "mask_decoder_config") and config.mask_decoder_config is not None:
@@ -434,6 +454,11 @@ class SAMForSemanticSegmentation(nn.Module):
             config.mask_decoder_config.decoder_attention_lora_r = self.decoder_attention_lora_r
             config.mask_decoder_config.decoder_attention_lora_alpha = self.decoder_attention_lora_alpha
             config.mask_decoder_config.decoder_attention_lora_dropout = self.decoder_attention_lora_dropout
+            
+            # GSPO-LoRA parameters (NEW)
+            config.mask_decoder_config.gspo_lora_enabled = self.gspo_lora_attention_enabled
+            config.mask_decoder_config.gspo_lora_momentum = self.gspo_lora_attention_momentum
+            config.mask_decoder_config.gspo_lora_scale_adaptation = self.gspo_lora_attention_scale_adaptation
             self.model = SamModel(config)
 
     def save(self, save_path: str = "./"):

@@ -103,6 +103,14 @@ if __name__ == "__main__":
     parser.add_argument("--decoder_attn_lora_dropout", type=float, default=0.0,
                         help="LoRA dropout for decoder attention (default: 0.0)")
     
+    # GSPO-LoRA on Attention parameters (NEW)
+    parser.add_argument("--gspo_lora_attention_enable", action="store_true",
+                        help="Enable GSPO quality feedback for Decoder LoRA on Attention")
+    parser.add_argument("--gspo_lora_attention_momentum", type=float, default=0.9,
+                        help="Momentum for LoRA quality history updates (default: 0.9)")
+    parser.add_argument("--gspo_lora_attention_scale_adaptation", action="store_true",
+                        help="Enable adaptive scaling based on quality for LoRA")
+    
     # TTA (Test-Time Augmentation) parameters
     parser.add_argument("--tta_enable", action="store_true", help="Enable Test-Time Augmentation for evaluation")
     parser.add_argument("--tta_scales", type=float, nargs="+", default=[0.75, 1.0, 1.25], 
@@ -256,13 +264,27 @@ if __name__ == "__main__":
     
     # Decoder Attention LoRA configuration
     if args.decoder_attn_lora_enable:
+        gspo_lora_info = ""
+        if args.gspo_lora_attention_enable:
+            gspo_lora_info = f", GSPO enabled (momentum={args.gspo_lora_attention_momentum}"
+            if args.gspo_lora_attention_scale_adaptation:
+                gspo_lora_info += ", scale_adaptation=True"
+            gspo_lora_info += ")"
         print(f"Enabling Decoder Attention LoRA: r={args.decoder_attn_lora_r}, "
-              f"alpha={args.decoder_attn_lora_alpha}, dropout={args.decoder_attn_lora_dropout}")
+              f"alpha={args.decoder_attn_lora_alpha}, dropout={args.decoder_attn_lora_dropout}{gspo_lora_info}")
         hyperparameters.update({
             "model.sam.decoder_attention_lora_r": args.decoder_attn_lora_r,
             "model.sam.decoder_attention_lora_alpha": args.decoder_attn_lora_alpha,
             "model.sam.decoder_attention_lora_dropout": args.decoder_attn_lora_dropout,
         })
+        
+        # GSPO-LoRA on Attention configuration (NEW)
+        if args.gspo_lora_attention_enable:
+            hyperparameters.update({
+                "model.sam.gspo_lora_attention_enabled": True,
+                "model.sam.gspo_lora_attention_momentum": args.gspo_lora_attention_momentum,
+                "model.sam.gspo_lora_attention_scale_adaptation": args.gspo_lora_attention_scale_adaptation,
+            })
         
     # Decoder Adapter configuration
     if args.decoder_adapter_enable:

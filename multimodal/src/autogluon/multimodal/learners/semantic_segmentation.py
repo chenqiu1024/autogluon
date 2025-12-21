@@ -874,6 +874,15 @@ class SemanticSegmentationLearner(BaseLearner):
             logger.warning("GSPOConvLoRATrainer not found in %s; GSPO will be skipped.", examples_root)
             return None
 
+        # Get GSPO-Adapter parameters (if available)
+        sam_cfg = getattr(self._config.model, "sam", None)
+        gspo_adapter_enabled = getattr(sam_cfg, "adapter_gspo_enabled", False) if sam_cfg else False
+        gspo_adapter_momentum = getattr(sam_cfg, "adapter_gspo_momentum", 0.9) if sam_cfg else 0.9
+        
+        # Get GSPO-LoRA on Attention parameters (if available) - NEW
+        gspo_lora_attention_enabled = getattr(sam_cfg, "gspo_lora_attention_enabled", False) if sam_cfg else False
+        gspo_lora_attention_momentum = getattr(sam_cfg, "gspo_lora_attention_momentum", 0.9) if sam_cfg else 0.9
+
         try:
             return GSPOConvLoRATrainer(
                 predictor=None,  # Not required by current implementation
@@ -887,6 +896,12 @@ class SemanticSegmentationLearner(BaseLearner):
                 w_boundary=w_boundary,
                 w_smooth=w_smooth,
                 w_thin=w_thin,
+                # GSPO-Adapter extension
+                gspo_adapter_enabled=gspo_adapter_enabled,
+                gspo_adapter_momentum=gspo_adapter_momentum,
+                # GSPO-LoRA on Attention extension (NEW)
+                gspo_lora_attention_enabled=gspo_lora_attention_enabled,
+                gspo_lora_attention_momentum=gspo_lora_attention_momentum,
             )
         except Exception as e:
             logger.warning("Failed to instantiate GSPOConvLoRATrainer: %s; GSPO will be skipped.", e)

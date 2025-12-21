@@ -201,9 +201,11 @@ class SamAttention(nn.Module):
     values.
     
     Supports optional LoRA (Low-Rank Adaptation) on Q/K/V projection layers for parameter-efficient fine-tuning.
+    Extended with optional GSPO support for quality-aware LoRA scaling.
     """
 
-    def __init__(self, config, downsample_rate=None, lora_r=0, lora_alpha=1, lora_dropout=0.0):
+    def __init__(self, config, downsample_rate=None, lora_r=0, lora_alpha=1, lora_dropout=0.0,
+                 gspo_lora_enabled=False, gspo_lora_momentum=0.9, gspo_lora_scale_adaptation=False):
         """
         Parameters
         ----------
@@ -217,6 +219,12 @@ class SamAttention(nn.Module):
             LoRA scaling factor
         lora_dropout : float, default=0.0
             Dropout probability for LoRA
+        gspo_lora_enabled : bool, default=False
+            Whether to enable GSPO quality tracking for LoRA layers
+        gspo_lora_momentum : float, default=0.9
+            Momentum for GSPO quality history updates
+        gspo_lora_scale_adaptation : bool, default=False
+            Whether to enable GSPO adaptive scaling for LoRA
         """
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -232,15 +240,24 @@ class SamAttention(nn.Module):
         if lora_r > 0:
             self.q_proj = LoRALinear(
                 self.hidden_size, self.internal_dim,
-                r=lora_r, lora_alpha=lora_alpha, lora_dropout=lora_dropout
+                r=lora_r, lora_alpha=lora_alpha, lora_dropout=lora_dropout,
+                gspo_enabled=gspo_lora_enabled,
+                gspo_momentum=gspo_lora_momentum,
+                gspo_scale_adaptation=gspo_lora_scale_adaptation,
             )
             self.k_proj = LoRALinear(
                 self.hidden_size, self.internal_dim,
-                r=lora_r, lora_alpha=lora_alpha, lora_dropout=lora_dropout
+                r=lora_r, lora_alpha=lora_alpha, lora_dropout=lora_dropout,
+                gspo_enabled=gspo_lora_enabled,
+                gspo_momentum=gspo_lora_momentum,
+                gspo_scale_adaptation=gspo_lora_scale_adaptation,
             )
             self.v_proj = LoRALinear(
                 self.hidden_size, self.internal_dim,
-                r=lora_r, lora_alpha=lora_alpha, lora_dropout=lora_dropout
+                r=lora_r, lora_alpha=lora_alpha, lora_dropout=lora_dropout,
+                gspo_enabled=gspo_lora_enabled,
+                gspo_momentum=gspo_lora_momentum,
+                gspo_scale_adaptation=gspo_lora_scale_adaptation,
             )
         else:
             self.q_proj = nn.Linear(self.hidden_size, self.internal_dim)
@@ -293,7 +310,8 @@ class SamAttention(nn.Module):
 
 class SamTwoWayAttentionBlock(nn.Module):
     def __init__(self, config, attention_downsample_rate: int = 2, skip_first_layer_pe: bool = False,
-                 lora_r: int = 0, lora_alpha: int = 1, lora_dropout: float = 0.0):
+                 lora_r: int = 0, lora_alpha: int = 1, lora_dropout: float = 0.0,
+                 gspo_lora_enabled: bool = False, gspo_lora_momentum: float = 0.9, gspo_lora_scale_adaptation: bool = False):
         """
         A transformer block with four layers:
             (1) self-attention of sparse inputs (2) cross attention of sparse inputs -> dense inputs (3) mlp block on
@@ -312,6 +330,12 @@ class SamTwoWayAttentionBlock(nn.Module):
                 LoRA scaling factor
             lora_dropout (float, default=0.0):
                 Dropout probability for LoRA
+            gspo_lora_enabled (bool, default=False):
+                Whether to enable GSPO quality tracking for LoRA layers
+            gspo_lora_momentum (float, default=0.9):
+                Momentum for GSPO quality history updates
+            gspo_lora_scale_adaptation (bool, default=False):
+                Whether to enable GSPO adaptive scaling for LoRA
         """
         super().__init__()
 
@@ -319,11 +343,15 @@ class SamTwoWayAttentionBlock(nn.Module):
         self.layer_norm_eps = config.layer_norm_eps
 
         self.self_attn = SamAttention(config, downsample_rate=1, 
-                                      lora_r=lora_r, lora_alpha=lora_alpha, lora_dropout=lora_dropout)
+                                      lora_r=lora_r, lora_alpha=lora_alpha, lora_dropout=lora_dropout,
+                                      gspo_lora_enabled=gspo_lora_enabled, gspo_lora_momentum=gspo_lora_momentum,
+                                      gspo_lora_scale_adaptation=gspo_lora_scale_adaptation)
         self.layer_norm1 = nn.LayerNorm(self.hidden_size, eps=self.layer_norm_eps)
 
         self.cross_attn_token_to_image = SamAttention(config, downsample_rate=attention_downsample_rate,
-                                                      lora_r=lora_r, lora_alpha=lora_alpha, lora_dropout=lora_dropout)
+                                                      lora_r=lora_r, lora_alpha=lora_alpha, lora_dropout=lora_dropout,
+                                                      gspo_lora_enabled=gspo_lora_enabled, gspo_lora_momentum=gspo_lora_momentum,
+                                                      gspo_lora_scale_adaptation=gspo_lora_scale_adaptation)
         self.layer_norm2 = nn.LayerNorm(self.hidden_size, eps=self.layer_norm_eps)
 
         self.mlp = SamMLPBlock(config)
@@ -339,7 +367,9 @@ class SamTwoWayAttentionBlock(nn.Module):
 
         self.layer_norm4 = nn.LayerNorm(self.hidden_size, eps=self.layer_norm_eps)
         self.cross_attn_image_to_token = SamAttention(config, downsample_rate=attention_downsample_rate,
-                                                      lora_r=lora_r, lora_alpha=lora_alpha, lora_dropout=lora_dropout)
+                                                      lora_r=lora_r, lora_alpha=lora_alpha, lora_dropout=lora_dropout,
+                                                      gspo_lora_enabled=gspo_lora_enabled, gspo_lora_momentum=gspo_lora_momentum,
+                                                      gspo_lora_scale_adaptation=gspo_lora_scale_adaptation)
 
         self.skip_first_layer_pe = skip_first_layer_pe
 
@@ -401,7 +431,8 @@ class SamTwoWayAttentionBlock(nn.Module):
 
 
 class SamTwoWayTransformer(nn.Module):
-    def __init__(self, config: SamMaskDecoderConfig, lora_r: int = 0, lora_alpha: int = 1, lora_dropout: float = 0.0):
+    def __init__(self, config: SamMaskDecoderConfig, lora_r: int = 0, lora_alpha: int = 1, lora_dropout: float = 0.0,
+                 gspo_lora_enabled: bool = False, gspo_lora_momentum: float = 0.9, gspo_lora_scale_adaptation: bool = False):
         super().__init__()
         self.config = config
 
@@ -410,9 +441,13 @@ class SamTwoWayTransformer(nn.Module):
 
         for i in range(self.num_hidden_layers):
             self.layers.append(SamTwoWayAttentionBlock(config, skip_first_layer_pe=(i == 0),
-                                                       lora_r=lora_r, lora_alpha=lora_alpha, lora_dropout=lora_dropout))
+                                                       lora_r=lora_r, lora_alpha=lora_alpha, lora_dropout=lora_dropout,
+                                                       gspo_lora_enabled=gspo_lora_enabled, gspo_lora_momentum=gspo_lora_momentum,
+                                                       gspo_lora_scale_adaptation=gspo_lora_scale_adaptation))
 
-        self.final_attn_token_to_image = SamAttention(config, lora_r=lora_r, lora_alpha=lora_alpha, lora_dropout=lora_dropout)
+        self.final_attn_token_to_image = SamAttention(config, lora_r=lora_r, lora_alpha=lora_alpha, lora_dropout=lora_dropout,
+                                                      gspo_lora_enabled=gspo_lora_enabled, gspo_lora_momentum=gspo_lora_momentum,
+                                                      gspo_lora_scale_adaptation=gspo_lora_scale_adaptation)
         self.layer_norm_final_attn = nn.LayerNorm(config.hidden_size)
 
     def forward(
@@ -497,7 +532,8 @@ class SamFeedForward(nn.Module):
 
 
 class SamMaskDecoder(nn.Module):
-    def __init__(self, config: SamMaskDecoderConfig, lora_r: int = 0, lora_alpha: int = 1, lora_dropout: float = 0.0):
+    def __init__(self, config: SamMaskDecoderConfig, lora_r: int = 0, lora_alpha: int = 1, lora_dropout: float = 0.0,
+                 gspo_lora_enabled: bool = False, gspo_lora_momentum: float = 0.9, gspo_lora_scale_adaptation: bool = False):
         super().__init__()
 
         self.hidden_size = config.hidden_size
@@ -508,7 +544,9 @@ class SamMaskDecoder(nn.Module):
         self.iou_token = nn.Embedding(1, self.hidden_size)
         self.mask_tokens = nn.Embedding(self.num_mask_tokens, self.hidden_size)
 
-        self.transformer = SamTwoWayTransformer(config, lora_r=lora_r, lora_alpha=lora_alpha, lora_dropout=lora_dropout)
+        self.transformer = SamTwoWayTransformer(config, lora_r=lora_r, lora_alpha=lora_alpha, lora_dropout=lora_dropout,
+                                                gspo_lora_enabled=gspo_lora_enabled, gspo_lora_momentum=gspo_lora_momentum,
+                                                gspo_lora_scale_adaptation=gspo_lora_scale_adaptation)
 
         # should we create a new class for this?
         self.upscale_conv1 = nn.ConvTranspose2d(self.hidden_size, self.hidden_size // 4, kernel_size=2, stride=2)
@@ -1317,11 +1355,19 @@ class SamModel(SamPreTrainedModel):
         decoder_attn_lora_alpha = getattr(config.mask_decoder_config, 'decoder_attention_lora_alpha', 1)
         decoder_attn_lora_dropout = getattr(config.mask_decoder_config, 'decoder_attention_lora_dropout', 0.0)
         
+        # Extract GSPO-LoRA parameters from config (if available)
+        gspo_lora_enabled = getattr(config.mask_decoder_config, 'gspo_lora_enabled', False)
+        gspo_lora_momentum = getattr(config.mask_decoder_config, 'gspo_lora_momentum', 0.9)
+        gspo_lora_scale_adaptation = getattr(config.mask_decoder_config, 'gspo_lora_scale_adaptation', False)
+        
         self.mask_decoder = SamMaskDecoder(
             config.mask_decoder_config,
             lora_r=decoder_attn_lora_r,
             lora_alpha=decoder_attn_lora_alpha,
-            lora_dropout=decoder_attn_lora_dropout
+            lora_dropout=decoder_attn_lora_dropout,
+            gspo_lora_enabled=gspo_lora_enabled,
+            gspo_lora_momentum=gspo_lora_momentum,
+            gspo_lora_scale_adaptation=gspo_lora_scale_adaptation,
         )
 
         self.post_init()

@@ -1,19 +1,24 @@
 """
-GSPO (Group Sequence Policy Optimization) Trainer for Conv-LoRA and Adapters
+GSPO (Group Sequence Policy Optimization) Trainer for Conv-LoRA, Adapters, and Decoder LoRA
 
 This module implements the GSPO training strategy that enhances Conv-LoRA's
 MoE mechanism through group-level optimization and quality-aware feedback.
 
-Extended to support Encoder Adapters (Phase 1-3):
-- Phase 1: Unified advantage weighting (adapters receive same quality-weighted gradients)
-- Phase 2: Adapter scale adaptation (contribution score based on quality history)
-- Phase 3: Adapter MoE architecture (optional, multiple adapter variants)
+Extended to support:
+1. Encoder Adapters (Phase 1-3):
+   - Phase 1: Unified advantage weighting (adapters receive same quality-weighted gradients)
+   - Phase 2: Adapter scale adaptation (contribution score based on quality history)
+   - Phase 3: Adapter MoE architecture (optional, multiple adapter variants)
+
+2. Decoder LoRA on Attention (NEW):
+   - Phase 1: Quality history tracking for LoRA layers
+   - Phase 2: Dynamic scaling adaptation based on quality feedback
 
 Key components:
 1. Group-level sampling: Generate multiple predictions per image
 2. Advantage function: Compute relative quality within groups
 3. Contrastive loss: Pull high-quality predictions together, push low-quality apart
-4. Quality feedback: Update expert selection AND adapter quality based on actual performance
+4. Quality feedback: Update expert selection, adapter quality, AND LoRA quality based on actual performance
 """
 
 import torch
@@ -55,6 +60,9 @@ class GSPOConvLoRATrainer:
         # GSPO-Adapter extension parameters
         gspo_adapter_enabled: bool = False,
         gspo_adapter_momentum: float = 0.9,
+        # GSPO-LoRA on Attention extension parameters (NEW)
+        gspo_lora_attention_enabled: bool = False,
+        gspo_lora_attention_momentum: float = 0.9,
     ):
         self.predictor = predictor
         self.group_size = group_size
@@ -73,10 +81,15 @@ class GSPOConvLoRATrainer:
         self.gspo_adapter_enabled = gspo_adapter_enabled
         self.gspo_adapter_momentum = gspo_adapter_momentum
         
+        # GSPO-LoRA on Attention extension (NEW)
+        self.gspo_lora_attention_enabled = gspo_lora_attention_enabled
+        self.gspo_lora_attention_momentum = gspo_lora_attention_momentum
+        
         # Statistics tracking
         self.expert_performance_log = defaultdict(list)
         self.group_quality_history = []
         self.adapter_quality_log = []  # Track adapter quality over time
+        self.lora_quality_log = []  # Track LoRA quality over time (NEW)
         self.current_epoch = 0
         
     def is_gspo_active(self, epoch: int) -> bool:
@@ -486,12 +499,89 @@ class GSPOConvLoRATrainer:
                     stats[name] = adapter_stats
         return stats
     
+    def update_lora_attention_feedback(
+        self,
+        quality_scores: List[torch.Tensor],
+        model
+    ):
+        """
+        GSPO-LoRA Extension: Update LoRA layer quality history based on GSPO feedback.
+        
+        This method is called after each GSPO training step to provide quality feedback
+        to all LoRALinear modules (in Decoder Attention) that have GSPO enabled.
+        
+        The feedback mechanism allows LoRA layers to dynamically adjust their contribution
+        based on the quality of predictions, following the GSPO principle of
+        quality-aware optimization.
+        
+        Args:
+            quality_scores: List of quality score tensors from each group [G] of [B]
+            model: The model containing LoRALinear modules (with gspo_enabled=True)
+        """
+        if not self.gspo_lora_attention_enabled:
+            return
+        
+        # Compute average quality across groups
+        if not quality_scores:
+            return
+            
+        avg_quality = torch.stack([q.mean() for q in quality_scores]).mean()
+        
+        # Import LoRALinear to check module type
+        # Note: We check for the method instead of type to avoid circular imports
+        lora_layers = []
+        for name, module in model.named_modules():
+            # Check if this is a LoRALinear with GSPO enabled
+            # LoRALinear has: update_quality_feedback, gspo_enabled, r > 0
+            if (hasattr(module, 'update_quality_feedback') and 
+                hasattr(module, 'gspo_enabled') and 
+                hasattr(module, 'r') and
+                module.gspo_enabled and
+                module.r > 0):
+                lora_layers.append((name, module))
+        
+        if not lora_layers:
+            return
+        
+        # Update each LoRA layer with quality feedback
+        for name, lora in lora_layers:
+            lora.update_quality_feedback(avg_quality)
+        
+        # Log LoRA quality for analysis
+        self.lora_quality_log.append({
+            'epoch': self.current_epoch,
+            'avg_quality': avg_quality.item(),
+            'num_lora_layers': len(lora_layers),
+        })
+    
+    def get_lora_stats(self, model) -> Dict:
+        """
+        Get GSPO statistics from all LoRA layers in the model.
+        
+        Args:
+            model: The model containing LoRALinear modules
+            
+        Returns:
+            Dictionary with LoRA statistics (quality_history, contribution_score, etc.)
+        """
+        stats = {}
+        for name, module in model.named_modules():
+            if (hasattr(module, 'get_gspo_stats') and 
+                hasattr(module, 'r') and 
+                hasattr(module, 'gspo_enabled')):
+                if module.gspo_enabled and module.r > 0:
+                    lora_stats = module.get_gspo_stats()
+                    if lora_stats:
+                        stats[name] = lora_stats
+        return stats
+    
     def get_statistics(self) -> Dict:
         """Get training statistics for analysis."""
         return {
             'expert_performance': dict(self.expert_performance_log),
             'group_quality_history': self.group_quality_history,
             'adapter_quality_log': self.adapter_quality_log,
+            'lora_quality_log': self.lora_quality_log,  # NEW
         }
     
     def reset_statistics(self):
@@ -499,4 +589,5 @@ class GSPOConvLoRATrainer:
         self.expert_performance_log.clear()
         self.group_quality_history.clear()
         self.adapter_quality_log.clear()
+        self.lora_quality_log.clear()  # NEW
 

@@ -343,6 +343,9 @@ class IA3Linear(nn.Linear, LoRALayer):
 class LoRALinear(nn.Linear, LoRALayer):
     """
     LoRA incorporated in Linear Layer. Weights of linear layer are set to be frozen per default.
+    
+    Extended with optional GSPO (Group Sequence Policy Optimization) support for quality-aware
+    scaling adaptation in Decoder Attention layers.
 
     Parameters
     ----------
@@ -360,6 +363,12 @@ class LoRALinear(nn.Linear, LoRALayer):
         Set this to True if the layer to replace stores weight like (fan_in, fan_out).
     merge_weights
         Merging weights during inference to reduce latency.
+    gspo_enabled
+        Whether to enable GSPO quality tracking (default False).
+    gspo_momentum
+        Momentum for quality history updates (default 0.9).
+    gspo_scale_adaptation
+        Whether to enable adaptive scaling based on quality (default False).
 
     References
     ----------
@@ -378,6 +387,9 @@ class LoRALinear(nn.Linear, LoRALayer):
         lora_dropout: float = 0.0,
         fan_in_fan_out: bool = False,  # Set this to True if the layer to replace stores weight like (fan_in, fan_out)
         merge_weights: bool = True,
+        gspo_enabled: bool = False,
+        gspo_momentum: float = 0.9,
+        gspo_scale_adaptation: bool = False,
         **kwargs,
     ):
         nn.Linear.__init__(self, in_features, out_features, **kwargs)
@@ -394,6 +406,17 @@ class LoRALinear(nn.Linear, LoRALayer):
         self.reset_parameters()
         if fan_in_fan_out:
             self.weight.data = self.weight.data.T
+        
+        # GSPO enhancement for Decoder LoRA on Attention
+        self.gspo_enabled = gspo_enabled
+        self.gspo_momentum = gspo_momentum
+        self.gspo_scale_adaptation = gspo_scale_adaptation
+        
+        if gspo_enabled and r > 0:
+            # Quality tracking buffers
+            self.register_buffer("quality_history", torch.tensor(0.5))
+            self.register_buffer("contribution_score", torch.tensor(1.0))
+            self.register_buffer("update_count", torch.tensor(0))
 
     def reset_parameters(self):
         nn.Linear.reset_parameters(self)
@@ -427,10 +450,61 @@ class LoRALinear(nn.Linear, LoRALayer):
         if self.r > 0 and not self.merged:
             result = F.linear(x, self.T(self.weight), bias=self.bias)
             if self.r > 0:
-                result += (self.lora_dropout(x) @ self.lora_A.T @ self.lora_B.T) * self.scaling
+                lora_delta = (self.lora_dropout(x) @ self.lora_A.T @ self.lora_B.T) * self.scaling
+                
+                # GSPO: Dynamic scaling based on quality history
+                if self.gspo_enabled and self.gspo_scale_adaptation and self.training:
+                    lora_delta = lora_delta * self.contribution_score
+                
+                result = result + lora_delta
             return result
         else:
             return F.linear(x, self.T(self.weight), bias=self.bias)
+    
+    def update_quality_feedback(self, quality_score: torch.Tensor):
+        """
+        GSPO: Update quality history based on actual performance.
+        
+        This provides the feedback loop for quality-aware LoRA scaling.
+        Called by GSPOConvLoRATrainer after each training step.
+        
+        Args:
+            quality_score: Scalar tensor containing quality metric (e.g., IoU)
+        """
+        if not self.gspo_enabled or self.r <= 0:
+            return
+        
+        with torch.no_grad():
+            # Convert to scalar if needed
+            if quality_score.numel() > 1:
+                quality_score = quality_score.mean()
+            quality_value = quality_score.item()
+            
+            # Momentum update of quality history
+            self.quality_history = (
+                self.gspo_momentum * self.quality_history +
+                (1 - self.gspo_momentum) * quality_value
+            )
+            
+            # Compute contribution score via sigmoid mapping
+            # quality_history = 0.5 -> score = 0.5 (neutral)
+            # quality_history > 0.5 -> score > 0.5 (increase LoRA contribution)
+            # quality_history < 0.5 -> score < 0.5 (decrease LoRA contribution)
+            self.contribution_score = torch.sigmoid(
+                (self.quality_history - 0.5) * 4.0  # Amplification factor
+            )
+            
+            self.update_count += 1
+    
+    def get_gspo_stats(self):
+        """Return GSPO statistics for logging."""
+        if not self.gspo_enabled or self.r <= 0:
+            return {}
+        return {
+            "quality_history": self.quality_history.item(),
+            "contribution_score": self.contribution_score.item(),
+            "update_count": self.update_count.item(),
+        }
 
 
 class LoRAEmbedding(nn.Embedding, LoRALayer):
