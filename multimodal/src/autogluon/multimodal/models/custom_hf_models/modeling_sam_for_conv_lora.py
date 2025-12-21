@@ -34,7 +34,7 @@ from transformers.models.sam.configuration_sam import (
     SamVisionConfig,
 )
 from transformers.utils import ModelOutput, add_start_docstrings, add_start_docstrings_to_model_forward, logging
-from ..adaptation_layers import AdapterLayer, GatedAdapterLayer, LoRALinear
+from ..adaptation_layers import AdapterLayer, GatedAdapterLayer, GatedLoRALinear, LoRALinear
 
 logger = logging.get_logger(__name__)
 
@@ -228,19 +228,35 @@ class SamAttention(nn.Module):
         if self.internal_dim % config.num_attention_heads != 0:
             raise ValueError("num_attention_heads must divide hidden_size.")
 
-        # Q/K/V projections: Use LoRALinear if lora_r > 0, otherwise use standard nn.Linear
+        # Q/K/V projections: Use LoRA if lora_r > 0, otherwise use standard nn.Linear
+        # GSPO-AttnLoRA (stage 2): optionally use gated LoRA to create policy-like per-sample scaling of the LoRA delta.
+        lora_gate_enabled = getattr(config, "decoder_attention_lora_gate_enabled", False)
+        lora_gate_noise_std = getattr(config, "decoder_attention_lora_gate_noise_std", 0.0)
         if lora_r > 0:
-            self.q_proj = LoRALinear(
-                self.hidden_size, self.internal_dim,
-                r=lora_r, lora_alpha=lora_alpha, lora_dropout=lora_dropout
+            LinearCls = GatedLoRALinear if lora_gate_enabled else LoRALinear
+            self.q_proj = LinearCls(
+                self.hidden_size,
+                self.internal_dim,
+                r=lora_r,
+                lora_alpha=lora_alpha,
+                lora_dropout=lora_dropout,
+                gate_noise_std=lora_gate_noise_std,
             )
-            self.k_proj = LoRALinear(
-                self.hidden_size, self.internal_dim,
-                r=lora_r, lora_alpha=lora_alpha, lora_dropout=lora_dropout
+            self.k_proj = LinearCls(
+                self.hidden_size,
+                self.internal_dim,
+                r=lora_r,
+                lora_alpha=lora_alpha,
+                lora_dropout=lora_dropout,
+                gate_noise_std=lora_gate_noise_std,
             )
-            self.v_proj = LoRALinear(
-                self.hidden_size, self.internal_dim,
-                r=lora_r, lora_alpha=lora_alpha, lora_dropout=lora_dropout
+            self.v_proj = LinearCls(
+                self.hidden_size,
+                self.internal_dim,
+                r=lora_r,
+                lora_alpha=lora_alpha,
+                lora_dropout=lora_dropout,
+                gate_noise_std=lora_gate_noise_std,
             )
         else:
             self.q_proj = nn.Linear(self.hidden_size, self.internal_dim)

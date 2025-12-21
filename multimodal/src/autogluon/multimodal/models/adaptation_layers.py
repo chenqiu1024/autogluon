@@ -366,6 +366,9 @@ class LoRALinear(nn.Linear, LoRALayer):
         LoRALayer.__init__(self, r=r, lora_alpha=lora_alpha, lora_dropout=lora_dropout, merge_weights=merge_weights)
 
         self.fan_in_fan_out = fan_in_fan_out
+        # GSPO attention-LoRA extension (default off; activated by training loop via set_gspo_mode)
+        self._gspo_active = False
+        self._gspo_noise_std = 0.0
         # Actual trainable parameters
         if r > 0:
             self.lora_A = nn.Parameter(self.weight.new_zeros((r, in_features)))
@@ -409,10 +412,126 @@ class LoRALinear(nn.Linear, LoRALayer):
         if self.r > 0 and not self.merged:
             result = F.linear(x, self.T(self.weight), bias=self.bias)
             if self.r > 0:
-                result += (self.lora_dropout(x) @ self.lora_A.T @ self.lora_B.T) * self.scaling
+                delta = (self.lora_dropout(x) @ self.lora_A.T @ self.lora_B.T) * self.scaling
+                if self._gspo_active and self.training and self._gspo_noise_std and self._gspo_noise_std > 0:
+                    delta = delta + torch.randn_like(delta) * self._gspo_noise_std
+                result += delta
             return result
         else:
             return F.linear(x, self.T(self.weight), bias=self.bias)
+
+    def set_gspo_mode(self, active: bool, noise_std: Optional[float] = None):
+        """
+        Enable/disable GSPO-specific behavior for this LoRA layer.
+        No-op unless invoked by the GSPO training loop.
+        """
+        self._gspo_active = bool(active)
+        if noise_std is not None:
+            self._gspo_noise_std = float(noise_std)
+
+
+class GatedLoRALinear(nn.Linear, LoRALayer):
+    """
+    LoRA linear layer with an input-conditioned gate that scales ONLY the LoRA delta branch.
+
+    This is designed for GSPO rollouts:
+    - When GSPO is active: add stochasticity to gate logits (exploration) and optionally to delta (fine-grained exploration).
+    - When GSPO is inactive: deterministic gate (no sampling noise), behaves like standard LoRA with a learned per-sample scale.
+
+    Supports x shapes:
+    - [B, P, T, C] (SAM mask decoder attention format)
+    - [B, T, C]
+    - [B, C]
+    """
+
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        r: int = 0,
+        lora_alpha: int = 1,
+        lora_dropout: float = 0.0,
+        fan_in_fan_out: bool = False,
+        merge_weights: bool = True,
+        gate_noise_std: float = 0.0,
+        **kwargs,
+    ):
+        nn.Linear.__init__(self, in_features, out_features, **kwargs)
+        LoRALayer.__init__(self, r=r, lora_alpha=lora_alpha, lora_dropout=lora_dropout, merge_weights=merge_weights)
+        self.fan_in_fan_out = fan_in_fan_out
+
+        # Gate network (policy-like scalar per sample)
+        self.gate = nn.Linear(in_features, 1)
+        nn.init.zeros_(self.gate.weight)
+        nn.init.zeros_(self.gate.bias)
+
+        self._gspo_active = False
+        self._gate_noise_std = float(gate_noise_std)
+        self._delta_noise_std = 0.0
+
+        if r > 0:
+            self.lora_A = nn.Parameter(self.weight.new_zeros((r, in_features)))
+            self.lora_B = nn.Parameter(self.weight.new_zeros((out_features, r)))
+            self.scaling = self.lora_alpha / self.r
+            self.weight.requires_grad = False
+
+        self.reset_parameters()
+        if fan_in_fan_out:
+            self.weight.data = self.weight.data.T
+
+    def reset_parameters(self):
+        nn.Linear.reset_parameters(self)
+        if hasattr(self, "lora_A"):
+            nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
+            nn.init.zeros_(self.lora_B)
+
+    def T(self, w):
+        return w.T if self.fan_in_fan_out else w
+
+    def set_gspo_mode(
+        self,
+        active: bool,
+        gate_noise_std: Optional[float] = None,
+        delta_noise_std: Optional[float] = None,
+    ):
+        self._gspo_active = bool(active)
+        if gate_noise_std is not None:
+            self._gate_noise_std = float(gate_noise_std)
+        if delta_noise_std is not None:
+            self._delta_noise_std = float(delta_noise_std)
+
+    def _pool(self, x: torch.Tensor) -> torch.Tensor:
+        if x.dim() == 4:
+            # [B,P,T,C] -> [B,C]
+            return x.mean(dim=(1, 2))
+        if x.dim() == 3:
+            # [B,T,C] -> [B,C]
+            return x.mean(dim=1)
+        if x.dim() == 2:
+            # [B,C]
+            return x
+        raise ValueError(f"Unsupported input shape for GatedLoRALinear: {tuple(x.shape)}")
+
+    def forward(self, x: torch.Tensor):
+        base = F.linear(x, self.T(self.weight), bias=self.bias)
+        if self.r <= 0 or self.merged:
+            return base
+
+        delta = (self.lora_dropout(x) @ self.lora_A.T @ self.lora_B.T) * self.scaling
+
+        # Gate per sample
+        pooled = self._pool(x)
+        logits = self.gate(pooled)  # [B,1]
+        if self._gspo_active and self.training and self._gate_noise_std and self._gate_noise_std > 0:
+            logits = logits + torch.randn_like(logits) * self._gate_noise_std
+        gate = torch.sigmoid(logits)  # [B,1]
+        while gate.dim() < delta.dim():
+            gate = gate.unsqueeze(1)
+
+        if self._gspo_active and self.training and self._delta_noise_std and self._delta_noise_std > 0:
+            delta = delta + torch.randn_like(delta) * self._delta_noise_std
+
+        return base + delta * gate
 
 
 class LoRAEmbedding(nn.Embedding, LoRALayer):

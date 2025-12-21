@@ -108,6 +108,30 @@ if __name__ == "__main__":
         default=0.0,
         help="Stage 2: exploration noise std added to gated-adapter gate logits during GSPO rollouts (default: 0.0).",
     )
+
+    # GSPO-AttnLoRA extension (decoder attention LoRA only)
+    parser.add_argument(
+        "--gspo_train_decoder_attn_lora",
+        action="store_true",
+        help="When GSPO is active, also train Decoder Attention LoRA parameters (default: False => frozen during GSPO steps).",
+    )
+    parser.add_argument(
+        "--gspo_decoder_attn_lora_noise_std",
+        type=float,
+        default=0.0,
+        help="Stage 1: exploration noise std added to decoder attention LoRA delta during GSPO rollouts (default: 0.0).",
+    )
+    parser.add_argument(
+        "--gspo_decoder_attn_lora_gate_enable",
+        action="store_true",
+        help="Stage 2: use gated decoder attention LoRA (policy-like per-sample gate on LoRA delta).",
+    )
+    parser.add_argument(
+        "--gspo_decoder_attn_lora_gate_noise_std",
+        type=float,
+        default=0.0,
+        help="Stage 2: exploration noise std added to gated decoder-attn-LoRA gate logits during GSPO rollouts (default: 0.0).",
+    )
     
     # Decoder Attention LoRA parameters (LoRA on Attention)
     parser.add_argument("--decoder_attn_lora_enable", action="store_true", 
@@ -245,6 +269,10 @@ if __name__ == "__main__":
             "optim.gspo.train_encoder_adapter": args.gspo_train_encoder_adapter,
             "optim.gspo.encoder_adapter_noise_std": args.gspo_encoder_adapter_noise_std,
             "optim.gspo.encoder_adapter_gate_noise_std": args.gspo_encoder_adapter_gate_noise_std,
+            # GSPO-AttnLoRA extension (decoder attention LoRA only)
+            "optim.gspo.train_decoder_attention_lora": args.gspo_train_decoder_attn_lora,
+            "optim.gspo.decoder_attention_lora_noise_std": args.gspo_decoder_attn_lora_noise_std,
+            "optim.gspo.decoder_attention_lora_gate_noise_std": args.gspo_decoder_attn_lora_gate_noise_std,
         })
 
     # Adapter configuration
@@ -276,6 +304,18 @@ if __name__ == "__main__":
             "model.sam.decoder_attention_lora_alpha": args.decoder_attn_lora_alpha,
             "model.sam.decoder_attention_lora_dropout": args.decoder_attn_lora_dropout,
         })
+
+    # Stage 2: gated decoder attention LoRA (policy-like). Only meaningful when decoder attention LoRA is enabled.
+    if args.gspo_decoder_attn_lora_gate_enable:
+        print(
+            f"Enabling Gated Decoder Attention LoRA (policy) with gate_noise_std={args.gspo_decoder_attn_lora_gate_noise_std}"
+        )
+        hyperparameters.update(
+            {
+                "model.sam.decoder_attention_lora_gate_enabled": True,
+                "model.sam.decoder_attention_lora_gate_noise_std": args.gspo_decoder_attn_lora_gate_noise_std,
+            }
+        )
         
     # Decoder Adapter configuration
     if args.decoder_adapter_enable:

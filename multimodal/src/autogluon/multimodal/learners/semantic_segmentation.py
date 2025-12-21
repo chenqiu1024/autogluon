@@ -826,6 +826,7 @@ class SemanticSegmentationLearner(BaseLearner):
                 trainable_param_names=peft_param_names,
                 gspo_trainer=gspo_trainer,
                 gspo_adapter_cfg=self._get_gspo_adapter_cfg() if is_train else None,
+                gspo_attn_lora_cfg=self._get_gspo_attn_lora_cfg() if is_train else None,
                 train_box_prompt_cfg=self._train_box_prompt_cfg,
                 train_bbox_predictor=self._train_bbox_predictor,
                 **optim_kwargs,
@@ -868,6 +869,29 @@ class SemanticSegmentationLearner(BaseLearner):
         cfg["train_encoder_adapter"] = bool(getattr(gspo_cfg, "train_encoder_adapter", False))
         cfg["encoder_adapter_noise_std"] = float(getattr(gspo_cfg, "encoder_adapter_noise_std", 0.0))
         cfg["encoder_adapter_gate_noise_std"] = float(getattr(gspo_cfg, "encoder_adapter_gate_noise_std", 0.0))
+        return cfg
+
+    def _get_gspo_attn_lora_cfg(self) -> Dict:
+        """
+        GSPO-AttnLoRA extension config (decoder attention LoRA only).
+
+        Backward-compatible defaults:
+        - train_decoder_attention_lora: False => decoder attention LoRA (if enabled) frozen during GSPO steps
+        - noise stds default to 0.0 => no extra exploration injected
+        """
+        cfg = {
+            "train_decoder_attention_lora": False,
+            "decoder_attention_lora_noise_std": 0.0,
+            "decoder_attention_lora_gate_noise_std": 0.0,
+        }
+        if self._config is None:
+            return cfg
+        gspo_cfg = getattr(self._config.optim, "gspo", None)
+        if gspo_cfg is None:
+            return cfg
+        cfg["train_decoder_attention_lora"] = bool(getattr(gspo_cfg, "train_decoder_attention_lora", False))
+        cfg["decoder_attention_lora_noise_std"] = float(getattr(gspo_cfg, "decoder_attention_lora_noise_std", 0.0))
+        cfg["decoder_attention_lora_gate_noise_std"] = float(getattr(gspo_cfg, "decoder_attention_lora_gate_noise_std", 0.0))
         return cfg
 
         lora_cfg = getattr(self._config.optim, "lora", None)

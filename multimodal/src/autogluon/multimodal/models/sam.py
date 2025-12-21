@@ -277,6 +277,8 @@ class SAMForSemanticSegmentation(nn.Module):
         decoder_attention_lora_r: int = 0,
         decoder_attention_lora_alpha: int = 1,
         decoder_attention_lora_dropout: float = 0.0,
+        decoder_attention_lora_gate_enabled: bool = False,
+        decoder_attention_lora_gate_noise_std: float = 0.0,
         decoder_adapter_enabled: bool = False,
         decoder_adapter_dim: int = 64,
     ):
@@ -328,6 +330,8 @@ class SAMForSemanticSegmentation(nn.Module):
         self.decoder_attention_lora_r = decoder_attention_lora_r
         self.decoder_attention_lora_alpha = decoder_attention_lora_alpha
         self.decoder_attention_lora_dropout = decoder_attention_lora_dropout
+        self.decoder_attention_lora_gate_enabled = decoder_attention_lora_gate_enabled
+        self.decoder_attention_lora_gate_noise_std = decoder_attention_lora_gate_noise_std
 
         self.device = None
         self.name_to_id = {}
@@ -404,6 +408,8 @@ class SAMForSemanticSegmentation(nn.Module):
             config.mask_decoder_config.decoder_attention_lora_r = self.decoder_attention_lora_r
             config.mask_decoder_config.decoder_attention_lora_alpha = self.decoder_attention_lora_alpha
             config.mask_decoder_config.decoder_attention_lora_dropout = self.decoder_attention_lora_dropout
+            config.mask_decoder_config.decoder_attention_lora_gate_enabled = self.decoder_attention_lora_gate_enabled
+            config.mask_decoder_config.decoder_attention_lora_gate_noise_std = self.decoder_attention_lora_gate_noise_std
             
             # Try to load from local cache first to avoid network issues
             try:
@@ -425,6 +431,8 @@ class SAMForSemanticSegmentation(nn.Module):
             config.mask_decoder_config.decoder_attention_lora_r = self.decoder_attention_lora_r
             config.mask_decoder_config.decoder_attention_lora_alpha = self.decoder_attention_lora_alpha
             config.mask_decoder_config.decoder_attention_lora_dropout = self.decoder_attention_lora_dropout
+            config.mask_decoder_config.decoder_attention_lora_gate_enabled = self.decoder_attention_lora_gate_enabled
+            config.mask_decoder_config.decoder_attention_lora_gate_noise_std = self.decoder_attention_lora_gate_noise_std
             self.model = SamModel(config)
 
     def save(self, save_path: str = "./"):

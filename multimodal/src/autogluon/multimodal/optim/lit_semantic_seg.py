@@ -29,6 +29,7 @@ class SemanticSegmentationLitModule(LitModule):
         *args,
         gspo_trainer=None,
         gspo_adapter_cfg=None,
+        gspo_attn_lora_cfg=None,
         train_box_prompt_cfg=None,
         train_bbox_predictor=None,
         **kwargs,
@@ -41,6 +42,12 @@ class SemanticSegmentationLitModule(LitModule):
             "train_encoder_adapter": False,
             "encoder_adapter_noise_std": 0.0,
             "encoder_adapter_gate_noise_std": 0.0,
+        }
+        # GSPO-AttnLoRA extension config (decoder attention LoRA only).
+        self.gspo_attn_lora_cfg = gspo_attn_lora_cfg or {
+            "train_decoder_attention_lora": False,
+            "decoder_attention_lora_noise_std": 0.0,
+            "decoder_attention_lora_gate_noise_std": 0.0,
         }
         # Training-time box prompt config (dict with keys: mode, p_no, p_gt, p_noisy, noise_frac, bbox_predictor)
         self.train_box_prompt_cfg = train_box_prompt_cfg or {
@@ -388,6 +395,16 @@ class SemanticSegmentationLitModule(LitModule):
         )
         if not bool(self.gspo_adapter_cfg.get("train_encoder_adapter", False)):
             prev_requires_grad = self._set_encoder_adapter_requires_grad(trainable=False)
+
+        # GSPO-AttnLoRA: activate LoRA exploration and optionally freeze decoder attention LoRA params
+        prev_attn_lora_requires_grad = None
+        self._set_decoder_attn_lora_gspo_mode(
+            active=True,
+            delta_noise_std=float(self.gspo_attn_lora_cfg.get("decoder_attention_lora_noise_std", 0.0)),
+            gate_noise_std=float(self.gspo_attn_lora_cfg.get("decoder_attention_lora_gate_noise_std", 0.0)),
+        )
+        if not bool(self.gspo_attn_lora_cfg.get("train_decoder_attention_lora", False)):
+            prev_attn_lora_requires_grad = self._set_decoder_attn_lora_requires_grad(trainable=False)
         
         # Define forward function for GSPO
         def forward_fn(images):
@@ -430,6 +447,9 @@ class SemanticSegmentationLitModule(LitModule):
             if prev_requires_grad is not None:
                 self._restore_requires_grad(prev_requires_grad)
             self._set_encoder_adapters_gspo_mode(active=False)
+            if prev_attn_lora_requires_grad is not None:
+                self._restore_decoder_attn_lora_requires_grad(prev_attn_lora_requires_grad)
+            self._set_decoder_attn_lora_gspo_mode(active=False)
         
         # Update expert quality feedback
         if selected_experts_groups:
@@ -478,6 +498,46 @@ class SemanticSegmentationLitModule(LitModule):
 
     def _restore_requires_grad(self, prev: Dict[str, bool]):
         for name, m in self._iter_encoder_adapter_named_modules():
+            for p_name, p in m.named_parameters(recurse=True):
+                key = f"{name}.{p_name}"
+                if key in prev:
+                    p.requires_grad = prev[key]
+
+    def _iter_decoder_attn_lora_named_modules(self):
+        """
+        Yield (name, module) for decoder attention LoRA projection layers only.
+        This targets LoRALinear / GatedLoRALinear inside mask decoder SamAttention modules.
+        """
+        # Local import to avoid heavy coupling at module import time
+        from ..models.adaptation_layers import GatedLoRALinear, LoRALinear
+
+        for name, module in self.model.named_modules():
+            if "mask_decoder" not in name:
+                continue
+            if isinstance(module, (LoRALinear, GatedLoRALinear)):
+                yield name, module
+
+    def _set_decoder_attn_lora_gspo_mode(self, active: bool, delta_noise_std: float = 0.0, gate_noise_std: float = 0.0):
+        for _, m in self._iter_decoder_attn_lora_named_modules():
+            if hasattr(m, "set_gspo_mode"):
+                try:
+                    # GatedLoRALinear.set_gspo_mode(active, gate_noise_std, delta_noise_std)
+                    m.set_gspo_mode(active=active, gate_noise_std=gate_noise_std, delta_noise_std=delta_noise_std)
+                except TypeError:
+                    # LoRALinear.set_gspo_mode(active, noise_std)
+                    m.set_gspo_mode(active=active, noise_std=delta_noise_std)
+
+    def _set_decoder_attn_lora_requires_grad(self, trainable: bool) -> Dict[str, bool]:
+        prev: Dict[str, bool] = {}
+        for name, m in self._iter_decoder_attn_lora_named_modules():
+            for p_name, p in m.named_parameters(recurse=True):
+                key = f"{name}.{p_name}"
+                prev[key] = p.requires_grad
+                p.requires_grad = bool(trainable)
+        return prev
+
+    def _restore_decoder_attn_lora_requires_grad(self, prev: Dict[str, bool]):
+        for name, m in self._iter_decoder_attn_lora_named_modules():
             for p_name, p in m.named_parameters(recurse=True):
                 key = f"{name}.{p_name}"
                 if key in prev:

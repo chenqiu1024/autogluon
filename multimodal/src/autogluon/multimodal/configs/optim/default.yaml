@@ -83,3 +83,10 @@ optim:
     encoder_adapter_noise_std: 0.0
     # Stage 2: gated adapter policy exploration noise (applies only if model.sam.encoder_adapter_gate_enabled=True)
     encoder_adapter_gate_noise_std: 0.0
+    # GSPO-AttnLoRA extension (decoder attention LoRA only)
+    # When False (default), decoder attention LoRA parameters (if enabled) are frozen during GSPO-active steps.
+    train_decoder_attention_lora: False
+    # Stage 1: exploration noise std added to decoder attention LoRA delta during GSPO rollouts
+    decoder_attention_lora_noise_std: 0.0
+    # Stage 2: exploration noise std added to gated decoder attention LoRA gate logits during GSPO rollouts
+    decoder_attention_lora_gate_noise_std: 0.0

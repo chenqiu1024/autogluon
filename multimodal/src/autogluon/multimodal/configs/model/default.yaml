@@ -271,6 +271,9 @@ model:
     decoder_attention_lora_r: 0
     decoder_attention_lora_alpha: 1
     decoder_attention_lora_dropout: 0.0
+    # GSPO-AttnLoRA extension (decoder attention LoRA policy gate; only changes structure when LoRA is enabled)
+    decoder_attention_lora_gate_enabled: False
+    decoder_attention_lora_gate_noise_std: 0.0
     decoder_adapter_enabled: False
     decoder_adapter_dim: 64
 
