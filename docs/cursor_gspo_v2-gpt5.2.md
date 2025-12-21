@@ -1,5 +1,5 @@
 # Untitled Chat
-_Exported on 12/20/2025 at 23:47:52 PST from Cursor (2.2.43)_
+_Exported on 12/21/2025 at 00:09:02 PST from Cursor (2.2.43)_
 
 ---
 
@@ -14112,5 +14112,358 @@ def test_decoder_attention_lora_gated_linear_type_and_gspo_mode():
 ```shellscript
 --gspo_decoder_attn_lora_gate_enable
 --gspo_decoder_attn_lora_gate_noise_std 0.5
+```
+
+---
+
+**User**
+
+请给出完整的各阶段训练所使用的命令行及参数
+
+---
+
+**Cursor**
+
+### 前置约定（所有阶段通用）
+在 `examples/automm/Conv-LoRA` 下执行（按你的数据集替换 `--task`）：
+
+```bash
+cd examples/automm/Conv-LoRA
+```
+
+下面命令都假设你需要 Conv‑LoRA 的基础配置（如不需要可删 `--rank/--expert_num`），并给出常用训练参数（可按需改）：
+- `--num_gpus 1 --per_gpu_batch_size 1 --batch_size 4`
+- 可选：`--lr 1e-4`
+
+---
+
+### 阶段 A：基线（GSPO 只用于 Conv‑LoRA MoE）
+#### A0：Conv‑LoRA（无 GSPO）
+```bash
+python3 run_semantic_segmentation.py \
+  --task isic2017 \
+  --rank 3 --expert_num 8 \
+  --num_gpus 1 --per_gpu_batch_size 1 --batch_size 4 \
+  --output_dir outputs/a0_conv_lora
+```
+
+#### A1：Conv‑LoRA + GSPO（默认：GSPO 仍只优化 Conv‑LoRA；Encoder Adapter / Decoder Attn LoRA 若启用会在 GSPO step 被冻结）
+```bash
+python3 run_semantic_segmentation.py \
+  --task isic2017 \
+  --rank 3 --expert_num 8 \
+  --gspo_enable \
+  --gspo_group_size 4 --gspo_warmup_epochs 5 \
+  --gspo_contrastive_weight 0.1 --gspo_quality_momentum 0.9 \
+  --lambda_smooth 0.1 --lambda_boundary 0.3 --w_boundary 0.3 --w_smooth 0.1 --w_thin 0.05 \
+  --num_gpus 1 --per_gpu_batch_size 1 --batch_size 4 \
+  --output_dir outputs/a1_conv_lora_gspo
+```
+
+---
+
+### 阶段 B：把 **Encoder Adapter（Vision Encoder 每层 MLP 后）** 纳入 GSPO
+> 注意：**必须先开 `--adapter_enable`**。  
+> 默认不加 `--gspo_train_encoder_adapter` 时：GSPO active step 会冻结 encoder adapters（保持“GSPO 只用于 Conv‑LoRA”语义）。
+
+#### B0：开启 Encoder Adapter，但不让其参与 GSPO（兼容模式）
+```bash
+python3 run_semantic_segmentation.py \
+  --task isic2017 \
+  --rank 3 --expert_num 8 \
+  --adapter_enable --adapter_dim 64 \
+  --gspo_enable \
+  --gspo_group_size 4 --gspo_warmup_epochs 5 \
+  --num_gpus 1 --per_gpu_batch_size 1 --batch_size 4 \
+  --output_dir outputs/b0_encoder_adapter_frozen_during_gspo
+```
+
+#### B1（阶段1）：GSPO 同时训练 Encoder Adapter +（可选）Adapter 输出探索噪声
+```bash
+python3 run_semantic_segmentation.py \
+  --task isic2017 \
+  --rank 3 --expert_num 8 \
+  --adapter_enable --adapter_dim 64 \
+  --gspo_enable \
+  --gspo_group_size 4 --gspo_warmup_epochs 5 \
+  --gspo_train_encoder_adapter \
+  --gspo_encoder_adapter_noise_std 0.02 \
+  --num_gpus 1 --per_gpu_batch_size 1 --batch_size 4 \
+  --output_dir outputs/b1_encoder_adapter_gspo_noise
+```
+
+#### B2（阶段2）：Gated Encoder Adapter（policy）+ GSPO（gate logits 探索噪声）
+```bash
+python3 run_semantic_segmentation.py \
+  --task isic2017 \
+  --rank 3 --expert_num 8 \
+  --adapter_enable --adapter_dim 64 \
+  --gspo_enable \
+  --gspo_group_size 4 --gspo_warmup_epochs 5 \
+  --gspo_train_encoder_adapter \
+  --gspo_encoder_adapter_gate_enable \
+  --gspo_encoder_adapter_gate_noise_std 0.5 \
+  --num_gpus 1 --per_gpu_batch_size 1 --batch_size 4 \
+  --output_dir outputs/b2_gated_encoder_adapter_gspo
+```
+
+---
+
+### 阶段 C：把 **LoRA on Attention（Decoder Attention LoRA：Q/K/V）** 纳入 GSPO
+> 注意：**必须先开 `--decoder_attn_lora_enable`**。  
+> 默认不加 `--gspo_train_decoder_attn_lora` 时：GSPO active step 会冻结 decoder-attn-LoRA（保持兼容语义）。
+
+#### C0：开启 Decoder Attention LoRA，但不让其参与 GSPO（兼容模式）
+```bash
+python3 run_semantic_segmentation.py \
+  --task isic2017 \
+  --rank 3 --expert_num 8 \
+  --gspo_enable \
+  --gspo_group_size 4 --gspo_warmup_epochs 5 \
+  --decoder_attn_lora_enable \
+  --decoder_attn_lora_r 8 --decoder_attn_lora_alpha 8 --decoder_attn_lora_dropout 0.0 \
+  --num_gpus 1 --per_gpu_batch_size 1 --batch_size 4 \
+  --output_dir outputs/c0_decoder_attn_lora_frozen_during_gspo
+```
+
+#### C1（阶段1）：GSPO 同时训练 Decoder Attention LoRA +（可选）LoRA delta 探索噪声
+```bash
+python3 run_semantic_segmentation.py \
+  --task isic2017 \
+  --rank 3 --expert_num 8 \
+  --gspo_enable \
+  --gspo_group_size 4 --gspo_warmup_epochs 5 \
+  --decoder_attn_lora_enable \
+  --decoder_attn_lora_r 8 --decoder_attn_lora_alpha 8 --decoder_attn_lora_dropout 0.0 \
+  --gspo_train_decoder_attn_lora \
+  --gspo_decoder_attn_lora_noise_std 0.02 \
+  --num_gpus 1 --per_gpu_batch_size 1 --batch_size 4 \
+  --output_dir outputs/c1_decoder_attn_lora_gspo_noise
+```
+
+#### C2（阶段2）：Gated Decoder Attention LoRA（policy）+ GSPO（gate logits 探索噪声）
+```bash
+python3 run_semantic_segmentation.py \
+  --task isic2017 \
+  --rank 3 --expert_num 8 \
+  --gspo_enable \
+  --gspo_group_size 4 --gspo_warmup_epochs 5 \
+  --decoder_attn_lora_enable \
+  --decoder_attn_lora_r 8 --decoder_attn_lora_alpha 8 --decoder_attn_lora_dropout 0.0 \
+  --gspo_train_decoder_attn_lora \
+  --gspo_decoder_attn_lora_gate_enable \
+  --gspo_decoder_attn_lora_gate_noise_std 0.5 \
+  --num_gpus 1 --per_gpu_batch_size 1 --batch_size 4 \
+  --output_dir outputs/c2_gated_decoder_attn_lora_gspo
+```
+
+---
+
+### 阶段 D：全量组合（Conv‑LoRA + GSPO + Encoder Adapter + Decoder Attention LoRA）
+> 你可以按需要开启/关闭“参与 GSPO”的两条开关：  
+> `--gspo_train_encoder_adapter`、`--gspo_train_decoder_attn_lora`
+
+#### D0：全量模块开启，但都不参与 GSPO（兼容模式）
+```bash
+python3 run_semantic_segmentation.py \
+  --task isic2017 \
+  --rank 3 --expert_num 8 \
+  --adapter_enable --adapter_dim 64 \
+  --decoder_attn_lora_enable \
+  --decoder_attn_lora_r 8 --decoder_attn_lora_alpha 8 --decoder_attn_lora_dropout 0.0 \
+  --gspo_enable \
+  --gspo_group_size 4 --gspo_warmup_epochs 5 \
+  --num_gpus 1 --per_gpu_batch_size 1 --batch_size 4 \
+  --output_dir outputs/d0_all_modules_frozen_during_gspo
+```
+
+#### D1：全量模块开启 + GSPO 同时训练 Encoder Adapter 与 Decoder Attn LoRA（阶段1噪声可选）
+```bash
+python3 run_semantic_segmentation.py \
+  --task isic2017 \
+  --rank 3 --expert_num 8 \
+  --adapter_enable --adapter_dim 64 \
+  --decoder_attn_lora_enable \
+  --decoder_attn_lora_r 8 --decoder_attn_lora_alpha 8 --decoder_attn_lora_dropout 0.0 \
+  --gspo_enable \
+  --gspo_group_size 4 --gspo_warmup_epochs 5 \
+  --gspo_train_encoder_adapter \
+  --gspo_encoder_adapter_noise_std 0.02 \
+  --gspo_train_decoder_attn_lora \
+  --gspo_decoder_attn_lora_noise_std 0.02 \
+  --num_gpus 1 --per_gpu_batch_size 1 --batch_size 4 \
+  --output_dir outputs/d1_all_modules_gspo_stage1
+```
+
+#### D2：全量模块开启 + 两边都用 gated policy（阶段2）
+```bash
+python3 run_semantic_segmentation.py \
+  --task isic2017 \
+  --rank 3 --expert_num 8 \
+  --adapter_enable --adapter_dim 64 \
+  --gspo_encoder_adapter_gate_enable \
+  --gspo_encoder_adapter_gate_noise_std 0.5 \
+  --decoder_attn_lora_enable \
+  --decoder_attn_lora_r 8 --decoder_attn_lora_alpha 8 --decoder_attn_lora_dropout 0.0 \
+  --gspo_decoder_attn_lora_gate_enable \
+  --gspo_decoder_attn_lora_gate_noise_std 0.5 \
+  --gspo_enable \
+  --gspo_group_size 4 --gspo_warmup_epochs 5 \
+  --gspo_train_encoder_adapter \
+  --gspo_train_decoder_attn_lora \
+  --num_gpus 1 --per_gpu_batch_size 1 --batch_size 4 \
+  --output_dir outputs/d2_all_modules_gspo_stage2
+```
+
+```shellscript
+cd examples/automm/Conv-LoRA
+```
+
+```shellscript
+python3 run_semantic_segmentation.py \
+  --task isic2017 \
+  --rank 3 --expert_num 8 \
+  --num_gpus 1 --per_gpu_batch_size 1 --batch_size 4 \
+  --output_dir outputs/a0_conv_lora
+```
+
+```shellscript
+python3 run_semantic_segmentation.py \
+  --task isic2017 \
+  --rank 3 --expert_num 8 \
+  --gspo_enable \
+  --gspo_group_size 4 --gspo_warmup_epochs 5 \
+  --gspo_contrastive_weight 0.1 --gspo_quality_momentum 0.9 \
+  --lambda_smooth 0.1 --lambda_boundary 0.3 --w_boundary 0.3 --w_smooth 0.1 --w_thin 0.05 \
+  --num_gpus 1 --per_gpu_batch_size 1 --batch_size 4 \
+  --output_dir outputs/a1_conv_lora_gspo
+```
+
+```shellscript
+python3 run_semantic_segmentation.py \
+  --task isic2017 \
+  --rank 3 --expert_num 8 \
+  --adapter_enable --adapter_dim 64 \
+  --gspo_enable \
+  --gspo_group_size 4 --gspo_warmup_epochs 5 \
+  --num_gpus 1 --per_gpu_batch_size 1 --batch_size 4 \
+  --output_dir outputs/b0_encoder_adapter_frozen_during_gspo
+```
+
+```shellscript
+python3 run_semantic_segmentation.py \
+  --task isic2017 \
+  --rank 3 --expert_num 8 \
+  --adapter_enable --adapter_dim 64 \
+  --gspo_enable \
+  --gspo_group_size 4 --gspo_warmup_epochs 5 \
+  --gspo_train_encoder_adapter \
+  --gspo_encoder_adapter_noise_std 0.02 \
+  --num_gpus 1 --per_gpu_batch_size 1 --batch_size 4 \
+  --output_dir outputs/b1_encoder_adapter_gspo_noise
+```
+
+```shellscript
+python3 run_semantic_segmentation.py \
+  --task isic2017 \
+  --rank 3 --expert_num 8 \
+  --adapter_enable --adapter_dim 64 \
+  --gspo_enable \
+  --gspo_group_size 4 --gspo_warmup_epochs 5 \
+  --gspo_train_encoder_adapter \
+  --gspo_encoder_adapter_gate_enable \
+  --gspo_encoder_adapter_gate_noise_std 0.5 \
+  --num_gpus 1 --per_gpu_batch_size 1 --batch_size 4 \
+  --output_dir outputs/b2_gated_encoder_adapter_gspo
+```
+
+```shellscript
+python3 run_semantic_segmentation.py \
+  --task isic2017 \
+  --rank 3 --expert_num 8 \
+  --gspo_enable \
+  --gspo_group_size 4 --gspo_warmup_epochs 5 \
+  --decoder_attn_lora_enable \
+  --decoder_attn_lora_r 8 --decoder_attn_lora_alpha 8 --decoder_attn_lora_dropout 0.0 \
+  --num_gpus 1 --per_gpu_batch_size 1 --batch_size 4 \
+  --output_dir outputs/c0_decoder_attn_lora_frozen_during_gspo
+```
+
+```shellscript
+python3 run_semantic_segmentation.py \
+  --task isic2017 \
+  --rank 3 --expert_num 8 \
+  --gspo_enable \
+  --gspo_group_size 4 --gspo_warmup_epochs 5 \
+  --decoder_attn_lora_enable \
+  --decoder_attn_lora_r 8 --decoder_attn_lora_alpha 8 --decoder_attn_lora_dropout 0.0 \
+  --gspo_train_decoder_attn_lora \
+  --gspo_decoder_attn_lora_noise_std 0.02 \
+  --num_gpus 1 --per_gpu_batch_size 1 --batch_size 4 \
+  --output_dir outputs/c1_decoder_attn_lora_gspo_noise
+```
+
+```shellscript
+python3 run_semantic_segmentation.py \
+  --task isic2017 \
+  --rank 3 --expert_num 8 \
+  --gspo_enable \
+  --gspo_group_size 4 --gspo_warmup_epochs 5 \
+  --decoder_attn_lora_enable \
+  --decoder_attn_lora_r 8 --decoder_attn_lora_alpha 8 --decoder_attn_lora_dropout 0.0 \
+  --gspo_train_decoder_attn_lora \
+  --gspo_decoder_attn_lora_gate_enable \
+  --gspo_decoder_attn_lora_gate_noise_std 0.5 \
+  --num_gpus 1 --per_gpu_batch_size 1 --batch_size 4 \
+  --output_dir outputs/c2_gated_decoder_attn_lora_gspo
+```
+
+```shellscript
+python3 run_semantic_segmentation.py \
+  --task isic2017 \
+  --rank 3 --expert_num 8 \
+  --adapter_enable --adapter_dim 64 \
+  --decoder_attn_lora_enable \
+  --decoder_attn_lora_r 8 --decoder_attn_lora_alpha 8 --decoder_attn_lora_dropout 0.0 \
+  --gspo_enable \
+  --gspo_group_size 4 --gspo_warmup_epochs 5 \
+  --num_gpus 1 --per_gpu_batch_size 1 --batch_size 4 \
+  --output_dir outputs/d0_all_modules_frozen_during_gspo
+```
+
+```shellscript
+python3 run_semantic_segmentation.py \
+  --task isic2017 \
+  --rank 3 --expert_num 8 \
+  --adapter_enable --adapter_dim 64 \
+  --decoder_attn_lora_enable \
+  --decoder_attn_lora_r 8 --decoder_attn_lora_alpha 8 --decoder_attn_lora_dropout 0.0 \
+  --gspo_enable \
+  --gspo_group_size 4 --gspo_warmup_epochs 5 \
+  --gspo_train_encoder_adapter \
+  --gspo_encoder_adapter_noise_std 0.02 \
+  --gspo_train_decoder_attn_lora \
+  --gspo_decoder_attn_lora_noise_std 0.02 \
+  --num_gpus 1 --per_gpu_batch_size 1 --batch_size 4 \
+  --output_dir outputs/d1_all_modules_gspo_stage1
+```
+
+```shellscript
+python3 run_semantic_segmentation.py \
+  --task isic2017 \
+  --rank 3 --expert_num 8 \
+  --adapter_enable --adapter_dim 64 \
+  --gspo_encoder_adapter_gate_enable \
+  --gspo_encoder_adapter_gate_noise_std 0.5 \
+  --decoder_attn_lora_enable \
+  --decoder_attn_lora_r 8 --decoder_attn_lora_alpha 8 --decoder_attn_lora_dropout 0.0 \
+  --gspo_decoder_attn_lora_gate_enable \
+  --gspo_decoder_attn_lora_gate_noise_std 0.5 \
+  --gspo_enable \
+  --gspo_group_size 4 --gspo_warmup_epochs 5 \
+  --gspo_train_encoder_adapter \
+  --gspo_train_decoder_attn_lora \
+  --num_gpus 1 --per_gpu_batch_size 1 --batch_size 4 \
+  --output_dir outputs/d2_all_modules_gspo_stage2
 ```
 

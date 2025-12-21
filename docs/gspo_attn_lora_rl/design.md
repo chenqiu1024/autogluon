@@ -131,4 +131,3 @@ GSPO group rollouts:
   同一图像做 G 次 forward (dropout/噪声/门控采样不同) → 质量对比 → advantage-weighted loss → 反传更新
 ```
 
-
