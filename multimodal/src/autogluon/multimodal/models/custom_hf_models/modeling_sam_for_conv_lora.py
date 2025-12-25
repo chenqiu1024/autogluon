@@ -547,8 +547,17 @@ class SamFeedForward(nn.Module):
 
 
 class SamMaskDecoder(nn.Module):
-    def __init__(self, config: SamMaskDecoderConfig, lora_r: int = 0, lora_alpha: int = 1, lora_dropout: float = 0.0,
-                 gspo_lora_enabled: bool = False, gspo_lora_momentum: float = 0.9, gspo_lora_scale_adaptation: bool = False):
+    def __init__(
+        self,
+        config: SamMaskDecoderConfig,
+        lora_r: int = 0,
+        lora_alpha: int = 1,
+        lora_dropout: float = 0.0,
+        gspo_lora_enabled: bool = False,
+        gspo_lora_momentum: float = 0.9,
+        gspo_lora_scale_adaptation: bool = False,
+        gspo_lora_amplification_factor: float = 4.0,
+    ):
         super().__init__()
 
         self.hidden_size = config.hidden_size
@@ -559,10 +568,16 @@ class SamMaskDecoder(nn.Module):
         self.iou_token = nn.Embedding(1, self.hidden_size)
         self.mask_tokens = nn.Embedding(self.num_mask_tokens, self.hidden_size)
 
-        self.transformer = SamTwoWayTransformer(config, lora_r=lora_r, lora_alpha=lora_alpha, lora_dropout=lora_dropout,
-                                                gspo_lora_enabled=gspo_lora_enabled, gspo_lora_momentum=gspo_lora_momentum,
-                                                gspo_lora_scale_adaptation=gspo_lora_scale_adaptation,
-                                                gspo_lora_amplification_factor=gspo_lora_amplification_factor)
+        self.transformer = SamTwoWayTransformer(
+            config,
+            lora_r=lora_r,
+            lora_alpha=lora_alpha,
+            lora_dropout=lora_dropout,
+            gspo_lora_enabled=gspo_lora_enabled,
+            gspo_lora_momentum=gspo_lora_momentum,
+            gspo_lora_scale_adaptation=gspo_lora_scale_adaptation,
+            gspo_lora_amplification_factor=gspo_lora_amplification_factor,
+        )
 
         # should we create a new class for this?
         self.upscale_conv1 = nn.ConvTranspose2d(self.hidden_size, self.hidden_size // 4, kernel_size=2, stride=2)
