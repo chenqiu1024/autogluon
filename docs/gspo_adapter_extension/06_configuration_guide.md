@@ -85,7 +85,7 @@ optim:
 ```yaml
 model:
   sam:
-    checkpoint_name: "facebook/sam-vit-huge"
+    checkpoint_name: "facebook/sam-vit-huge"  # 可改为 MedSAM 的 HuggingFace repo 或本地转换目录
     # ... 其他参数 ...
     
     # Encoder Adapter 配置
@@ -121,7 +121,25 @@ python3 run_semantic_segmentation.py \
     --output_dir outputs/convlora_gspo
 ```
 
-### 3.3 Conv-LoRA + GSPO + Adapter（无 GSPO-Adapter）
+### 3.3 使用 MedSAM 主干（其余配置保持不变）
+
+```bash
+python3 run_semantic_segmentation.py \
+    --task isic2017 \
+    --rank 3 \
+    --expert_num 8 \
+    --sam_checkpoint <medsam_hf_repo_or_local_dir> \
+    --gspo_enable \
+    --adapter_enable \
+    --adapter_dim 64 \
+    --gspo_adapter_enable \
+    --gspo_adapter_scale_adaptation \
+    --output_dir outputs/medsam_gspo_adapter
+```
+
+> 说明：`--sam_checkpoint` 需指向 HuggingFace 兼容的 MedSAM 权重（或已转换的本地目录）；GSPO、Adapter、Conv-LoRA、Decoder-LoRA 等逻辑无需修改。
+
+### 3.4 Conv-LoRA + GSPO + Adapter（无 GSPO-Adapter）
 
 ```bash
 python3 run_semantic_segmentation.py \
@@ -134,7 +152,7 @@ python3 run_semantic_segmentation.py \
     --output_dir outputs/convlora_gspo_adapter
 ```
 
-### 3.4 完整混合架构（阶段1）
+### 3.5 完整混合架构（阶段1）
 
 ```bash
 python3 run_semantic_segmentation.py \
@@ -148,7 +166,7 @@ python3 run_semantic_segmentation.py \
     --output_dir outputs/hybrid_phase1
 ```
 
-### 3.5 完整混合架构（阶段2）
+### 3.6 完整混合架构（阶段2）
 
 ```bash
 python3 run_semantic_segmentation.py \

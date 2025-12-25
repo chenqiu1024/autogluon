@@ -59,6 +59,12 @@ if __name__ == "__main__":
     parser.add_argument("--num_gpus", type=int, default=1)
     parser.add_argument("--output_dir", type=str, default="outputs")
     parser.add_argument("--ckpt_path", type=str, default="outputs", help="Checkpoint path.")
+    parser.add_argument(
+        "--sam_checkpoint",
+        type=str,
+        default="facebook/sam-vit-huge",
+        help="SAM/MedSAM checkpoint name or local path (e.g., bowanglab/medsam-vit-huge).",
+    )
     parser.add_argument("--per_gpu_batch_size", type=int, default=1, help="The batch size for each GPU.")
     parser.add_argument(
         "--batch_size",
@@ -221,6 +227,9 @@ if __name__ == "__main__":
             "env.batch_size": args.batch_size,
         }
     )
+    # Allow switching SAM backbone to MedSAM or other checkpoints
+    if args.sam_checkpoint:
+        hyperparameters["model.sam.checkpoint_name"] = args.sam_checkpoint
     
     # GSPO configuration
     if args.gspo_enable:
