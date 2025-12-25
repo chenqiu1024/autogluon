@@ -205,7 +205,8 @@ class SamAttention(nn.Module):
     """
 
     def __init__(self, config, downsample_rate=None, lora_r=0, lora_alpha=1, lora_dropout=0.0,
-                 gspo_lora_enabled=False, gspo_lora_momentum=0.9, gspo_lora_scale_adaptation=False):
+                 gspo_lora_enabled=False, gspo_lora_momentum=0.9, gspo_lora_scale_adaptation=False,
+                 gspo_lora_amplification_factor=4.0):
         """
         Parameters
         ----------
@@ -225,6 +226,8 @@ class SamAttention(nn.Module):
             Momentum for GSPO quality history updates
         gspo_lora_scale_adaptation : bool, default=False
             Whether to enable GSPO adaptive scaling for LoRA
+        gspo_lora_amplification_factor : float, default=4.0
+            Amplification factor k for contribution score calculation
         """
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -244,6 +247,7 @@ class SamAttention(nn.Module):
                 gspo_enabled=gspo_lora_enabled,
                 gspo_momentum=gspo_lora_momentum,
                 gspo_scale_adaptation=gspo_lora_scale_adaptation,
+                gspo_amplification_factor=gspo_lora_amplification_factor,
             )
             self.k_proj = LoRALinear(
                 self.hidden_size, self.internal_dim,
@@ -251,6 +255,7 @@ class SamAttention(nn.Module):
                 gspo_enabled=gspo_lora_enabled,
                 gspo_momentum=gspo_lora_momentum,
                 gspo_scale_adaptation=gspo_lora_scale_adaptation,
+                gspo_amplification_factor=gspo_lora_amplification_factor,
             )
             self.v_proj = LoRALinear(
                 self.hidden_size, self.internal_dim,
@@ -258,6 +263,7 @@ class SamAttention(nn.Module):
                 gspo_enabled=gspo_lora_enabled,
                 gspo_momentum=gspo_lora_momentum,
                 gspo_scale_adaptation=gspo_lora_scale_adaptation,
+                gspo_amplification_factor=gspo_lora_amplification_factor,
             )
         else:
             self.q_proj = nn.Linear(self.hidden_size, self.internal_dim)
@@ -311,7 +317,8 @@ class SamAttention(nn.Module):
 class SamTwoWayAttentionBlock(nn.Module):
     def __init__(self, config, attention_downsample_rate: int = 2, skip_first_layer_pe: bool = False,
                  lora_r: int = 0, lora_alpha: int = 1, lora_dropout: float = 0.0,
-                 gspo_lora_enabled: bool = False, gspo_lora_momentum: float = 0.9, gspo_lora_scale_adaptation: bool = False):
+                 gspo_lora_enabled: bool = False, gspo_lora_momentum: float = 0.9, gspo_lora_scale_adaptation: bool = False,
+                 gspo_lora_amplification_factor: float = 4.0):
         """
         A transformer block with four layers:
             (1) self-attention of sparse inputs (2) cross attention of sparse inputs -> dense inputs (3) mlp block on
@@ -336,6 +343,8 @@ class SamTwoWayAttentionBlock(nn.Module):
                 Momentum for GSPO quality history updates
             gspo_lora_scale_adaptation (bool, default=False):
                 Whether to enable GSPO adaptive scaling for LoRA
+            gspo_lora_amplification_factor (float, default=4.0):
+                Amplification factor k for contribution score calculation
         """
         super().__init__()
 
@@ -345,13 +354,15 @@ class SamTwoWayAttentionBlock(nn.Module):
         self.self_attn = SamAttention(config, downsample_rate=1, 
                                       lora_r=lora_r, lora_alpha=lora_alpha, lora_dropout=lora_dropout,
                                       gspo_lora_enabled=gspo_lora_enabled, gspo_lora_momentum=gspo_lora_momentum,
-                                      gspo_lora_scale_adaptation=gspo_lora_scale_adaptation)
+                                      gspo_lora_scale_adaptation=gspo_lora_scale_adaptation,
+                                      gspo_lora_amplification_factor=gspo_lora_amplification_factor)
         self.layer_norm1 = nn.LayerNorm(self.hidden_size, eps=self.layer_norm_eps)
 
         self.cross_attn_token_to_image = SamAttention(config, downsample_rate=attention_downsample_rate,
                                                       lora_r=lora_r, lora_alpha=lora_alpha, lora_dropout=lora_dropout,
                                                       gspo_lora_enabled=gspo_lora_enabled, gspo_lora_momentum=gspo_lora_momentum,
-                                                      gspo_lora_scale_adaptation=gspo_lora_scale_adaptation)
+                                                      gspo_lora_scale_adaptation=gspo_lora_scale_adaptation,
+                                                      gspo_lora_amplification_factor=gspo_lora_amplification_factor)
         self.layer_norm2 = nn.LayerNorm(self.hidden_size, eps=self.layer_norm_eps)
 
         self.mlp = SamMLPBlock(config)
@@ -369,7 +380,8 @@ class SamTwoWayAttentionBlock(nn.Module):
         self.cross_attn_image_to_token = SamAttention(config, downsample_rate=attention_downsample_rate,
                                                       lora_r=lora_r, lora_alpha=lora_alpha, lora_dropout=lora_dropout,
                                                       gspo_lora_enabled=gspo_lora_enabled, gspo_lora_momentum=gspo_lora_momentum,
-                                                      gspo_lora_scale_adaptation=gspo_lora_scale_adaptation)
+                                                      gspo_lora_scale_adaptation=gspo_lora_scale_adaptation,
+                                                      gspo_lora_amplification_factor=gspo_lora_amplification_factor)
 
         self.skip_first_layer_pe = skip_first_layer_pe
 
@@ -432,7 +444,8 @@ class SamTwoWayAttentionBlock(nn.Module):
 
 class SamTwoWayTransformer(nn.Module):
     def __init__(self, config: SamMaskDecoderConfig, lora_r: int = 0, lora_alpha: int = 1, lora_dropout: float = 0.0,
-                 gspo_lora_enabled: bool = False, gspo_lora_momentum: float = 0.9, gspo_lora_scale_adaptation: bool = False):
+                 gspo_lora_enabled: bool = False, gspo_lora_momentum: float = 0.9, gspo_lora_scale_adaptation: bool = False,
+                 gspo_lora_amplification_factor: float = 4.0):
         super().__init__()
         self.config = config
 
@@ -443,11 +456,13 @@ class SamTwoWayTransformer(nn.Module):
             self.layers.append(SamTwoWayAttentionBlock(config, skip_first_layer_pe=(i == 0),
                                                        lora_r=lora_r, lora_alpha=lora_alpha, lora_dropout=lora_dropout,
                                                        gspo_lora_enabled=gspo_lora_enabled, gspo_lora_momentum=gspo_lora_momentum,
-                                                       gspo_lora_scale_adaptation=gspo_lora_scale_adaptation))
+                                                       gspo_lora_scale_adaptation=gspo_lora_scale_adaptation,
+                                                       gspo_lora_amplification_factor=gspo_lora_amplification_factor))
 
         self.final_attn_token_to_image = SamAttention(config, lora_r=lora_r, lora_alpha=lora_alpha, lora_dropout=lora_dropout,
                                                       gspo_lora_enabled=gspo_lora_enabled, gspo_lora_momentum=gspo_lora_momentum,
-                                                      gspo_lora_scale_adaptation=gspo_lora_scale_adaptation)
+                                                      gspo_lora_scale_adaptation=gspo_lora_scale_adaptation,
+                                                      gspo_lora_amplification_factor=gspo_lora_amplification_factor)
         self.layer_norm_final_attn = nn.LayerNorm(config.hidden_size)
 
     def forward(
@@ -546,7 +561,8 @@ class SamMaskDecoder(nn.Module):
 
         self.transformer = SamTwoWayTransformer(config, lora_r=lora_r, lora_alpha=lora_alpha, lora_dropout=lora_dropout,
                                                 gspo_lora_enabled=gspo_lora_enabled, gspo_lora_momentum=gspo_lora_momentum,
-                                                gspo_lora_scale_adaptation=gspo_lora_scale_adaptation)
+                                                gspo_lora_scale_adaptation=gspo_lora_scale_adaptation,
+                                                gspo_lora_amplification_factor=gspo_lora_amplification_factor)
 
         # should we create a new class for this?
         self.upscale_conv1 = nn.ConvTranspose2d(self.hidden_size, self.hidden_size // 4, kernel_size=2, stride=2)
@@ -1359,6 +1375,7 @@ class SamModel(SamPreTrainedModel):
         gspo_lora_enabled = getattr(config.mask_decoder_config, 'gspo_lora_enabled', False)
         gspo_lora_momentum = getattr(config.mask_decoder_config, 'gspo_lora_momentum', 0.9)
         gspo_lora_scale_adaptation = getattr(config.mask_decoder_config, 'gspo_lora_scale_adaptation', False)
+        gspo_lora_amplification_factor = getattr(config.mask_decoder_config, 'gspo_lora_amplification_factor', 4.0)
         
         self.mask_decoder = SamMaskDecoder(
             config.mask_decoder_config,
@@ -1368,6 +1385,7 @@ class SamModel(SamPreTrainedModel):
             gspo_lora_enabled=gspo_lora_enabled,
             gspo_lora_momentum=gspo_lora_momentum,
             gspo_lora_scale_adaptation=gspo_lora_scale_adaptation,
+            gspo_lora_amplification_factor=gspo_lora_amplification_factor,
         )
 
         self.post_init()

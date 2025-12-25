@@ -92,6 +92,8 @@ if __name__ == "__main__":
                         help="Momentum for adapter quality history updates")
     parser.add_argument("--gspo_adapter_scale_adaptation", action="store_true",
                         help="Enable adaptive scale based on quality history (Phase 2)")
+    parser.add_argument("--gspo_adapter_amplification_factor", type=float, default=4.0,
+                        help="Amplification factor k for contribution score calculation (default: 4.0)")
     
     # Decoder Attention LoRA parameters (LoRA on Attention)
     parser.add_argument("--decoder_attn_lora_enable", action="store_true", 
@@ -110,6 +112,8 @@ if __name__ == "__main__":
                         help="Momentum for LoRA quality history updates (default: 0.9)")
     parser.add_argument("--gspo_lora_attention_scale_adaptation", action="store_true",
                         help="Enable adaptive scaling based on quality for LoRA")
+    parser.add_argument("--gspo_lora_attention_amplification_factor", type=float, default=4.0,
+                        help="Amplification factor k for LoRA contribution score calculation (default: 4.0)")
     
     # TTA (Test-Time Augmentation) parameters
     parser.add_argument("--tta_enable", action="store_true", help="Enable Test-Time Augmentation for evaluation")
@@ -248,17 +252,19 @@ if __name__ == "__main__":
             if not args.gspo_enable:
                 print("Warning: --gspo_adapter_enable requires --gspo_enable. Enabling GSPO automatically.")
                 args.gspo_enable = True
-            print(f"Enabling GSPO-Adapter extension with momentum={args.gspo_adapter_momentum}")
+            print(f"Enabling GSPO-Adapter extension with momentum={args.gspo_adapter_momentum}, amplification_factor={args.gspo_adapter_amplification_factor}")
             hyperparameters.update({
                 "optim.gspo.adapter_enabled": True,
                 "optim.gspo.adapter_momentum": args.gspo_adapter_momentum,
+                "model.sam.adapter_gspo_enabled": True,
+                "model.sam.adapter_gspo_momentum": args.gspo_adapter_momentum,
+                "model.sam.adapter_gspo_amplification_factor": args.gspo_adapter_amplification_factor,
             })
             # Pass scale adaptation to model config
             if args.gspo_adapter_scale_adaptation:
                 print("Enabling GSPO-Adapter scale adaptation (Phase 2)")
                 hyperparameters.update({
                     "optim.gspo.adapter_scale_adaptation": True,
-                    "model.sam.adapter_gspo_enabled": True,
                     "model.sam.adapter_gspo_scale_adaptation": True,
                 })
     
@@ -284,6 +290,7 @@ if __name__ == "__main__":
                 "model.sam.gspo_lora_attention_enabled": True,
                 "model.sam.gspo_lora_attention_momentum": args.gspo_lora_attention_momentum,
                 "model.sam.gspo_lora_attention_scale_adaptation": args.gspo_lora_attention_scale_adaptation,
+                "model.sam.gspo_lora_attention_amplification_factor": args.gspo_lora_attention_amplification_factor,
             })
         
     # Decoder Adapter configuration

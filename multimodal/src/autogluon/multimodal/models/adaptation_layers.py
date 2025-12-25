@@ -46,6 +46,8 @@ class AdapterLayer(nn.Module):
         Momentum for quality history updates (default 0.9)
     gspo_scale_adaptation : bool
         Whether to enable adaptive scale based on quality (Phase 2, default False)
+    gspo_amplification_factor : float
+        Amplification factor k for contribution score calculation (default 4.0)
     """
     def __init__(
         self, 
@@ -56,6 +58,7 @@ class AdapterLayer(nn.Module):
         gspo_enabled=False,
         gspo_momentum=0.9,
         gspo_scale_adaptation=False,
+        gspo_amplification_factor=4.0,
     ):
         super().__init__()
         self.down_proj = nn.Linear(in_features, adapter_dim)
@@ -68,6 +71,7 @@ class AdapterLayer(nn.Module):
         self.gspo_enabled = gspo_enabled
         self.gspo_momentum = gspo_momentum
         self.gspo_scale_adaptation = gspo_scale_adaptation
+        self.gspo_amplification_factor = gspo_amplification_factor
         
         if gspo_enabled:
             # Quality tracking buffers
@@ -127,7 +131,7 @@ class AdapterLayer(nn.Module):
             # quality_history > 0.5 -> score > 0.5 (increase contribution)
             # quality_history < 0.5 -> score < 0.5 (decrease contribution)
             self.contribution_score = torch.sigmoid(
-                (self.quality_history - 0.5) * 4.0  # Amplification factor
+                (self.quality_history - 0.5) * self.gspo_amplification_factor
             )
             
             self.update_count += 1
@@ -369,6 +373,8 @@ class LoRALinear(nn.Linear, LoRALayer):
         Momentum for quality history updates (default 0.9).
     gspo_scale_adaptation
         Whether to enable adaptive scaling based on quality (default False).
+    gspo_amplification_factor
+        Amplification factor k for contribution score calculation (default 4.0).
 
     References
     ----------
@@ -390,6 +396,7 @@ class LoRALinear(nn.Linear, LoRALayer):
         gspo_enabled: bool = False,
         gspo_momentum: float = 0.9,
         gspo_scale_adaptation: bool = False,
+        gspo_amplification_factor: float = 4.0,
         **kwargs,
     ):
         nn.Linear.__init__(self, in_features, out_features, **kwargs)
@@ -411,6 +418,7 @@ class LoRALinear(nn.Linear, LoRALayer):
         self.gspo_enabled = gspo_enabled
         self.gspo_momentum = gspo_momentum
         self.gspo_scale_adaptation = gspo_scale_adaptation
+        self.gspo_amplification_factor = gspo_amplification_factor
         
         if gspo_enabled and r > 0:
             # Quality tracking buffers
@@ -491,7 +499,7 @@ class LoRALinear(nn.Linear, LoRALayer):
             # quality_history > 0.5 -> score > 0.5 (increase LoRA contribution)
             # quality_history < 0.5 -> score < 0.5 (decrease LoRA contribution)
             self.contribution_score = torch.sigmoid(
-                (self.quality_history - 0.5) * 4.0  # Amplification factor
+                (self.quality_history - 0.5) * self.gspo_amplification_factor
             )
             
             self.update_count += 1

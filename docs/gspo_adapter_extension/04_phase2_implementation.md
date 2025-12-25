@@ -125,6 +125,7 @@ python3 run_semantic_segmentation.py \
     --adapter_dim 64 \
     --gspo_adapter_enable \
     --gspo_adapter_scale_adaptation \
+    --gspo_adapter_amplification_factor 4.0 \
     --output_dir outputs/gspo_adapter_phase2
 ```
 
@@ -133,8 +134,9 @@ python3 run_semantic_segmentation.py \
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `--gspo_adapter_scale_adaptation` | flag | False | 启用质量自适应缩放 |
+| `--gspo_adapter_amplification_factor` | float | 4.0 | 放大系数k，用于计算贡献分数 |
 
-**注意**：此参数需要同时启用 `--gspo_adapter_enable`。
+**注意**：`--gspo_adapter_scale_adaptation` 需要同时启用 `--gspo_adapter_enable`。
 
 ---
 
@@ -264,12 +266,12 @@ else:
 
 ### 8.1 放大系数 k
 
-当前默认 k=4，可以调整：
+当前默认 k=4，可以通过命令行参数调整：
 
-```python
-self.contribution_score = torch.sigmoid(
-    (self.quality_history - 0.5) * k  # k 可调
-)
+```bash
+--gspo_adapter_amplification_factor 2.0  # 更平滑
+--gspo_adapter_amplification_factor 4.0  # 默认
+--gspo_adapter_amplification_factor 8.0  # 更激进
 ```
 
 | k 值 | 效果 |
@@ -289,12 +291,16 @@ self.contribution_score = torch.sigmoid(
 
 **保守配置**（稳定性优先）:
 ```bash
---gspo_adapter_momentum 0.95 --gspo_adapter_scale_adaptation
+--gspo_adapter_momentum 0.95 \
+--gspo_adapter_amplification_factor 2.0 \
+--gspo_adapter_scale_adaptation
 ```
 
 **激进配置**（自适应性优先）:
 ```bash
---gspo_adapter_momentum 0.85 --gspo_adapter_scale_adaptation
+--gspo_adapter_momentum 0.85 \
+--gspo_adapter_amplification_factor 8.0 \
+--gspo_adapter_scale_adaptation
 ```
 
 ---

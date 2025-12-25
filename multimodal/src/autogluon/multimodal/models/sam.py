@@ -277,6 +277,7 @@ class SAMForSemanticSegmentation(nn.Module):
         adapter_gspo_enabled: bool = False,
         adapter_gspo_momentum: float = 0.9,
         adapter_gspo_scale_adaptation: bool = False,
+        adapter_gspo_amplification_factor: float = 4.0,
         decoder_attention_lora_r: int = 0,
         decoder_attention_lora_alpha: int = 1,
         decoder_attention_lora_dropout: float = 0.0,
@@ -286,6 +287,7 @@ class SAMForSemanticSegmentation(nn.Module):
         gspo_lora_attention_enabled: bool = False,
         gspo_lora_attention_momentum: float = 0.9,
         gspo_lora_attention_scale_adaptation: bool = False,
+        gspo_lora_attention_amplification_factor: float = 4.0,
     ):
         """
         Load a pretrained Segment Anything Model (SAM).
@@ -345,6 +347,7 @@ class SAMForSemanticSegmentation(nn.Module):
         self.adapter_gspo_enabled = adapter_gspo_enabled
         self.adapter_gspo_momentum = adapter_gspo_momentum
         self.adapter_gspo_scale_adaptation = adapter_gspo_scale_adaptation
+        self.adapter_gspo_amplification_factor = adapter_gspo_amplification_factor
         self.decoder_adapter_enabled = decoder_adapter_enabled
         self.decoder_adapter_dim = decoder_adapter_dim
         
@@ -352,6 +355,7 @@ class SAMForSemanticSegmentation(nn.Module):
         self.gspo_lora_attention_enabled = gspo_lora_attention_enabled
         self.gspo_lora_attention_momentum = gspo_lora_attention_momentum
         self.gspo_lora_attention_scale_adaptation = gspo_lora_attention_scale_adaptation
+        self.gspo_lora_attention_amplification_factor = gspo_lora_attention_amplification_factor
 
         self._load_checkpoint(checkpoint_name)
 
@@ -378,6 +382,7 @@ class SAMForSemanticSegmentation(nn.Module):
                     gspo_enabled=self.adapter_gspo_enabled,
                     gspo_momentum=self.adapter_gspo_momentum,
                     gspo_scale_adaptation=self.adapter_gspo_scale_adaptation,
+                    gspo_amplification_factor=self.adapter_gspo_amplification_factor,
                 )
 
 
@@ -427,6 +432,7 @@ class SAMForSemanticSegmentation(nn.Module):
             config.mask_decoder_config.gspo_lora_enabled = self.gspo_lora_attention_enabled
             config.mask_decoder_config.gspo_lora_momentum = self.gspo_lora_attention_momentum
             config.mask_decoder_config.gspo_lora_scale_adaptation = self.gspo_lora_attention_scale_adaptation
+            config.mask_decoder_config.gspo_lora_amplification_factor = self.gspo_lora_attention_amplification_factor
             
             # Try to load from local cache first to avoid network issues
             try:
@@ -459,6 +465,7 @@ class SAMForSemanticSegmentation(nn.Module):
             config.mask_decoder_config.gspo_lora_enabled = self.gspo_lora_attention_enabled
             config.mask_decoder_config.gspo_lora_momentum = self.gspo_lora_attention_momentum
             config.mask_decoder_config.gspo_lora_scale_adaptation = self.gspo_lora_attention_scale_adaptation
+            config.mask_decoder_config.gspo_lora_amplification_factor = self.gspo_lora_attention_amplification_factor
             self.model = SamModel(config)
 
     def save(self, save_path: str = "./"):
