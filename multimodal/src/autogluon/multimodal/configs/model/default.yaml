@@ -268,12 +268,14 @@ model:
     adapter_gspo_enabled: False  # Enable GSPO quality feedback for Adapters
     adapter_gspo_momentum: 0.9   # Momentum for adapter quality history
     adapter_gspo_scale_adaptation: False  # Enable adaptive scale (Phase 2)
+    adapter_gspo_amplification_factor: 4.0  # Sigmoid amplification k for adapters
     decoder_attention_lora_r: 0
     decoder_attention_lora_alpha: 1
     decoder_attention_lora_dropout: 0.0
     gspo_lora_attention_enabled: False  # Enable GSPO quality feedback for LoRA on Attention
     gspo_lora_attention_momentum: 0.9   # Momentum for LoRA quality history
     gspo_lora_attention_scale_adaptation: False  # Enable adaptive scaling based on quality
+    gspo_lora_attention_amplification_factor: 4.0  # Sigmoid amplification k for LoRA
     decoder_adapter_enabled: False
     decoder_adapter_dim: 64
 
