@@ -1,5 +1,5 @@
 # 请首先通过阅读docs/cursor_gspo_v2-opus.md来恢复之前的对话上下文。然后考虑以下实验演进路线：我想把本实验所用的分割大模型，从SAM改为MedSAM，其它方法保持不变（例如加入各类Adapter，使用GSPO强化学习做PEFT等等），设计并实现此方案。作为参考，你可以搜索并拷贝或参考MedSAM的源码
-_Exported on 12/25/2025 at 13:47:44 PST from Cursor (2.2.43)_
+_Exported on 12/25/2025 at 19:36:13 PST from Cursor (2.2.43)_
 
 ---
 
@@ -36716,4 +36716,2037 @@ class SamModel(SamPreTrainedModel):
 - 只有在你想调整与模型规模相关的超参（如显存/速度权衡时的 LoRA rank 或 batch size）才需要额外改，功能上不是必须。
 
 因此，指定 MedSAM 的 HF 兼容权重（或已转换目录）到 `--sam_checkpoint`，其余流程保持不变即可工作。
+
+---
+
+**User**
+
+我加上该参数--sam_checkpoint bowanglab/medsam-vit-h做训练后，报了错误说连接不上HF，但是我确定VPS开了代理应该可以连接到HF，这是为什么，又该怎么解决:`....The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA/run_semantic_segmentation.py", line 366, in <module>
+    predictor.fit(train_data=train_df, tuning_data=val_df, seed=args.seed)
+  File "/root/autodl-tmp/works/autogluon/multimodal/src/autogluon/multimodal/predictor.py", line 540, in fit
+    self._learner.fit(
+  File "/root/autodl-tmp/works/autogluon/multimodal/src/autogluon/multimodal/learners/base.py", line 665, in fit
+    fit_returns = self.execute_fit()
+  File "/root/autodl-tmp/works/autogluon/multimodal/src/autogluon/multimodal/learners/base.py", line 577, in execute_fit
+    attributes = self.fit_per_run(**self._fit_args)
+  File "/root/autodl-tmp/works/autogluon/multimodal/src/autogluon/multimodal/learners/base.py", line 1281, in fit_per_run
+    model = self.get_model_per_run(model=model, config=config, df_preprocessor=df_preprocessor)
+  File "/root/autodl-tmp/works/autogluon/multimodal/src/autogluon/multimodal/learners/base.py", line 759, in get_model_per_run
+    model = create_fusion_model(
+  File "/root/autodl-tmp/works/autogluon/multimodal/src/autogluon/multimodal/models/utils.py", line 1627, in create_fusion_model
+    model = create_model(
+  File "/root/autodl-tmp/works/autogluon/multimodal/src/autogluon/multimodal/models/utils.py", line 1544, in create_model
+    model = SAMForSemanticSegmentation(
+  File "/root/autodl-tmp/works/autogluon/multimodal/src/autogluon/multimodal/models/sam.py", line 360, in __init__
+    self._load_checkpoint(checkpoint_name)
+  File "/root/autodl-tmp/works/autogluon/multimodal/src/autogluon/multimodal/models/sam.py", line 419, in _load_checkpoint
+    config = SamConfig.from_pretrained(checkpoint_name)
+  File "/root/autodl-tmp/envs/conv-lora/lib/python3.10/site-packages/transformers/configuration_utils.py", line 622, in from_pretrained
+    config_dict, kwargs = cls.get_config_dict(pretrained_model_name_or_path, **kwargs)
+  File "/root/autodl-tmp/envs/conv-lora/lib/python3.10/site-packages/transformers/configuration_utils.py", line 662, in get_config_dict
+    config_dict, kwargs = cls._get_config_dict(pretrained_model_name_or_path, **kwargs)
+  File "/root/autodl-tmp/envs/conv-lora/lib/python3.10/site-packages/transformers/configuration_utils.py", line 721, in _get_config_dict
+    resolved_config_file = cached_file(
+  File "/root/autodl-tmp/envs/conv-lora/lib/python3.10/site-packages/transformers/utils/hub.py", line 322, in cached_file
+    file = cached_files(path_or_repo_id=path_or_repo_id, filenames=[filename], **kwargs)
+  File "/root/autodl-tmp/envs/conv-lora/lib/python3.10/site-packages/transformers/utils/hub.py", line 553, in cached_files
+    raise OSError(
+OSError: We couldn't connect to 'https://huggingface.co' to load the files, and couldn't find them in the cached files.
+Check your internet connection or see how to run the library in offline mode at 'https://huggingface.co/docs/transformers/installation#offline-mode'.`
+
+---
+
+**Cursor**
+
+可能原因：当前环境无法直连 huggingface.co，且本地还没有缓存 `bowanglab/medsam-vit-h`，所以第一次拉取失败。解决思路有三种：
+
+### 方案1：先用代理/镜像下载到本地，再离线加载
+1) 使用 huggingface-cli（走你已开的代理）先把模型缓存下来：
+```bash
+# 可先设置代理
+export HTTPS_PROXY=http://127.0.0.1:你的代理端口
+export HTTP_PROXY=http://127.0.0.1:你的代理端口
+
+huggingface-cli download bowanglab/medsam-vit-h --local-dir /root/autodl-tmp/hf_models/medsam-vit-h --local-dir-use-symlinks False
+```
+2) 训练时改用本地路径：
+```bash
+--sam_checkpoint /root/autodl-tmp/hf_models/medsam-vit-h
+```
+这样会走 `local_files_only=True` 分支直接命中本地目录。
+
+### 方案2：配置 HF 镜像加速
+如果有可用镜像，设置：
+```bash
+export HF_ENDPOINT=https://hf-mirror.com   # 示例，请替换为实际镜像
+# 如需代理，再叠加
+export HTTPS_PROXY=http://127.0.0.1:你的代理端口
+export HTTP_PROXY=http://127.0.0.1:你的代理端口
+```
+然后重新跑脚本。如果仍不通，回到方案1本地缓存。
+
+### 方案3：手动下载压缩包再解压
+在可联网的机器先下载模型（`config.json`, `pytorch_model.bin` 等），打包带到服务器，解压到 `/root/autodl-tmp/hf_models/medsam-vit-h`，再用本地路径传给 `--sam_checkpoint`。
+
+补充建议：
+- 确认当前环境变量没有设置 `HF_HUB_OFFLINE=1`（否则会强制离线而找不到缓存）。  
+- 若在多用户/多路径环境，确保 `transformers` 的缓存目录可写（默认 `~/.cache/huggingface/hub`）；也可指定：
+  ```bash
+  export HF_HOME=/root/autodl-tmp/hf_cache
+  ```
+
+总结：先通过代理/mirror把 `bowanglab/medsam-vit-h` 下载到本地目录，再用 `--sam_checkpoint <本地目录>` 运行，就不会再触发在线拉取。
+
+```shellscript
+# 可先设置代理
+export HTTPS_PROXY=http://127.0.0.1:你的代理端口
+export HTTP_PROXY=http://127.0.0.1:你的代理端口
+
+huggingface-cli download bowanglab/medsam-vit-h --local-dir /root/autodl-tmp/hf_models/medsam-vit-h --local-dir-use-symlinks False
+```
+
+```shellscript
+--sam_checkpoint /root/autodl-tmp/hf_models/medsam-vit-h
+```
+
+```shellscript
+export HF_ENDPOINT=https://hf-mirror.com   # 示例，请替换为实际镜像
+# 如需代理，再叠加
+export HTTPS_PROXY=http://127.0.0.1:你的代理端口
+export HTTP_PROXY=http://127.0.0.1:你的代理端口
+```
+
+```shellscript
+  export HF_HOME=/root/autodl-tmp/hf_cache
+```
+
+---
+
+**User**
+
+docs/gspo_adapter_extension/04_phase2_implementation.md阶段2和docs/gspo_adapter_extension/03_phase1_implementation.md的阶段1之间是什么关系？
+
+---
+
+**Cursor**
+
+简述两阶段关系：
+
+- 阶段1（03_phase1）：只做“质量跟踪 + 反馈”，即训练时在 Adapter 前向后根据质量得分更新 `quality_history` 与 `contribution_score`，但**不把贡献分数用到前向输出**，Adapter 的缩放仍是固定的 `learned_scale`。核心作用：收集信号、稳定训练、不影响前向幅度。
+
+- 阶段2（04_phase2）：在阶段1的基础上启用“自适应缩放”，即前向时用
+  `effective_scale = learned_scale × contribution_score`（训练态），让高质量历史的 Adapter 放大，低质量历史的减弱。推理时仍用固定 `learned_scale`，保证一致性。阶段2继承了阶段1的质量跟踪机制，只是将 `contribution_score` 真正用于前向缩放。
+
+一句话：阶段1先建立质量反馈与统计，阶段2在此基础上把反馈用于动态调节 Adapter 的贡献度（缩放）。
+
+---
+
+**User**
+
+怎么在阶段1的基础上进行阶段2？并没有命令行参数输入阶段1预训练的模型权重啊？
+
+---
+
+**Cursor**
+
+当前脚本是“从零训练”路径，并没有内置“加载阶段1权重再开阶段2”的参数。要在阶段1基础上跑阶段2，有两种做法：
+
+### 做法A（推荐）：先加载已训好的阶段1模型，再继续训练为阶段2
+用一个小的 Python 驱动脚本来加载并继续训练，核心是 `MultiModalPredictor.load(...)` 然后再 `fit(...)`，同时在超参里打开阶段2的开关：
+
+```python
+from autogluon.multimodal import MultiModalPredictor
+import pandas as pd, os
+
+# 路径指向阶段1训练生成的目录（例如 outputs/hybrid_phase1/AutogluonModels/ag-YYYYMMDD_HHMMSS）
+stage1_ckpt = "/path/to/your/stage1/output_dir/AutogluonModels/ag-XXXXXXXX"
+
+# 数据准备
+dataset_name = "isic2017"
+dataset_dir = f"datasets/{dataset_name}/{dataset_name}"
+train_df = pd.read_csv(os.path.join(dataset_dir, "train.csv"))
+val_df   = pd.read_csv(os.path.join(dataset_dir, "val.csv"))
+for col in ["image", "label"]:
+    train_df[col] = train_df[col].apply(lambda x: os.path.join(dataset_dir, x))
+    val_df[col]   = val_df[col].apply(lambda x: os.path.join(dataset_dir, x))
+
+# 载入阶段1模型
+predictor = MultiModalPredictor.load(stage1_ckpt)
+
+# 追加/覆盖阶段2所需的超参（示例：继续用原 rank/expert_num/adapter 配置，打开 scale_adaptation、放大系数等）
+hyperparameters = {
+    "model.sam.adapter_gspo_enabled": True,
+    "model.sam.adapter_gspo_scale_adaptation": True,   # 阶段2核心开关
+    "model.sam.adapter_gspo_amplification_factor": 4.0, # 或 8.0 等
+    "optim.gspo.adapter_enabled": True,
+    "optim.gspo.adapter_momentum": 0.9,
+    "optim.gspo.adapter_scale_adaptation": True,
+    # 若使用 GSPO：确保 gspo 相关超参与阶段1一致或按需调整
+}
+
+predictor.fit(train_data=train_df, tuning_data=val_df, hyperparameters=hyperparameters, seed=42686693)
+```
+
+要点：
+- 用阶段1输出目录作为 `MultiModalPredictor.load` 的参数。
+- 在新的 `fit` 调用里开启阶段2的开关：`adapter_gspo_scale_adaptation=True` 等。
+- 其它超参（rank、expert_num、LoRA/Adapter 配置、学习率等）可按阶段1保持一致或微调。
+- 这是“增量继续训练”，不是纯评估；无需 `--eval`。
+
+### 做法B：修改命令行脚本支持“继续训练”
+若想继续用 `run_semantic_segmentation.py` 直接跑阶段2，需要给脚本增一个 `--resume_from`（或重用 `--ckpt_path` 并在训练模式下加载）逻辑：在训练分支里先 `MultiModalPredictor.load(ckpt_path)`，然后再 `fit`。但当前处于只读模式，无法直接改脚本；可以按做法A快速落地，或在切换到可写模式后给脚本加“resume”参数。
+
+### 补充
+- 阶段1输出路径示例：`outputs/hybrid_phase1/AutogluonModels/ag-YYYYMMDD_HHMMSS/`。
+- 如果你已在阶段1中启用了一些自定义超参，阶段2继续训练时最好保持同一组基础配置，仅在阶段2相关开关上做增量调整。
+
+```python
+from autogluon.multimodal import MultiModalPredictor
+import pandas as pd, os
+
+# 路径指向阶段1训练生成的目录（例如 outputs/hybrid_phase1/AutogluonModels/ag-YYYYMMDD_HHMMSS）
+stage1_ckpt = "/path/to/your/stage1/output_dir/AutogluonModels/ag-XXXXXXXX"
+
+# 数据准备
+dataset_name = "isic2017"
+dataset_dir = f"datasets/{dataset_name}/{dataset_name}"
+train_df = pd.read_csv(os.path.join(dataset_dir, "train.csv"))
+val_df   = pd.read_csv(os.path.join(dataset_dir, "val.csv"))
+for col in ["image", "label"]:
+    train_df[col] = train_df[col].apply(lambda x: os.path.join(dataset_dir, x))
+    val_df[col]   = val_df[col].apply(lambda x: os.path.join(dataset_dir, x))
+
+# 载入阶段1模型
+predictor = MultiModalPredictor.load(stage1_ckpt)
+
+# 追加/覆盖阶段2所需的超参（示例：继续用原 rank/expert_num/adapter 配置，打开 scale_adaptation、放大系数等）
+hyperparameters = {
+    "model.sam.adapter_gspo_enabled": True,
+    "model.sam.adapter_gspo_scale_adaptation": True,   # 阶段2核心开关
+    "model.sam.adapter_gspo_amplification_factor": 4.0, # 或 8.0 等
+    "optim.gspo.adapter_enabled": True,
+    "optim.gspo.adapter_momentum": 0.9,
+    "optim.gspo.adapter_scale_adaptation": True,
+    # 若使用 GSPO：确保 gspo 相关超参与阶段1一致或按需调整
+}
+
+predictor.fit(train_data=train_df, tuning_data=val_df, hyperparameters=hyperparameters, seed=42686693)
+```
+
+---
+
+**User**
+
+你去实现做法B!
+
+---
+
+**Cursor**
+
+当前你处于只读模式，无法直接修改脚本。如果要实现“做法B：命令行脚本支持继续训练阶段2”，需要切换到可写模式（agent mode）。下面给出完整的修改方案（你可复制到文件中应用）：
+
+### 要改的文件
+`examples/automm/Conv-LoRA/run_semantic_segmentation.py`
+
+### 修改目标
+1) 新增参数 `--resume_from` 用于加载阶段1的 `MultiModalPredictor`。
+2) 在训练分支中，如果 `--resume_from` 提供，则先 `MultiModalPredictor.load(resume_from)`，再调用 `fit`，并且允许用当前命令行超参覆盖/追加阶段2开关（如 `--gspo_adapter_scale_adaptation` 等）。
+3) 保持原 `--eval` 路径不变（仍用 `--ckpt_path` 评估）。
+
+### 建议代码片段（请手动应用）
+```python
+# 1) argparse 部分新增
+parser.add_argument(
+    "--resume_from",
+    type=str,
+    default=None,
+    help="Path to a saved MultiModalPredictor (e.g., outputs/.../AutogluonModels/ag-YYYYMMDD_HHMMSS) to resume training.",
+)
+```
+
+```python
+# 2) 训练分支修改（原 if args.eval: ... else: ... 部分）
+if args.eval:  # load a checkpoint for evaluation
+    predictor = MultiModalPredictor.load(args.ckpt_path)
+else:  # training
+    if args.resume_from:
+        print(f"[Resume] Loading predictor from: {args.resume_from}")
+        predictor = MultiModalPredictor.load(args.resume_from)
+        # 追加/覆盖超参：将本次 CLI 中的阶段2开关等写入 hyperparameters
+        predictor._config = None  # 确保后续 fit 会重新合并超参
+        predictor.fit(
+            train_data=train_df,
+            tuning_data=val_df,
+            seed=args.seed,
+            hyperparameters=hyperparameters,  # 使用当前命令行构造的超参（含阶段2开关）
+        )
+    else:
+        predictor = MultiModalPredictor(
+            problem_type="semantic_segmentation",
+            validation_metric=validation_metric,
+            eval_metric=validation_metric,
+            hyperparameters=hyperparameters,
+            label="label",
+        )
+        # ...（保持原有 bbox predictor / TTA 打印等逻辑不变）
+        predictor.fit(train_data=train_df, tuning_data=val_df, seed=args.seed)
+```
+
+### 说明
+- `hyperparameters` 中已经包含阶段2相关键（如 `model.sam.adapter_gspo_scale_adaptation` 等），因此用当前命令行覆盖即可在继续训练时打开阶段2。
+- `predictor._config = None` 是为了让后续 `fit` 重新基于 `hyperparameters` 合并配置（避免沿用旧 config）。
+- `--ckpt_path` 仍仅用于评估模式；继续训练使用 `--resume_from`。
+- 继续训练时请保证阶段1的输出目录中包含 `AutogluonModels/ag-...` 的完整内容。 
+
+切换到可写模式后，将上述修改应用到脚本即可。
+
+```python
+# 1) argparse 部分新增
+parser.add_argument(
+    "--resume_from",
+    type=str,
+    default=None,
+    help="Path to a saved MultiModalPredictor (e.g., outputs/.../AutogluonModels/ag-YYYYMMDD_HHMMSS) to resume training.",
+)
+```
+
+```python
+# 2) 训练分支修改（原 if args.eval: ... else: ... 部分）
+if args.eval:  # load a checkpoint for evaluation
+    predictor = MultiModalPredictor.load(args.ckpt_path)
+else:  # training
+    if args.resume_from:
+        print(f"[Resume] Loading predictor from: {args.resume_from}")
+        predictor = MultiModalPredictor.load(args.resume_from)
+        # 追加/覆盖超参：将本次 CLI 中的阶段2开关等写入 hyperparameters
+        predictor._config = None  # 确保后续 fit 会重新合并超参
+        predictor.fit(
+            train_data=train_df,
+            tuning_data=val_df,
+            seed=args.seed,
+            hyperparameters=hyperparameters,  # 使用当前命令行构造的超参（含阶段2开关）
+        )
+    else:
+        predictor = MultiModalPredictor(
+            problem_type="semantic_segmentation",
+            validation_metric=validation_metric,
+            eval_metric=validation_metric,
+            hyperparameters=hyperparameters,
+            label="label",
+        )
+        # ...（保持原有 bbox predictor / TTA 打印等逻辑不变）
+        predictor.fit(train_data=train_df, tuning_data=val_df, seed=args.seed)
+```
+
+---
+
+**User**
+
+请帮我实现上述改动
+
+---
+
+**Cursor**
+
+```python
+*** Begin Patch
+*** Update File: /Users/domqiu/Works/autogluon/examples/automm/Conv-LoRA/run_semantic_segmentation.py
+@@
+     parser.add_argument("--batch_size",
+         type=int,
+         default=4,
+         help="The effective batch size. If batch_size > per_gpu_batch_size * num_gpus, gradient accumulation would be used.",
+     )
+     parser.add_argument("--eval", action="store_true")
++    parser.add_argument(
++        "--resume_from",
++        type=str,
++        default=None,
++        help="Path to a saved MultiModalPredictor (e.g., outputs/.../AutogluonModels/ag-YYYYMMDD_HHMMSS) to resume training.",
++    )
+*** End Patch
+```
+
+```python
+import argparse
+import os
+
+import numpy as np
+import pandas as pd
+import torch
+
+from autogluon.multimodal import MultiModalPredictor
+from bbox_prompt_model import BBoxPromptPredictor
+
+
+def get_default_training_setting(dataset_name):
+    validation_metric = "iou"
+    loss = "structure_loss"
+    max_epoch = 30
+    lr = 1e-4
+
+    if dataset_name == "SBU-shadow":
+        validation_metric = "ber"
+        loss = "balanced_bce"
+        max_epoch = 10
+
+    elif dataset_name == "polyp":
+        validation_metric = "sm"
+
+    elif dataset_name == "camo_sem_seg":
+        validation_metric = "sm"
+        max_epoch = 20
+
+    elif dataset_name == "road_segmentation":
+        validation_metric = "iou"
+        max_epoch = 20
+        lr = 3e-4
+
+    elif dataset_name == "leaf_disease_segmentation":
+        validation_metric = "iou"
+        lr = 3e-4
+
+    return validation_metric, loss, max_epoch, lr
+
+
+def expand_path(df, dataset_dir):
+    for col in ["image", "label"]:
+        df[col] = df[col].apply(lambda ele: os.path.join(dataset_dir, ele))
+    return df
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="This script support converting voc format xmls to coco format json")
+    parser.add_argument(
+        "--task",
+        type=str,
+        default="leaf_disease_segmentation",
+        choices=["polyp", "leaf_disease_segmentation", "camo_sem_seg", "isic2017", "road_segmentation", "SBU-shadow"],
+    )
+    parser.add_argument("--seed", type=int, default=42686693)
+    parser.add_argument("--rank", type=int, default=3)
+    parser.add_argument("--expert_num", type=int, default=8)
+    parser.add_argument("--num_gpus", type=int, default=1)
+    parser.add_argument("--output_dir", type=str, default="outputs")
+    parser.add_argument("--ckpt_path", type=str, default="outputs", help="Checkpoint path.")
+    parser.add_argument(
+        "--sam_checkpoint",
+        type=str,
+        default="facebook/sam-vit-huge",
+        help="SAM/MedSAM checkpoint name or local path (e.g., bowanglab/medsam-vit-huge).",
+    )
+    parser.add_argument("--per_gpu_batch_size", type=int, default=1, help="The batch size for each GPU.")
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=4,
+        help="The effective batch size. If batch_size > per_gpu_batch_size * num_gpus, gradient accumulation would be used.",
+    )
+    parser.add_argument("--eval", action="store_true")
+    parser.add_argument(
+        "--resume_from",
+        type=str,
+        default=None,
+        help="Path to a saved MultiModalPredictor (e.g., outputs/.../AutogluonModels/ag-YYYYMMDD_HHMMSS) to resume training.",
+    )
+    
+    # GSPO parameters
+    parser.add_argument("--gspo_enable", action="store_true", help="Enable GSPO (Group Sequence Policy Optimization) training")
+    parser.add_argument("--gspo_group_size", type=int, default=4, help="Number of predictions per group in GSPO")
+    parser.add_argument("--gspo_warmup_epochs", type=int, default=5, help="Number of epochs before enabling GSPO")
+    parser.add_argument("--gspo_contrastive_weight", type=float, default=0.1, help="Weight for contrastive loss in GSPO")
+    parser.add_argument("--gspo_quality_momentum", type=float, default=0.9, help="Momentum for expert quality history")
+    # GSPO reward / loss shaping hyper-parameters (可选，带默认值)
+    parser.add_argument("--lambda_smooth", type=float, default=0.1, help="Smoothness loss weight (λ_smooth)")
+    parser.add_argument("--lambda_boundary", type=float, default=0.3, help="Boundary loss weight (λ_boundary)")
+    parser.add_argument("--w_boundary", type=float, default=0.3, help="Boundary reward weight (w_boundary)")
+    parser.add_argument("--w_smooth", type=float, default=0.1, help="Smoothness reward weight (w_smooth)")
+    parser.add_argument("--w_thin", type=float, default=0.05, help="Thin-structure reward weight (w_thin)")
+    
+    # Adapter parameters
+    parser.add_argument("--adapter_enable", action="store_true", help="Enable standard Adapter modules")
+    parser.add_argument("--adapter_dim", type=int, default=64, help="Dimension of the adapter bottleneck")
+    
+    # GSPO-Adapter extension parameters (Phase 1-2)
+    parser.add_argument("--gspo_adapter_enable", action="store_true", 
+                        help="Enable GSPO quality feedback for Encoder Adapters (Phase 1)")
+    parser.add_argument("--gspo_adapter_momentum", type=float, default=0.9, 
+                        help="Momentum for adapter quality history updates")
+    parser.add_argument("--gspo_adapter_scale_adaptation", action="store_true",
+                        help="Enable adaptive scale based on quality history (Phase 2)")
+    parser.add_argument("--gspo_adapter_amplification_factor", type=float, default=4.0,
+                        help="Amplification factor k for contribution score calculation (default: 4.0)")
+    
+    # Decoder Attention LoRA parameters (LoRA on Attention)
+    parser.add_argument("--decoder_attn_lora_enable", action="store_true", 
+                        help="Enable LoRA on decoder attention Q/K/V projections")
+    parser.add_argument("--decoder_attn_lora_r", type=int, default=8,
+                        help="LoRA rank for decoder attention (default: 8)")
+    parser.add_argument("--decoder_attn_lora_alpha", type=int, default=8,
+                        help="LoRA alpha for decoder attention (default: 8, same as rank)")
+    parser.add_argument("--decoder_attn_lora_dropout", type=float, default=0.0,
+                        help="LoRA dropout for decoder attention (default: 0.0)")
+    
+    # GSPO-LoRA on Attention parameters (NEW)
+    parser.add_argument("--gspo_lora_attention_enable", action="store_true",
+                        help="Enable GSPO quality feedback for Decoder LoRA on Attention")
+    parser.add_argument("--gspo_lora_attention_momentum", type=float, default=0.9,
+                        help="Momentum for LoRA quality history updates (default: 0.9)")
+    parser.add_argument("--gspo_lora_attention_scale_adaptation", action="store_true",
+                        help="Enable adaptive scaling based on quality for LoRA")
+    parser.add_argument("--gspo_lora_attention_amplification_factor", type=float, default=4.0,
+                        help="Amplification factor k for LoRA contribution score calculation (default: 4.0)")
+    
+    # TTA (Test-Time Augmentation) parameters
+    parser.add_argument("--tta_enable", action="store_true", help="Enable Test-Time Augmentation for evaluation")
+    parser.add_argument("--tta_scales", type=float, nargs="+", default=[0.75, 1.0, 1.25], 
+                        help="Scale factors for multi-scale TTA (default: [0.75, 1.0, 1.25]). "
+                             "Recommended: [0.75, 1.0, 1.25] or [0.8, 1.0, 1.2]")
+    parser.add_argument("--tta_flips", type=str, nargs="+", default=["none", "horizontal"],
+                        choices=["none", "horizontal", "vertical"],
+                        help="Flip types for TTA (default: ['none', 'horizontal'])")
+    parser.add_argument("--tta_rotations", type=float, nargs="+", default=[0],
+                        help="Rotation angles in degrees for TTA (default: [0]). "
+                             "Recommended: [0] for fast, or [-10, 0, 10] for better")
+    parser.add_argument("--tta_fusion", type=str, default="mean", choices=["mean", "weighted_mean"],
+                        help="Fusion method for TTA predictions (default: 'mean')")
+    parser.add_argument("--tta_resize_method", type=str, default="bilinear", choices=["bilinear", "bicubic"],
+                        help="Resize interpolation method for multi-scale TTA (default: 'bilinear'). "
+                             "bilinear: faster, bicubic: higher quality")
+    parser.add_argument("--tta_threshold", type=float, default=0.5,
+                        help="Threshold for binary segmentation in TTA (default: 0.5)")
+    parser.add_argument("--tta_min_area", type=float, default=0.001,
+                        help="Remove components with area < tta_min_area * image_area (default: 0.001)")
+    parser.add_argument("--tta_morphology", action="store_true",
+                        help="Apply morphological closing in TTA post-processing")
+    parser.add_argument("--tta_cache_dir", type=str, default=None,
+                        help="Directory to cache TTA predictions for resume (default: None, no caching)")
+    parser.add_argument("--tta_no_resume", action="store_true",
+                        help="Disable resume from cache (start fresh even if cache exists)")
+    parser.add_argument("--tta_box_prompt_mode", type=str, default="off",
+                        choices=["off", "add", "replace"],
+                        help="Use GT box as SAM box prompt (off/add/replace); box not transformed with TTA")
+    # BBox prompt configuration
+    parser.add_argument("--bbox_prompt_source", type=str, default="none",
+                        choices=["none", "gt", "predict"],
+                        help="Box prompt source: none (no prompt), gt (from mask), predict (from bbox model).")
+    parser.add_argument("--bbox_model_ckpt", type=str, default=None,
+                        help="Checkpoint for bbox predictor when bbox_prompt_source=predict.")
+    parser.add_argument("--bbox_model_image_size", type=int, default=320,
+                        help="Input size for bbox predictor inference.")
+    parser.add_argument("--bbox_preds_csv", type=str, default=None,
+                        help="Optional CSV with columns image,bbox_x1,bbox_y1,bbox_x2,bbox_y2 to attach prompts.")
+    # Training-time box prompt mixing (default off)
+    parser.add_argument("--train_box_prompt_mode", type=str, default="off",
+                        choices=["off", "gt", "noisy", "mix", "predict"],
+                        help="Training-time box prompt injection: off/gt/noisy/mix/predict (default off). "
+                             "predict: use bbox predictor model to generate box prompts from images.")
+    parser.add_argument("--train_box_prob_no_prompt", type=float, default=0.2,
+                        help="When mode=mix, probability of no prompt.")
+    parser.add_argument("--train_box_prob_gt", type=float, default=0.3,
+                        help="When mode=mix, probability of GT box prompt.")
+    parser.add_argument("--train_box_prob_noisy", type=float, default=0.5,
+                        help="When mode=mix, probability of noisy GT box prompt.")
+    parser.add_argument("--train_box_noise_frac", type=float, default=0.12,
+                        help="Noisy box jitter fraction relative to box size (e.g., 0.12 => ±12%).")
+    parser.add_argument("--train_bbox_model_ckpt", type=str, default=None,
+                        help="Checkpoint for bbox predictor when train_box_prompt_mode=predict.")
+    parser.add_argument("--train_bbox_model_image_size", type=int, default=320,
+                        help="Input size for bbox predictor during training (when train_box_prompt_mode=predict).")
+    
+    # Quick test / Debug parameters
+    parser.add_argument("--debug", action="store_true",
+                        help="Debug mode: only process first 5 images for quick validation")
+    parser.add_argument("--quick_test", type=int, default=None,
+                        help="Quick test mode: only process first N images")
+    
+    # Training hyperparameters
+    parser.add_argument("--lr", type=float, default=None,
+                        help="Learning rate (default: auto based on task, typically 1e-4 or 3e-4)")
+    
+    # Decoder Adapter parameters
+    parser.add_argument("--decoder_adapter_enable", action="store_true", help="Enable MLP-Adapter modules in the mask decoder")
+    parser.add_argument("--decoder_adapter_dim", type=int, default=64, help="Dimension of the decoder adapter bottleneck")
+    args = parser.parse_args()
+
+    dataset_name = args.task
+    dataset_dir = os.path.join(f"datasets/{dataset_name}", dataset_name)
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    # prepare dataframes
+    train_df = expand_path(pd.read_csv(os.path.join(dataset_dir, f"train.csv")), dataset_dir)
+    val_df = expand_path(pd.read_csv(os.path.join(dataset_dir, f"val.csv")), dataset_dir)
+
+    # get the validation metric
+    validation_metric, loss, max_epoch, lr = get_default_training_setting(dataset_name)
+    
+    # Override learning rate if user specified it via CLI
+    if args.lr is not None:
+        lr = args.lr
+        print(f"Using custom learning rate: {lr}")
+
+    hyperparameters = {}
+    hyperparameters.update(
+        {
+            "optim.lora.r": args.rank,
+            # Paper alignment (Conv-LoRA):
+            # - optim.peft: choose Conv-LoRA adaptation (Sec. 3)
+            # - optim.lora.r: LoRA rank r (Sec. 3)
+            # - optim.lora.conv_lora_expert_num: number of MoE-Conv experts M (Sec. 3.2)
+            "optim.peft": "conv_lora",
+            "optim.lora.conv_lora_expert_num": args.expert_num,
+            "env.num_gpus": args.num_gpus,
+            "optim.loss_func": loss,
+            "optim.max_epochs": max_epoch,
+            "optim.lr": lr,
+            "env.per_gpu_batch_size": args.per_gpu_batch_size,
+            "env.batch_size": args.batch_size,
+        }
+    )
+    # Allow switching SAM backbone to MedSAM or other checkpoints
+    if args.sam_checkpoint:
+        hyperparameters["model.sam.checkpoint_name"] = args.sam_checkpoint
+    
+    # GSPO configuration
+    if args.gspo_enable:
+        print(f"Enabling GSPO with group_size={args.gspo_group_size}, warmup_epochs={args.gspo_warmup_epochs}")
+        hyperparameters.update({
+            "optim.lora.gspo_enabled": True,
+            "optim.lora.gspo_group_size": args.gspo_group_size,
+            "optim.lora.gspo_quality_momentum": args.gspo_quality_momentum,
+            "optim.lora.gspo_warmup_epochs": args.gspo_warmup_epochs,
+            "optim.lora.gspo_contrastive_weight": args.gspo_contrastive_weight,
+            # GSPO reward / loss shaping
+            "optim.gspo.lambda_smooth": args.lambda_smooth,
+            "optim.gspo.lambda_boundary": args.lambda_boundary,
+            "optim.gspo.w_boundary": args.w_boundary,
+            "optim.gspo.w_smooth": args.w_smooth,
+            "optim.gspo.w_thin": args.w_thin,
+        })
+
+    # Adapter configuration
+    if args.adapter_enable:
+        print(f"Enabling Standard Encoder Adapters with dim={args.adapter_dim}")
+        hyperparameters.update({
+            "model.sam.adapter_enabled": True,
+            "model.sam.adapter_dim": args.adapter_dim,
+        })
+        
+        # GSPO-Adapter extension configuration (Phase 1-2)
+        if args.gspo_adapter_enable:
+            if not args.gspo_enable:
+                print("Warning: --gspo_adapter_enable requires --gspo_enable. Enabling GSPO automatically.")
+                args.gspo_enable = True
+            print(f"Enabling GSPO-Adapter extension with momentum={args.gspo_adapter_momentum}, amplification_factor={args.gspo_adapter_amplification_factor}")
+            hyperparameters.update({
+                "optim.gspo.adapter_enabled": True,
+                "optim.gspo.adapter_momentum": args.gspo_adapter_momentum,
+                "model.sam.adapter_gspo_enabled": True,
+                "model.sam.adapter_gspo_momentum": args.gspo_adapter_momentum,
+                "model.sam.adapter_gspo_amplification_factor": args.gspo_adapter_amplification_factor,
+            })
+            # Pass scale adaptation to model config
+            if args.gspo_adapter_scale_adaptation:
+                print("Enabling GSPO-Adapter scale adaptation (Phase 2)")
+                hyperparameters.update({
+                    "optim.gspo.adapter_scale_adaptation": True,
+                    "model.sam.adapter_gspo_scale_adaptation": True,
+                })
+    
+    # Decoder Attention LoRA configuration
+    if args.decoder_attn_lora_enable:
+        gspo_lora_info = ""
+        if args.gspo_lora_attention_enable:
+            gspo_lora_info = f", GSPO enabled (momentum={args.gspo_lora_attention_momentum}"
+            if args.gspo_lora_attention_scale_adaptation:
+                gspo_lora_info += ", scale_adaptation=True"
+            gspo_lora_info += ")"
+        print(f"Enabling Decoder Attention LoRA: r={args.decoder_attn_lora_r}, "
+              f"alpha={args.decoder_attn_lora_alpha}, dropout={args.decoder_attn_lora_dropout}{gspo_lora_info}")
+        hyperparameters.update({
+            "model.sam.decoder_attention_lora_r": args.decoder_attn_lora_r,
+            "model.sam.decoder_attention_lora_alpha": args.decoder_attn_lora_alpha,
+            "model.sam.decoder_attention_lora_dropout": args.decoder_attn_lora_dropout,
+        })
+        
+        # GSPO-LoRA on Attention configuration (NEW)
+        if args.gspo_lora_attention_enable:
+            hyperparameters.update({
+                "model.sam.gspo_lora_attention_enabled": True,
+                "model.sam.gspo_lora_attention_momentum": args.gspo_lora_attention_momentum,
+                "model.sam.gspo_lora_attention_scale_adaptation": args.gspo_lora_attention_scale_adaptation,
+                "model.sam.gspo_lora_attention_amplification_factor": args.gspo_lora_attention_amplification_factor,
+            })
+        
+    # Decoder Adapter configuration
+    if args.decoder_adapter_enable:
+        print(f"Enabling Decoder MLP-Adapters with dim={args.decoder_adapter_dim}")
+        hyperparameters.update({
+            "model.sam.decoder_adapter_enabled": True,
+            "model.sam.decoder_adapter_dim": args.decoder_adapter_dim,
+        })
+
+    if args.eval:  # load a checkpoint for evaluation
+        predictor = MultiModalPredictor.load(args.ckpt_path)
+    else:  # training
+        predictor = MultiModalPredictor(
+            problem_type="semantic_segmentation",
+            validation_metric=validation_metric,
+            eval_metric=validation_metric,
+            hyperparameters=hyperparameters,
+            label="label",
+        )
+
+        # Configure training-time box prompt mixing
+        predictor._learner._train_box_prompt_cfg = {
+            "mode": args.train_box_prompt_mode,
+            "p_no": args.train_box_prob_no_prompt,
+            "p_gt": args.train_box_prob_gt,
+            "p_noisy": args.train_box_prob_noisy,
+            "noise_frac": args.train_box_noise_frac,
+        }
+
+        # Setup bbox predictor for training if mode=predict
+        if args.train_box_prompt_mode == "predict":
+            if not args.train_bbox_model_ckpt:
+                raise ValueError("train_box_prompt_mode=predict requires --train_bbox_model_ckpt.")
+            train_bbox_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            train_bbox_predictor = BBoxPromptPredictor(
+                ckpt_path=args.train_bbox_model_ckpt,
+                device=train_bbox_device,
+                image_size=args.train_bbox_model_image_size,
+            )
+            predictor._learner._train_bbox_predictor = train_bbox_predictor
+            print(f"\n[Info] Training-time bbox predictor loaded from: {args.train_bbox_model_ckpt}")
+            print(f"       Input size: {args.train_bbox_model_image_size}\n")
+
+        # 打印当前实验的模型保存目录，便于后续通过 AutogluonModels 路径追溯到具体实验日志
+        try:
+            # MultiModalPredictor 会在内部根据时间戳生成类似 AutogluonModels/ag-YYYYMMDD_HHMMSS 的目录
+            model_path = predictor.path
+        except AttributeError:
+            # 兼容极端情况：如果未来接口变化，没有 path 属性，则显式提示
+            model_path = None
+
+        if model_path is not None:
+            print("\n========================================")
+            print("Training MultiModalPredictor")
+            print(f"  Task        : {dataset_name}")
+            print(f"  Save path   : {model_path}")
+            print("  (You can use this directory name to link back to the training log.)")
+            print("========================================\n")
+        else:
+            print("\n[Warning] MultiModalPredictor has no 'path' attribute. "
+                  "Model save directory cannot be printed.\n")
+
+        predictor.fit(train_data=train_df, tuning_data=val_df, seed=args.seed)
+
+    # Enable TTA if requested
+    if args.tta_enable:
+        print(f"\n{'='*60}")
+        print(f"Enabling Test-Time Augmentation (TTA)")
+        print(f"  Scales: {args.tta_scales}")
+        print(f"  Flips: {args.tta_flips}")
+        print(f"  Rotations: {args.tta_rotations}")
+        print(f"  Fusion: {args.tta_fusion}")
+        print(f"  Resize method: {args.tta_resize_method}")
+        print(f"  Total augmentations: {len(args.tta_scales) * len(args.tta_flips) * len(args.tta_rotations)}")
+        print(f"{'='*60}\n")
+        
+        predictor.enable_tta(
+            scales=args.tta_scales,
+            flips=args.tta_flips,
+            rotations=args.tta_rotations,
+            fusion_method=args.tta_fusion,
+            resize_method=args.tta_resize_method,
+            threshold=args.tta_threshold,
+            min_area_ratio=args.tta_min_area,
+            use_morphology=args.tta_morphology,
+            cache_dir=args.tta_cache_dir,
+            resume_from_cache=not args.tta_no_resume,
+            box_prompt_mode=args.tta_box_prompt_mode,
+        )
+
+    # Optional bbox predictor for predicted box prompts
+    bbox_predictor = None
+    if args.bbox_prompt_source == "predict":
+        if not args.bbox_model_ckpt and not args.bbox_preds_csv:
+            raise ValueError("bbox_prompt_source=predict requires --bbox_model_ckpt or --bbox_preds_csv.")
+        if args.bbox_model_ckpt:
+            bbox_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            bbox_predictor = BBoxPromptPredictor(
+                ckpt_path=args.bbox_model_ckpt,
+                device=bbox_device,
+                image_size=args.bbox_model_image_size,
+            )
+        if args.tta_box_prompt_mode == "off":
+            print("[Warning] bbox_prompt_source=predict set but tta_box_prompt_mode=off; box prompts will be ignored.")
+
+    def attach_pred_boxes(df: pd.DataFrame) -> pd.DataFrame:
+        """Attach predicted or precomputed boxes to dataframe."""
+        df = df.copy()
+        if args.bbox_preds_csv:
+            preds = pd.read_csv(args.bbox_preds_csv)
+            merged = df.merge(preds, on="image", how="left")
+            if merged[["bbox_x1", "bbox_y1", "bbox_x2", "bbox_y2"]].isna().all().all():
+                preds["image_basename"] = preds["image"].apply(lambda p: os.path.basename(p))
+                merged["image_basename"] = merged["image"].apply(lambda p: os.path.basename(p))
+                merged = merged.merge(
+                    preds.drop(columns=["image"]), on="image_basename", how="left", suffixes=("", "_pred")
+                )
+                merged.drop(columns=["image_basename"], inplace=True)
+                for col in ["bbox_x1", "bbox_y1", "bbox_x2", "bbox_y2"]:
+                    pred_col = f"{col}_pred"
+                    if pred_col in merged.columns:
+                        merged[col] = merged[col].fillna(merged[pred_col])
+                        merged.drop(columns=[pred_col], inplace=True)
+            df = merged
+        elif bbox_predictor is not None:
+            boxes = []
+            for _, r in df.iterrows():
+                box = bbox_predictor.predict(r["image"])
+                boxes.append(box)
+            boxes = np.stack(boxes, axis=0)
+            df["bbox_x1"] = boxes[:, 0]
+            df["bbox_y1"] = boxes[:, 1]
+            df["bbox_x2"] = boxes[:, 2]
+            df["bbox_y2"] = boxes[:, 3]
+        return df
+
+    # evaluation
+    metric_file = os.path.join(args.output_dir, "metrics.txt")
+    f = open(metric_file, "a")
+    if dataset_name in ["isic2017", "SBU-shadow", "road_segmentation", "leaf_disease_segmentation"]:
+        test_df = expand_path(pd.read_csv(os.path.join(dataset_dir, f"test.csv")), dataset_dir)
+        
+        # Apply quick test / debug mode (方案 1: 快速验证模式)
+        original_size = len(test_df)
+        if args.debug:
+            test_df = test_df.head(5)
+            print(f"\n🔍 DEBUG MODE: Processing only first 5 images (out of {original_size})\n")
+        elif args.quick_test is not None:
+            test_df = test_df.head(args.quick_test)
+            print(f"\n🔍 QUICK TEST MODE: Processing only first {args.quick_test} images (out of {original_size})\n")
+        
+        if dataset_name == "SBU-shadow":
+            eval_metrics = ["ber"]
+        else:
+            eval_metrics = ["iou", "dice"]  # Evaluate both IoU and DICE
+
+        # Attach predicted bbox prompts if requested
+        if args.bbox_prompt_source == "predict" and (args.bbox_preds_csv or bbox_predictor):
+            test_df = attach_pred_boxes(test_df)
+
+        res = predictor.evaluate(test_df, metrics=eval_metrics)
+        print(f"Evaluation results for test dataset {dataset_name}: ", res)
+        f.write(f"Evaluation results for test dataset {dataset_name}: {res} \n")
+    elif dataset_name in ["polyp", "camo_sem_seg"]:
+        if dataset_name == "polyp":
+            test_datasets = ["CVC-ClinicDB", "Kvasir"]
+        elif dataset_name == "camo_sem_seg":
+            test_datasets = ["CAMO"]
+        else:
+            raise ValueError(f"Unknown dataset name: {dataset_name}.")
+        for per_dataset in test_datasets:
+            test_df = expand_path(pd.read_csv(os.path.join(dataset_dir, f"test_{per_dataset}.csv")), dataset_dir)
+            
+            # Apply quick test / debug mode (方案 1: 快速验证模式)
+            original_size = len(test_df)
+            if args.debug:
+                test_df = test_df.head(5)
+                print(f"\n🔍 DEBUG MODE: Processing only first 5 images (out of {original_size}) for {per_dataset}\n")
+            elif args.quick_test is not None:
+                test_df = test_df.head(args.quick_test)
+                print(f"\n🔍 QUICK TEST MODE: Processing only first {args.quick_test} images (out of {original_size}) for {per_dataset}\n")
+            
+            if args.bbox_prompt_source == "predict" and (args.bbox_preds_csv or bbox_predictor):
+                test_df = attach_pred_boxes(test_df)
+
+            res = predictor.evaluate(test_df, metrics=["sm", "fm", "em", "mae"])
+            print(f"Evaluation results for test dataset {per_dataset}: ", res)
+            f.write(f"Evaluation results for test dataset {per_dataset}: {res} \n")
+    else:
+        raise ValueError(f"Unknown dataset name: {dataset_name}.")
+
+    f.close()
+
+```
+
+```python
+import argparse
+import os
+
+import numpy as np
+import pandas as pd
+import torch
+
+from autogluon.multimodal import MultiModalPredictor
+from bbox_prompt_model import BBoxPromptPredictor
+
+
+def get_default_training_setting(dataset_name):
+    validation_metric = "iou"
+    loss = "structure_loss"
+    max_epoch = 30
+    lr = 1e-4
+
+    if dataset_name == "SBU-shadow":
+        validation_metric = "ber"
+        loss = "balanced_bce"
+        max_epoch = 10
+
+    elif dataset_name == "polyp":
+        validation_metric = "sm"
+
+    elif dataset_name == "camo_sem_seg":
+        validation_metric = "sm"
+        max_epoch = 20
+
+    elif dataset_name == "road_segmentation":
+        validation_metric = "iou"
+        max_epoch = 20
+        lr = 3e-4
+
+    elif dataset_name == "leaf_disease_segmentation":
+        validation_metric = "iou"
+        lr = 3e-4
+
+    return validation_metric, loss, max_epoch, lr
+
+
+def expand_path(df, dataset_dir):
+    for col in ["image", "label"]:
+        df[col] = df[col].apply(lambda ele: os.path.join(dataset_dir, ele))
+    return df
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="This script support converting voc format xmls to coco format json")
+    parser.add_argument(
+        "--task",
+        type=str,
+        default="leaf_disease_segmentation",
+        choices=["polyp", "leaf_disease_segmentation", "camo_sem_seg", "isic2017", "road_segmentation", "SBU-shadow"],
+    )
+    parser.add_argument("--seed", type=int, default=42686693)
+    parser.add_argument("--rank", type=int, default=3)
+    parser.add_argument("--expert_num", type=int, default=8)
+    parser.add_argument("--num_gpus", type=int, default=1)
+    parser.add_argument("--output_dir", type=str, default="outputs")
+    parser.add_argument("--ckpt_path", type=str, default="outputs", help="Checkpoint path.")
+    parser.add_argument(
+        "--sam_checkpoint",
+        type=str,
+        default="facebook/sam-vit-huge",
+        help="SAM/MedSAM checkpoint name or local path (e.g., bowanglab/medsam-vit-huge).",
+    )
+    parser.add_argument("--per_gpu_batch_size", type=int, default=1, help="The batch size for each GPU.")
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=4,
+        help="The effective batch size. If batch_size > per_gpu_batch_size * num_gpus, gradient accumulation would be used.",
+    )
+    parser.add_argument("--eval", action="store_true")
+    parser.add_argument(
+        "--resume_from",
+        type=str,
+        default=None,
+        help="Path to a saved MultiModalPredictor (e.g., outputs/.../AutogluonModels/ag-YYYYMMDD_HHMMSS) to resume training.",
+    )
+    
+    # GSPO parameters
+    parser.add_argument("--gspo_enable", action="store_true", help="Enable GSPO (Group Sequence Policy Optimization) training")
+    parser.add_argument("--gspo_group_size", type=int, default=4, help="Number of predictions per group in GSPO")
+    parser.add_argument("--gspo_warmup_epochs", type=int, default=5, help="Number of epochs before enabling GSPO")
+    parser.add_argument("--gspo_contrastive_weight", type=float, default=0.1, help="Weight for contrastive loss in GSPO")
+    parser.add_argument("--gspo_quality_momentum", type=float, default=0.9, help="Momentum for expert quality history")
+    # GSPO reward / loss shaping hyper-parameters (可选，带默认值)
+    parser.add_argument("--lambda_smooth", type=float, default=0.1, help="Smoothness loss weight (λ_smooth)")
+    parser.add_argument("--lambda_boundary", type=float, default=0.3, help="Boundary loss weight (λ_boundary)")
+    parser.add_argument("--w_boundary", type=float, default=0.3, help="Boundary reward weight (w_boundary)")
+    parser.add_argument("--w_smooth", type=float, default=0.1, help="Smoothness reward weight (w_smooth)")
+    parser.add_argument("--w_thin", type=float, default=0.05, help="Thin-structure reward weight (w_thin)")
+    
+    # Adapter parameters
+    parser.add_argument("--adapter_enable", action="store_true", help="Enable standard Adapter modules")
+    parser.add_argument("--adapter_dim", type=int, default=64, help="Dimension of the adapter bottleneck")
+    
+    # GSPO-Adapter extension parameters (Phase 1-2)
+    parser.add_argument("--gspo_adapter_enable", action="store_true", 
+                        help="Enable GSPO quality feedback for Encoder Adapters (Phase 1)")
+    parser.add_argument("--gspo_adapter_momentum", type=float, default=0.9, 
+                        help="Momentum for adapter quality history updates")
+    parser.add_argument("--gspo_adapter_scale_adaptation", action="store_true",
+                        help="Enable adaptive scale based on quality history (Phase 2)")
+    parser.add_argument("--gspo_adapter_amplification_factor", type=float, default=4.0,
+                        help="Amplification factor k for contribution score calculation (default: 4.0)")
+    
+    # Decoder Attention LoRA parameters (LoRA on Attention)
+    parser.add_argument("--decoder_attn_lora_enable", action="store_true", 
+                        help="Enable LoRA on decoder attention Q/K/V projections")
+    parser.add_argument("--decoder_attn_lora_r", type=int, default=8,
+                        help="LoRA rank for decoder attention (default: 8)")
+    parser.add_argument("--decoder_attn_lora_alpha", type=int, default=8,
+                        help="LoRA alpha for decoder attention (default: 8, same as rank)")
+    parser.add_argument("--decoder_attn_lora_dropout", type=float, default=0.0,
+                        help="LoRA dropout for decoder attention (default: 0.0)")
+    
+    # GSPO-LoRA on Attention parameters (NEW)
+    parser.add_argument("--gspo_lora_attention_enable", action="store_true",
+                        help="Enable GSPO quality feedback for Decoder LoRA on Attention")
+    parser.add_argument("--gspo_lora_attention_momentum", type=float, default=0.9,
+                        help="Momentum for LoRA quality history updates (default: 0.9)")
+    parser.add_argument("--gspo_lora_attention_scale_adaptation", action="store_true",
+                        help="Enable adaptive scaling based on quality for LoRA")
+    parser.add_argument("--gspo_lora_attention_amplification_factor", type=float, default=4.0,
+                        help="Amplification factor k for LoRA contribution score calculation (default: 4.0)")
+    
+    # TTA (Test-Time Augmentation) parameters
+    parser.add_argument("--tta_enable", action="store_true", help="Enable Test-Time Augmentation for evaluation")
+    parser.add_argument("--tta_scales", type=float, nargs="+", default=[0.75, 1.0, 1.25], 
+                        help="Scale factors for multi-scale TTA (default: [0.75, 1.0, 1.25]). "
+                             "Recommended: [0.75, 1.0, 1.25] or [0.8, 1.0, 1.2]")
+    parser.add_argument("--tta_flips", type=str, nargs="+", default=["none", "horizontal"],
+                        choices=["none", "horizontal", "vertical"],
+                        help="Flip types for TTA (default: ['none', 'horizontal'])")
+    parser.add_argument("--tta_rotations", type=float, nargs="+", default=[0],
+                        help="Rotation angles in degrees for TTA (default: [0]). "
+                             "Recommended: [0] for fast, or [-10, 0, 10] for better")
+    parser.add_argument("--tta_fusion", type=str, default="mean", choices=["mean", "weighted_mean"],
+                        help="Fusion method for TTA predictions (default: 'mean')")
+    parser.add_argument("--tta_resize_method", type=str, default="bilinear", choices=["bilinear", "bicubic"],
+                        help="Resize interpolation method for multi-scale TTA (default: 'bilinear'). "
+                             "bilinear: faster, bicubic: higher quality")
+    parser.add_argument("--tta_threshold", type=float, default=0.5,
+                        help="Threshold for binary segmentation in TTA (default: 0.5)")
+    parser.add_argument("--tta_min_area", type=float, default=0.001,
+                        help="Remove components with area < tta_min_area * image_area (default: 0.001)")
+    parser.add_argument("--tta_morphology", action="store_true",
+                        help="Apply morphological closing in TTA post-processing")
+    parser.add_argument("--tta_cache_dir", type=str, default=None,
+                        help="Directory to cache TTA predictions for resume (default: None, no caching)")
+    parser.add_argument("--tta_no_resume", action="store_true",
+                        help="Disable resume from cache (start fresh even if cache exists)")
+    parser.add_argument("--tta_box_prompt_mode", type=str, default="off",
+                        choices=["off", "add", "replace"],
+                        help="Use GT box as SAM box prompt (off/add/replace); box not transformed with TTA")
+    # BBox prompt configuration
+    parser.add_argument("--bbox_prompt_source", type=str, default="none",
+                        choices=["none", "gt", "predict"],
+                        help="Box prompt source: none (no prompt), gt (from mask), predict (from bbox model).")
+    parser.add_argument("--bbox_model_ckpt", type=str, default=None,
+                        help="Checkpoint for bbox predictor when bbox_prompt_source=predict.")
+    parser.add_argument("--bbox_model_image_size", type=int, default=320,
+                        help="Input size for bbox predictor inference.")
+    parser.add_argument("--bbox_preds_csv", type=str, default=None,
+                        help="Optional CSV with columns image,bbox_x1,bbox_y1,bbox_x2,bbox_y2 to attach prompts.")
+    # Training-time box prompt mixing (default off)
+    parser.add_argument("--train_box_prompt_mode", type=str, default="off",
+                        choices=["off", "gt", "noisy", "mix", "predict"],
+                        help="Training-time box prompt injection: off/gt/noisy/mix/predict (default off). "
+                             "predict: use bbox predictor model to generate box prompts from images.")
+    parser.add_argument("--train_box_prob_no_prompt", type=float, default=0.2,
+                        help="When mode=mix, probability of no prompt.")
+    parser.add_argument("--train_box_prob_gt", type=float, default=0.3,
+                        help="When mode=mix, probability of GT box prompt.")
+    parser.add_argument("--train_box_prob_noisy", type=float, default=0.5,
+                        help="When mode=mix, probability of noisy GT box prompt.")
+    parser.add_argument("--train_box_noise_frac", type=float, default=0.12,
+                        help="Noisy box jitter fraction relative to box size (e.g., 0.12 => ±12%).")
+    parser.add_argument("--train_bbox_model_ckpt", type=str, default=None,
+                        help="Checkpoint for bbox predictor when train_box_prompt_mode=predict.")
+    parser.add_argument("--train_bbox_model_image_size", type=int, default=320,
+                        help="Input size for bbox predictor during training (when train_box_prompt_mode=predict).")
+    
+    # Quick test / Debug parameters
+    parser.add_argument("--debug", action="store_true",
+                        help="Debug mode: only process first 5 images for quick validation")
+    parser.add_argument("--quick_test", type=int, default=None,
+                        help="Quick test mode: only process first N images")
+    
+    # Training hyperparameters
+    parser.add_argument("--lr", type=float, default=None,
+                        help="Learning rate (default: auto based on task, typically 1e-4 or 3e-4)")
+    
+    # Decoder Adapter parameters
+    parser.add_argument("--decoder_adapter_enable", action="store_true", help="Enable MLP-Adapter modules in the mask decoder")
+    parser.add_argument("--decoder_adapter_dim", type=int, default=64, help="Dimension of the decoder adapter bottleneck")
+    args = parser.parse_args()
+
+    dataset_name = args.task
+    dataset_dir = os.path.join(f"datasets/{dataset_name}", dataset_name)
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    # prepare dataframes
+    train_df = expand_path(pd.read_csv(os.path.join(dataset_dir, f"train.csv")), dataset_dir)
+    val_df = expand_path(pd.read_csv(os.path.join(dataset_dir, f"val.csv")), dataset_dir)
+
+    # get the validation metric
+    validation_metric, loss, max_epoch, lr = get_default_training_setting(dataset_name)
+    
+    # Override learning rate if user specified it via CLI
+    if args.lr is not None:
+        lr = args.lr
+        print(f"Using custom learning rate: {lr}")
+
+    hyperparameters = {}
+    hyperparameters.update(
+        {
+            "optim.lora.r": args.rank,
+            # Paper alignment (Conv-LoRA):
+            # - optim.peft: choose Conv-LoRA adaptation (Sec. 3)
+            # - optim.lora.r: LoRA rank r (Sec. 3)
+            # - optim.lora.conv_lora_expert_num: number of MoE-Conv experts M (Sec. 3.2)
+            "optim.peft": "conv_lora",
+            "optim.lora.conv_lora_expert_num": args.expert_num,
+            "env.num_gpus": args.num_gpus,
+            "optim.loss_func": loss,
+            "optim.max_epochs": max_epoch,
+            "optim.lr": lr,
+            "env.per_gpu_batch_size": args.per_gpu_batch_size,
+            "env.batch_size": args.batch_size,
+        }
+    )
+    # Allow switching SAM backbone to MedSAM or other checkpoints
+    if args.sam_checkpoint:
+        hyperparameters["model.sam.checkpoint_name"] = args.sam_checkpoint
+    
+    # GSPO configuration
+    if args.gspo_enable:
+        print(f"Enabling GSPO with group_size={args.gspo_group_size}, warmup_epochs={args.gspo_warmup_epochs}")
+        hyperparameters.update({
+            "optim.lora.gspo_enabled": True,
+            "optim.lora.gspo_group_size": args.gspo_group_size,
+            "optim.lora.gspo_quality_momentum": args.gspo_quality_momentum,
+            "optim.lora.gspo_warmup_epochs": args.gspo_warmup_epochs,
+            "optim.lora.gspo_contrastive_weight": args.gspo_contrastive_weight,
+            # GSPO reward / loss shaping
+            "optim.gspo.lambda_smooth": args.lambda_smooth,
+            "optim.gspo.lambda_boundary": args.lambda_boundary,
+            "optim.gspo.w_boundary": args.w_boundary,
+            "optim.gspo.w_smooth": args.w_smooth,
+            "optim.gspo.w_thin": args.w_thin,
+        })
+
+    # Adapter configuration
+    if args.adapter_enable:
+        print(f"Enabling Standard Encoder Adapters with dim={args.adapter_dim}")
+        hyperparameters.update({
+            "model.sam.adapter_enabled": True,
+            "model.sam.adapter_dim": args.adapter_dim,
+        })
+        
+        # GSPO-Adapter extension configuration (Phase 1-2)
+        if args.gspo_adapter_enable:
+            if not args.gspo_enable:
+                print("Warning: --gspo_adapter_enable requires --gspo_enable. Enabling GSPO automatically.")
+                args.gspo_enable = True
+            print(f"Enabling GSPO-Adapter extension with momentum={args.gspo_adapter_momentum}, amplification_factor={args.gspo_adapter_amplification_factor}")
+            hyperparameters.update({
+                "optim.gspo.adapter_enabled": True,
+                "optim.gspo.adapter_momentum": args.gspo_adapter_momentum,
+                "model.sam.adapter_gspo_enabled": True,
+                "model.sam.adapter_gspo_momentum": args.gspo_adapter_momentum,
+                "model.sam.adapter_gspo_amplification_factor": args.gspo_adapter_amplification_factor,
+            })
+            # Pass scale adaptation to model config
+            if args.gspo_adapter_scale_adaptation:
+                print("Enabling GSPO-Adapter scale adaptation (Phase 2)")
+                hyperparameters.update({
+                    "optim.gspo.adapter_scale_adaptation": True,
+                    "model.sam.adapter_gspo_scale_adaptation": True,
+                })
+    
+    # Decoder Attention LoRA configuration
+    if args.decoder_attn_lora_enable:
+        gspo_lora_info = ""
+        if args.gspo_lora_attention_enable:
+            gspo_lora_info = f", GSPO enabled (momentum={args.gspo_lora_attention_momentum}"
+            if args.gspo_lora_attention_scale_adaptation:
+                gspo_lora_info += ", scale_adaptation=True"
+            gspo_lora_info += ")"
+        print(f"Enabling Decoder Attention LoRA: r={args.decoder_attn_lora_r}, "
+              f"alpha={args.decoder_attn_lora_alpha}, dropout={args.decoder_attn_lora_dropout}{gspo_lora_info}")
+        hyperparameters.update({
+            "model.sam.decoder_attention_lora_r": args.decoder_attn_lora_r,
+            "model.sam.decoder_attention_lora_alpha": args.decoder_attn_lora_alpha,
+            "model.sam.decoder_attention_lora_dropout": args.decoder_attn_lora_dropout,
+        })
+        
+        # GSPO-LoRA on Attention configuration (NEW)
+        if args.gspo_lora_attention_enable:
+            hyperparameters.update({
+                "model.sam.gspo_lora_attention_enabled": True,
+                "model.sam.gspo_lora_attention_momentum": args.gspo_lora_attention_momentum,
+                "model.sam.gspo_lora_attention_scale_adaptation": args.gspo_lora_attention_scale_adaptation,
+                "model.sam.gspo_lora_attention_amplification_factor": args.gspo_lora_attention_amplification_factor,
+            })
+        
+    # Decoder Adapter configuration
+    if args.decoder_adapter_enable:
+        print(f"Enabling Decoder MLP-Adapters with dim={args.decoder_adapter_dim}")
+        hyperparameters.update({
+            "model.sam.decoder_adapter_enabled": True,
+            "model.sam.decoder_adapter_dim": args.decoder_adapter_dim,
+        })
+
+    if args.eval:  # load a checkpoint for evaluation
+        predictor = MultiModalPredictor.load(args.ckpt_path)
+    else:  # training / resume training
+        if args.resume_from:
+            print(f"[Resume] Loading predictor from: {args.resume_from}")
+            predictor = MultiModalPredictor.load(args.resume_from)
+            # ensure new hyperparameters are applied on resume
+            predictor._config = None  # force re-merge config with new hyperparameters
+            predictor.fit(train_data=train_df, tuning_data=val_df, hyperparameters=hyperparameters, seed=args.seed)
+        else:
+            predictor = MultiModalPredictor(
+                problem_type="semantic_segmentation",
+                validation_metric=validation_metric,
+                eval_metric=validation_metric,
+                hyperparameters=hyperparameters,
+                label="label",
+            )
+
+            # Configure training-time box prompt mixing
+            predictor._learner._train_box_prompt_cfg = {
+                "mode": args.train_box_prompt_mode,
+                "p_no": args.train_box_prob_no_prompt,
+                "p_gt": args.train_box_prob_gt,
+                "p_noisy": args.train_box_prob_noisy,
+                "noise_frac": args.train_box_noise_frac,
+            }
+
+            # Setup bbox predictor for training if mode=predict
+            if args.train_box_prompt_mode == "predict":
+                if not args.train_bbox_model_ckpt:
+                    raise ValueError("train_box_prompt_mode=predict requires --train_bbox_model_ckpt.")
+                train_bbox_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+                train_bbox_predictor = BBoxPromptPredictor(
+                    ckpt_path=args.train_bbox_model_ckpt,
+                    device=train_bbox_device,
+                    image_size=args.train_bbox_model_image_size,
+                )
+                predictor._learner._train_bbox_predictor = train_bbox_predictor
+                print(f"\n[Info] Training-time bbox predictor loaded from: {args.train_bbox_model_ckpt}")
+                print(f"       Input size: {args.train_bbox_model_image_size}\n")
+
+            # 打印当前实验的模型保存目录，便于后续通过 AutogluonModels 路径追溯到具体实验日志
+            try:
+                # MultiModalPredictor 会在内部根据时间戳生成类似 AutogluonModels/ag-YYYYMMDD_HHMMSS 的目录
+                model_path = predictor.path
+            except AttributeError:
+                # 兼容极端情况：如果未来接口变化，没有 path 属性，则显式提示
+                model_path = None
+
+            if model_path is not None:
+                print("\n========================================")
+                print("Training MultiModalPredictor")
+                print(f"  Task        : {dataset_name}")
+                print(f"  Save path   : {model_path}")
+                print("  (You can use this directory name to link back to the training log.)")
+                print("========================================\n")
+            else:
+                print("\n[Warning] MultiModalPredictor has no 'path' attribute. "
+                      "Model save directory cannot be printed.\n")
+
+            predictor.fit(train_data=train_df, tuning_data=val_df, seed=args.seed)
+
+    # Enable TTA if requested
+    if args.tta_enable:
+        print(f"\n{'='*60}")
+        print(f"Enabling Test-Time Augmentation (TTA)")
+        print(f"  Scales: {args.tta_scales}")
+        print(f"  Flips: {args.tta_flips}")
+        print(f"  Rotations: {args.tta_rotations}")
+        print(f"  Fusion: {args.tta_fusion}")
+        print(f"  Resize method: {args.tta_resize_method}")
+        print(f"  Total augmentations: {len(args.tta_scales) * len(args.tta_flips) * len(args.tta_rotations)}")
+        print(f"{'='*60}\n")
+        
+        predictor.enable_tta(
+            scales=args.tta_scales,
+            flips=args.tta_flips,
+            rotations=args.tta_rotations,
+            fusion_method=args.tta_fusion,
+            resize_method=args.tta_resize_method,
+            threshold=args.tta_threshold,
+            min_area_ratio=args.tta_min_area,
+            use_morphology=args.tta_morphology,
+            cache_dir=args.tta_cache_dir,
+            resume_from_cache=not args.tta_no_resume,
+            box_prompt_mode=args.tta_box_prompt_mode,
+        )
+
+    # Optional bbox predictor for predicted box prompts
+    bbox_predictor = None
+    if args.bbox_prompt_source == "predict":
+        if not args.bbox_model_ckpt and not args.bbox_preds_csv:
+            raise ValueError("bbox_prompt_source=predict requires --bbox_model_ckpt or --bbox_preds_csv.")
+        if args.bbox_model_ckpt:
+            bbox_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            bbox_predictor = BBoxPromptPredictor(
+                ckpt_path=args.bbox_model_ckpt,
+                device=bbox_device,
+                image_size=args.bbox_model_image_size,
+            )
+        if args.tta_box_prompt_mode == "off":
+            print("[Warning] bbox_prompt_source=predict set but tta_box_prompt_mode=off; box prompts will be ignored.")
+
+    def attach_pred_boxes(df: pd.DataFrame) -> pd.DataFrame:
+        """Attach predicted or precomputed boxes to dataframe."""
+        df = df.copy()
+        if args.bbox_preds_csv:
+            preds = pd.read_csv(args.bbox_preds_csv)
+            merged = df.merge(preds, on="image", how="left")
+            if merged[["bbox_x1", "bbox_y1", "bbox_x2", "bbox_y2"]].isna().all().all():
+                preds["image_basename"] = preds["image"].apply(lambda p: os.path.basename(p))
+                merged["image_basename"] = merged["image"].apply(lambda p: os.path.basename(p))
+                merged = merged.merge(
+                    preds.drop(columns=["image"]), on="image_basename", how="left", suffixes=("", "_pred")
+                )
+                merged.drop(columns=["image_basename"], inplace=True)
+                for col in ["bbox_x1", "bbox_y1", "bbox_x2", "bbox_y2"]:
+                    pred_col = f"{col}_pred"
+                    if pred_col in merged.columns:
+                        merged[col] = merged[col].fillna(merged[pred_col])
+                        merged.drop(columns=[pred_col], inplace=True)
+            df = merged
+        elif bbox_predictor is not None:
+            boxes = []
+            for _, r in df.iterrows():
+                box = bbox_predictor.predict(r["image"])
+                boxes.append(box)
+            boxes = np.stack(boxes, axis=0)
+            df["bbox_x1"] = boxes[:, 0]
+            df["bbox_y1"] = boxes[:, 1]
+            df["bbox_x2"] = boxes[:, 2]
+            df["bbox_y2"] = boxes[:, 3]
+        return df
+
+    # evaluation
+    metric_file = os.path.join(args.output_dir, "metrics.txt")
+    f = open(metric_file, "a")
+    if dataset_name in ["isic2017", "SBU-shadow", "road_segmentation", "leaf_disease_segmentation"]:
+        test_df = expand_path(pd.read_csv(os.path.join(dataset_dir, f"test.csv")), dataset_dir)
+        
+        # Apply quick test / debug mode (方案 1: 快速验证模式)
+        original_size = len(test_df)
+        if args.debug:
+            test_df = test_df.head(5)
+            print(f"\n🔍 DEBUG MODE: Processing only first 5 images (out of {original_size})\n")
+        elif args.quick_test is not None:
+            test_df = test_df.head(args.quick_test)
+            print(f"\n🔍 QUICK TEST MODE: Processing only first {args.quick_test} images (out of {original_size})\n")
+        
+        if dataset_name == "SBU-shadow":
+            eval_metrics = ["ber"]
+        else:
+            eval_metrics = ["iou", "dice"]  # Evaluate both IoU and DICE
+
+        # Attach predicted bbox prompts if requested
+        if args.bbox_prompt_source == "predict" and (args.bbox_preds_csv or bbox_predictor):
+            test_df = attach_pred_boxes(test_df)
+
+        res = predictor.evaluate(test_df, metrics=eval_metrics)
+        print(f"Evaluation results for test dataset {dataset_name}: ", res)
+        f.write(f"Evaluation results for test dataset {dataset_name}: {res} \n")
+    elif dataset_name in ["polyp", "camo_sem_seg"]:
+        if dataset_name == "polyp":
+            test_datasets = ["CVC-ClinicDB", "Kvasir"]
+        elif dataset_name == "camo_sem_seg":
+            test_datasets = ["CAMO"]
+        else:
+            raise ValueError(f"Unknown dataset name: {dataset_name}.")
+        for per_dataset in test_datasets:
+            test_df = expand_path(pd.read_csv(os.path.join(dataset_dir, f"test_{per_dataset}.csv")), dataset_dir)
+            
+            # Apply quick test / debug mode (方案 1: 快速验证模式)
+            original_size = len(test_df)
+            if args.debug:
+                test_df = test_df.head(5)
+                print(f"\n🔍 DEBUG MODE: Processing only first 5 images (out of {original_size}) for {per_dataset}\n")
+            elif args.quick_test is not None:
+                test_df = test_df.head(args.quick_test)
+                print(f"\n🔍 QUICK TEST MODE: Processing only first {args.quick_test} images (out of {original_size}) for {per_dataset}\n")
+            
+            if args.bbox_prompt_source == "predict" and (args.bbox_preds_csv or bbox_predictor):
+                test_df = attach_pred_boxes(test_df)
+
+            res = predictor.evaluate(test_df, metrics=["sm", "fm", "em", "mae"])
+            print(f"Evaluation results for test dataset {per_dataset}: ", res)
+            f.write(f"Evaluation results for test dataset {per_dataset}: {res} \n")
+    else:
+        raise ValueError(f"Unknown dataset name: {dataset_name}.")
+
+    f.close()
+
+```
+
+已为阶段2“继续训练”加好了 CLI 支持（做法B）：
+
+- 新增参数：`--resume_from`，传入阶段1训练生成的 `MultiModalPredictor` 目录（如 `outputs/.../AutogluonModels/ag-YYYYMMDD_HHMMSS`）。
+- 训练逻辑：若提供 `--resume_from`，先 `MultiModalPredictor.load`，再用当前命令行构造的 `hyperparameters` 继续 `fit`，这样你可以在加载阶段1权重的基础上打开阶段2的开关（如 `--gspo_adapter_scale_adaptation`、`--gspo_adapter_amplification_factor` 等）。
+- 评估逻辑不变，仍用 `--eval --ckpt_path`。
+
+用法示例（阶段2基于阶段1权重继续训练）：
+```bash
+python3 run_semantic_segmentation.py \
+  --task isic2017 \
+  --rank 3 \
+  --expert_num 8 \
+  --gspo_enable \
+  --adapter_enable \
+  --gspo_adapter_enable \
+  --gspo_adapter_scale_adaptation \
+  --gspo_adapter_amplification_factor 8.0 \
+  --resume_from /path/to/stage1/AutogluonModels/ag-YYYYMMDD_HHMMSS \
+  --output_dir outputs/phase2_from_stage1
+```
+
+文件已更新并通过 linter：`examples/automm/Conv-LoRA/run_semantic_segmentation.py`。
+
+```shellscript
+python3 run_semantic_segmentation.py \
+  --task isic2017 \
+  --rank 3 \
+  --expert_num 8 \
+  --gspo_enable \
+  --adapter_enable \
+  --gspo_adapter_enable \
+  --gspo_adapter_scale_adaptation \
+  --gspo_adapter_amplification_factor 8.0 \
+  --resume_from /path/to/stage1/AutogluonModels/ag-YYYYMMDD_HHMMSS \
+  --output_dir outputs/phase2_from_stage1
+```
+
+---
+
+**User**
+
+上述阶段2的训练参数是否有遗漏？因为我记得第一次实验阶段2的命令如下：`nohup python3 run_semantic_segmentation.py \
+    --task isic2017 \
+    --rank 3 \
+    --expert_num 8 \
+    --gspo_enable \
+    --gspo_group_size 4 \
+    --gspo_warmup_epochs 5 \
+    --gspo_contrastive_weight 0.1 \
+    --gspo_quality_momentum 0.9 \
+    --adapter_enable \
+    --adapter_dim 64 \
+    --gspo_adapter_enable \
+    --gspo_adapter_momentum 0.9 \
+    --gspo_adapter_scale_adaptation \
+    --output_dir outputs/phase2_full-251221 \
+>  outputs/phase2_full-251221.log 2>&1 &`
+
+---
+
+**Cursor**
+
+你的这组阶段2参数本身是完整可跑的，不会缺关键开关；需要注意的只是两点可选项：
+
+- 放大系数 k：现在有 `--gspo_adapter_amplification_factor`（默认 4.0），不写也行；想更激进可加 `--gspo_adapter_amplification_factor 8.0`。
+- 如果要基于阶段1权重继续训练阶段2，则加 `--resume_from <阶段1的AutogluonModels目录>`；从零训练则无需。
+
+如果你要换 MedSAM 主干，还需额外指定：
+- `--sam_checkpoint bowanglab/medsam-vit-h`（或本地 HF 兼容目录）。
+
+综上，原命令不缺参数；可按需叠加：
+```
+# 从零跑阶段2（默认 k=4）
+python3 run_semantic_segmentation.py ... --gspo_adapter_scale_adaptation ...
+
+# 更激进 k=8
+python3 run_semantic_segmentation.py ... --gspo_adapter_scale_adaptation --gspo_adapter_amplification_factor 8.0
+
+# 基于阶段1继续训练阶段2
+python3 run_semantic_segmentation.py ... --gspo_adapter_scale_adaptation --resume_from <stage1_dir>
+```
+
+```plaintext
+# 从零跑阶段2（默认 k=4）
+python3 run_semantic_segmentation.py ... --gspo_adapter_scale_adaptation ...
+
+# 更激进 k=8
+python3 run_semantic_segmentation.py ... --gspo_adapter_scale_adaptation --gspo_adapter_amplification_factor 8.0
+
+# 基于阶段1继续训练阶段2
+python3 run_semantic_segmentation.py ... --gspo_adapter_scale_adaptation --resume_from <stage1_dir>
+```
+
+---
+
+**User**
+
+执行命令`nohup python3 run_semantic_segmentation.py \
+    --task isic2017 \
+    --rank 3 \
+    --expert_num 8 \
+    --gspo_enable \
+    --gspo_group_size 4 \
+    --gspo_warmup_epochs 5 \
+    --gspo_contrastive_weight 0.1 \
+    --gspo_quality_momentum 0.9 \
+    --adapter_enable \
+    --adapter_dim 64 \
+    --gspo_adapter_enable \
+    --gspo_adapter_momentum 0.9 \
+    --gspo_adapter_amplification_factor 4.0 \
+    --gspo_adapter_scale_adaptation \
+    --resume_from AutogluonModels/ag-20251222_145937 \
+    --output_dir outputs/phase2_full-251225 \
+>  outputs/phase2_full-251225.log 2>&1 &`报错`...Traceback (most recent call last):
+  File "/root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA/run_semantic_segmentation.py", line 327, in <module>
+    predictor.fit(train_data=train_df, tuning_data=val_df, hyperparameters=hyperparameters, seed=args.seed)
+  File "/root/autodl-tmp/works/autogluon/multimodal/src/autogluon/multimodal/predictor.py", line 540, in fit
+    self._learner.fit(
+  File "/root/autodl-tmp/works/autogluon/multimodal/src/autogluon/multimodal/learners/base.py", line 665, in fit
+    fit_returns = self.execute_fit()
+  File "/root/autodl-tmp/works/autogluon/multimodal/src/autogluon/multimodal/learners/base.py", line 577, in execute_fit
+    attributes = self.fit_per_run(**self._fit_args)
+  File "/root/autodl-tmp/works/autogluon/multimodal/src/autogluon/multimodal/learners/base.py", line 1275, in fit_per_run
+    config = self.get_config_per_run(config=config, hyperparameters=hyperparameters)
+  File "/root/autodl-tmp/works/autogluon/multimodal/src/autogluon/multimodal/learners/base.py", line 703, in get_config_per_run
+    config = get_config(
+  File "/root/autodl-tmp/works/autogluon/multimodal/src/autogluon/multimodal/utils/config.py", line 198, in get_config
+    config = apply_omegaconf_overrides(config, overrides=overrides, check_key_exist=True)
+  File "/root/autodl-tmp/works/autogluon/multimodal/src/autogluon/multimodal/utils/config.py", line 480, in apply_omegaconf_overrides
+    raise KeyError(
+KeyError: '"model.sam.adapter_gspo_amplification_factor" is not found in the config. You may need to check the overrides. overrides={\'optim.lora.r\': 3, \'optim.peft\': \'conv_lora\', \'optim.lora.conv_lora_expert_num\': 8, \'env.num_gpus\': 1, \'optim.loss_func\': \'structure_loss\', \'optim.max_epochs\': 30, \'optim.lr\': 0.0001, \'env.per_gpu_batch_size\': 1, \'env.batch_size\': 4, \'model.sam.checkpoint_name\': \'facebook/sam-vit-huge\', \'optim.lora.gspo_enabled\': True, \'optim.lora.gspo_group_size\': 4, \'optim.lora.gspo_quality_momentum\': 0.9, \'optim.lora.gspo_warmup_epochs\': 5, \'optim.lora.gspo_contrastive_weight\': 0.1, \'optim.gspo.lambda_smooth\': 0.1, \'optim.gspo.lambda_boundary\': 0.3, \'optim.gspo.w_boundary\': 0.3, \'optim.gspo.w_smooth\': 0.1, \'optim.gspo.w_thin\': 0.05, \'model.sam.adapter_enabled\': True, \'model.sam.adapter_dim\': 64, \'optim.gspo.adapter_enabled\': True, \'optim.gspo.adapter_momentum\': 0.9, \'model.sam.adapter_gspo_enabled\': True, \'model.sam.adapter_gspo_momentum\': 0.9, \'model.sam.adapter_gspo_amplification_factor\': 4.0, \'optim.gspo.adapter_scale_adaptation\': True, \'model.sam.adapter_gspo_scale_adaptation\': True}'` 这个问题不是修好了嘛为什么还有？
+
+---
+
+**Cursor**
+
+```python
+import argparse
+import os
+
+import numpy as np
+import pandas as pd
+import torch
+
+from autogluon.multimodal import MultiModalPredictor
+from bbox_prompt_model import BBoxPromptPredictor
+
+
+def get_default_training_setting(dataset_name):
+    validation_metric = "iou"
+    loss = "structure_loss"
+    max_epoch = 30
+    lr = 1e-4
+
+    if dataset_name == "SBU-shadow":
+        validation_metric = "ber"
+        loss = "balanced_bce"
+        max_epoch = 10
+
+    elif dataset_name == "polyp":
+        validation_metric = "sm"
+
+    elif dataset_name == "camo_sem_seg":
+        validation_metric = "sm"
+        max_epoch = 20
+
+    elif dataset_name == "road_segmentation":
+        validation_metric = "iou"
+        max_epoch = 20
+        lr = 3e-4
+
+    elif dataset_name == "leaf_disease_segmentation":
+        validation_metric = "iou"
+        lr = 3e-4
+
+    return validation_metric, loss, max_epoch, lr
+
+
+def expand_path(df, dataset_dir):
+    for col in ["image", "label"]:
+        df[col] = df[col].apply(lambda ele: os.path.join(dataset_dir, ele))
+    return df
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="This script support converting voc format xmls to coco format json")
+    parser.add_argument(
+        "--task",
+        type=str,
+        default="leaf_disease_segmentation",
+        choices=["polyp", "leaf_disease_segmentation", "camo_sem_seg", "isic2017", "road_segmentation", "SBU-shadow"],
+    )
+    parser.add_argument("--seed", type=int, default=42686693)
+    parser.add_argument("--rank", type=int, default=3)
+    parser.add_argument("--expert_num", type=int, default=8)
+    parser.add_argument("--num_gpus", type=int, default=1)
+    parser.add_argument("--output_dir", type=str, default="outputs")
+    parser.add_argument("--ckpt_path", type=str, default="outputs", help="Checkpoint path.")
+    parser.add_argument(
+        "--sam_checkpoint",
+        type=str,
+        default="facebook/sam-vit-huge",
+        help="SAM/MedSAM checkpoint name or local path (e.g., bowanglab/medsam-vit-huge).",
+    )
+    parser.add_argument("--per_gpu_batch_size", type=int, default=1, help="The batch size for each GPU.")
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=4,
+        help="The effective batch size. If batch_size > per_gpu_batch_size * num_gpus, gradient accumulation would be used.",
+    )
+    parser.add_argument("--eval", action="store_true")
+    parser.add_argument(
+        "--resume_from",
+        type=str,
+        default=None,
+        help="Path to a saved MultiModalPredictor (e.g., outputs/.../AutogluonModels/ag-YYYYMMDD_HHMMSS) to resume training.",
+    )
+    
+    # GSPO parameters
+    parser.add_argument("--gspo_enable", action="store_true", help="Enable GSPO (Group Sequence Policy Optimization) training")
+    parser.add_argument("--gspo_group_size", type=int, default=4, help="Number of predictions per group in GSPO")
+    parser.add_argument("--gspo_warmup_epochs", type=int, default=5, help="Number of epochs before enabling GSPO")
+    parser.add_argument("--gspo_contrastive_weight", type=float, default=0.1, help="Weight for contrastive loss in GSPO")
+    parser.add_argument("--gspo_quality_momentum", type=float, default=0.9, help="Momentum for expert quality history")
+    # GSPO reward / loss shaping hyper-parameters (可选，带默认值)
+    parser.add_argument("--lambda_smooth", type=float, default=0.1, help="Smoothness loss weight (λ_smooth)")
+    parser.add_argument("--lambda_boundary", type=float, default=0.3, help="Boundary loss weight (λ_boundary)")
+    parser.add_argument("--w_boundary", type=float, default=0.3, help="Boundary reward weight (w_boundary)")
+    parser.add_argument("--w_smooth", type=float, default=0.1, help="Smoothness reward weight (w_smooth)")
+    parser.add_argument("--w_thin", type=float, default=0.05, help="Thin-structure reward weight (w_thin)")
+    
+    # Adapter parameters
+    parser.add_argument("--adapter_enable", action="store_true", help="Enable standard Adapter modules")
+    parser.add_argument("--adapter_dim", type=int, default=64, help="Dimension of the adapter bottleneck")
+    
+    # GSPO-Adapter extension parameters (Phase 1-2)
+    parser.add_argument("--gspo_adapter_enable", action="store_true", 
+                        help="Enable GSPO quality feedback for Encoder Adapters (Phase 1)")
+    parser.add_argument("--gspo_adapter_momentum", type=float, default=0.9, 
+                        help="Momentum for adapter quality history updates")
+    parser.add_argument("--gspo_adapter_scale_adaptation", action="store_true",
+                        help="Enable adaptive scale based on quality history (Phase 2)")
+    parser.add_argument("--gspo_adapter_amplification_factor", type=float, default=4.0,
+                        help="Amplification factor k for contribution score calculation (default: 4.0)")
+    
+    # Decoder Attention LoRA parameters (LoRA on Attention)
+    parser.add_argument("--decoder_attn_lora_enable", action="store_true", 
+                        help="Enable LoRA on decoder attention Q/K/V projections")
+    parser.add_argument("--decoder_attn_lora_r", type=int, default=8,
+                        help="LoRA rank for decoder attention (default: 8)")
+    parser.add_argument("--decoder_attn_lora_alpha", type=int, default=8,
+                        help="LoRA alpha for decoder attention (default: 8, same as rank)")
+    parser.add_argument("--decoder_attn_lora_dropout", type=float, default=0.0,
+                        help="LoRA dropout for decoder attention (default: 0.0)")
+    
+    # GSPO-LoRA on Attention parameters (NEW)
+    parser.add_argument("--gspo_lora_attention_enable", action="store_true",
+                        help="Enable GSPO quality feedback for Decoder LoRA on Attention")
+    parser.add_argument("--gspo_lora_attention_momentum", type=float, default=0.9,
+                        help="Momentum for LoRA quality history updates (default: 0.9)")
+    parser.add_argument("--gspo_lora_attention_scale_adaptation", action="store_true",
+                        help="Enable adaptive scaling based on quality for LoRA")
+    parser.add_argument("--gspo_lora_attention_amplification_factor", type=float, default=4.0,
+                        help="Amplification factor k for LoRA contribution score calculation (default: 4.0)")
+    
+    # TTA (Test-Time Augmentation) parameters
+    parser.add_argument("--tta_enable", action="store_true", help="Enable Test-Time Augmentation for evaluation")
+    parser.add_argument("--tta_scales", type=float, nargs="+", default=[0.75, 1.0, 1.25], 
+                        help="Scale factors for multi-scale TTA (default: [0.75, 1.0, 1.25]). "
+                             "Recommended: [0.75, 1.0, 1.25] or [0.8, 1.0, 1.2]")
+    parser.add_argument("--tta_flips", type=str, nargs="+", default=["none", "horizontal"],
+                        choices=["none", "horizontal", "vertical"],
+                        help="Flip types for TTA (default: ['none', 'horizontal'])")
+    parser.add_argument("--tta_rotations", type=float, nargs="+", default=[0],
+                        help="Rotation angles in degrees for TTA (default: [0]). "
+                             "Recommended: [0] for fast, or [-10, 0, 10] for better")
+    parser.add_argument("--tta_fusion", type=str, default="mean", choices=["mean", "weighted_mean"],
+                        help="Fusion method for TTA predictions (default: 'mean')")
+    parser.add_argument("--tta_resize_method", type=str, default="bilinear", choices=["bilinear", "bicubic"],
+                        help="Resize interpolation method for multi-scale TTA (default: 'bilinear'). "
+                             "bilinear: faster, bicubic: higher quality")
+    parser.add_argument("--tta_threshold", type=float, default=0.5,
+                        help="Threshold for binary segmentation in TTA (default: 0.5)")
+    parser.add_argument("--tta_min_area", type=float, default=0.001,
+                        help="Remove components with area < tta_min_area * image_area (default: 0.001)")
+    parser.add_argument("--tta_morphology", action="store_true",
+                        help="Apply morphological closing in TTA post-processing")
+    parser.add_argument("--tta_cache_dir", type=str, default=None,
+                        help="Directory to cache TTA predictions for resume (default: None, no caching)")
+    parser.add_argument("--tta_no_resume", action="store_true",
+                        help="Disable resume from cache (start fresh even if cache exists)")
+    parser.add_argument("--tta_box_prompt_mode", type=str, default="off",
+                        choices=["off", "add", "replace"],
+                        help="Use GT box as SAM box prompt (off/add/replace); box not transformed with TTA")
+    # BBox prompt configuration
+    parser.add_argument("--bbox_prompt_source", type=str, default="none",
+                        choices=["none", "gt", "predict"],
+                        help="Box prompt source: none (no prompt), gt (from mask), predict (from bbox model).")
+    parser.add_argument("--bbox_model_ckpt", type=str, default=None,
+                        help="Checkpoint for bbox predictor when bbox_prompt_source=predict.")
+    parser.add_argument("--bbox_model_image_size", type=int, default=320,
+                        help="Input size for bbox predictor inference.")
+    parser.add_argument("--bbox_preds_csv", type=str, default=None,
+                        help="Optional CSV with columns image,bbox_x1,bbox_y1,bbox_x2,bbox_y2 to attach prompts.")
+    # Training-time box prompt mixing (default off)
+    parser.add_argument("--train_box_prompt_mode", type=str, default="off",
+                        choices=["off", "gt", "noisy", "mix", "predict"],
+                        help="Training-time box prompt injection: off/gt/noisy/mix/predict (default off). "
+                             "predict: use bbox predictor model to generate box prompts from images.")
+    parser.add_argument("--train_box_prob_no_prompt", type=float, default=0.2,
+                        help="When mode=mix, probability of no prompt.")
+    parser.add_argument("--train_box_prob_gt", type=float, default=0.3,
+                        help="When mode=mix, probability of GT box prompt.")
+    parser.add_argument("--train_box_prob_noisy", type=float, default=0.5,
+                        help="When mode=mix, probability of noisy GT box prompt.")
+    parser.add_argument("--train_box_noise_frac", type=float, default=0.12,
+                        help="Noisy box jitter fraction relative to box size (e.g., 0.12 => ±12%).")
+    parser.add_argument("--train_bbox_model_ckpt", type=str, default=None,
+                        help="Checkpoint for bbox predictor when train_box_prompt_mode=predict.")
+    parser.add_argument("--train_bbox_model_image_size", type=int, default=320,
+                        help="Input size for bbox predictor during training (when train_box_prompt_mode=predict).")
+    
+    # Quick test / Debug parameters
+    parser.add_argument("--debug", action="store_true",
+                        help="Debug mode: only process first 5 images for quick validation")
+    parser.add_argument("--quick_test", type=int, default=None,
+                        help="Quick test mode: only process first N images")
+    
+    # Training hyperparameters
+    parser.add_argument("--lr", type=float, default=None,
+                        help="Learning rate (default: auto based on task, typically 1e-4 or 3e-4)")
+    
+    # Decoder Adapter parameters
+    parser.add_argument("--decoder_adapter_enable", action="store_true", help="Enable MLP-Adapter modules in the mask decoder")
+    parser.add_argument("--decoder_adapter_dim", type=int, default=64, help="Dimension of the decoder adapter bottleneck")
+    args = parser.parse_args()
+
+    dataset_name = args.task
+    dataset_dir = os.path.join(f"datasets/{dataset_name}", dataset_name)
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    # prepare dataframes
+    train_df = expand_path(pd.read_csv(os.path.join(dataset_dir, f"train.csv")), dataset_dir)
+    val_df = expand_path(pd.read_csv(os.path.join(dataset_dir, f"val.csv")), dataset_dir)
+
+    # get the validation metric
+    validation_metric, loss, max_epoch, lr = get_default_training_setting(dataset_name)
+    
+    # Override learning rate if user specified it via CLI
+    if args.lr is not None:
+        lr = args.lr
+        print(f"Using custom learning rate: {lr}")
+
+    hyperparameters = {}
+    hyperparameters.update(
+        {
+            "optim.lora.r": args.rank,
+            # Paper alignment (Conv-LoRA):
+            # - optim.peft: choose Conv-LoRA adaptation (Sec. 3)
+            # - optim.lora.r: LoRA rank r (Sec. 3)
+            # - optim.lora.conv_lora_expert_num: number of MoE-Conv experts M (Sec. 3.2)
+            "optim.peft": "conv_lora",
+            "optim.lora.conv_lora_expert_num": args.expert_num,
+            "env.num_gpus": args.num_gpus,
+            "optim.loss_func": loss,
+            "optim.max_epochs": max_epoch,
+            "optim.lr": lr,
+            "env.per_gpu_batch_size": args.per_gpu_batch_size,
+            "env.batch_size": args.batch_size,
+        }
+    )
+    # Allow switching SAM backbone to MedSAM or other checkpoints
+    if args.sam_checkpoint:
+        hyperparameters["model.sam.checkpoint_name"] = args.sam_checkpoint
+    
+    # GSPO configuration
+    if args.gspo_enable:
+        print(f"Enabling GSPO with group_size={args.gspo_group_size}, warmup_epochs={args.gspo_warmup_epochs}")
+        hyperparameters.update({
+            "optim.lora.gspo_enabled": True,
+            "optim.lora.gspo_group_size": args.gspo_group_size,
+            "optim.lora.gspo_quality_momentum": args.gspo_quality_momentum,
+            "optim.lora.gspo_warmup_epochs": args.gspo_warmup_epochs,
+            "optim.lora.gspo_contrastive_weight": args.gspo_contrastive_weight,
+            # GSPO reward / loss shaping
+            "optim.gspo.lambda_smooth": args.lambda_smooth,
+            "optim.gspo.lambda_boundary": args.lambda_boundary,
+            "optim.gspo.w_boundary": args.w_boundary,
+            "optim.gspo.w_smooth": args.w_smooth,
+            "optim.gspo.w_thin": args.w_thin,
+        })
+
+    # Adapter configuration
+    if args.adapter_enable:
+        print(f"Enabling Standard Encoder Adapters with dim={args.adapter_dim}")
+        hyperparameters.update({
+            "model.sam.adapter_enabled": True,
+            "model.sam.adapter_dim": args.adapter_dim,
+        })
+        
+        # GSPO-Adapter extension configuration (Phase 1-2)
+        if args.gspo_adapter_enable:
+            if not args.gspo_enable:
+                print("Warning: --gspo_adapter_enable requires --gspo_enable. Enabling GSPO automatically.")
+                args.gspo_enable = True
+            print(f"Enabling GSPO-Adapter extension with momentum={args.gspo_adapter_momentum}, amplification_factor={args.gspo_adapter_amplification_factor}")
+            hyperparameters.update({
+                "optim.gspo.adapter_enabled": True,
+                "optim.gspo.adapter_momentum": args.gspo_adapter_momentum,
+                "model.sam.adapter_gspo_enabled": True,
+                "model.sam.adapter_gspo_momentum": args.gspo_adapter_momentum,
+                "model.sam.adapter_gspo_amplification_factor": args.gspo_adapter_amplification_factor,
+            })
+            # Pass scale adaptation to model config
+            if args.gspo_adapter_scale_adaptation:
+                print("Enabling GSPO-Adapter scale adaptation (Phase 2)")
+                hyperparameters.update({
+                    "optim.gspo.adapter_scale_adaptation": True,
+                    "model.sam.adapter_gspo_scale_adaptation": True,
+                })
+    
+    # Decoder Attention LoRA configuration
+    if args.decoder_attn_lora_enable:
+        gspo_lora_info = ""
+        if args.gspo_lora_attention_enable:
+            gspo_lora_info = f", GSPO enabled (momentum={args.gspo_lora_attention_momentum}"
+            if args.gspo_lora_attention_scale_adaptation:
+                gspo_lora_info += ", scale_adaptation=True"
+            gspo_lora_info += ")"
+        print(f"Enabling Decoder Attention LoRA: r={args.decoder_attn_lora_r}, "
+              f"alpha={args.decoder_attn_lora_alpha}, dropout={args.decoder_attn_lora_dropout}{gspo_lora_info}")
+        hyperparameters.update({
+            "model.sam.decoder_attention_lora_r": args.decoder_attn_lora_r,
+            "model.sam.decoder_attention_lora_alpha": args.decoder_attn_lora_alpha,
+            "model.sam.decoder_attention_lora_dropout": args.decoder_attn_lora_dropout,
+        })
+        
+        # GSPO-LoRA on Attention configuration (NEW)
+        if args.gspo_lora_attention_enable:
+            hyperparameters.update({
+                "model.sam.gspo_lora_attention_enabled": True,
+                "model.sam.gspo_lora_attention_momentum": args.gspo_lora_attention_momentum,
+                "model.sam.gspo_lora_attention_scale_adaptation": args.gspo_lora_attention_scale_adaptation,
+                "model.sam.gspo_lora_attention_amplification_factor": args.gspo_lora_attention_amplification_factor,
+            })
+        
+    # Decoder Adapter configuration
+    if args.decoder_adapter_enable:
+        print(f"Enabling Decoder MLP-Adapters with dim={args.decoder_adapter_dim}")
+        hyperparameters.update({
+            "model.sam.decoder_adapter_enabled": True,
+            "model.sam.decoder_adapter_dim": args.decoder_adapter_dim,
+        })
+
+    if args.eval:  # load a checkpoint for evaluation
+        predictor = MultiModalPredictor.load(args.ckpt_path)
+    else:  # training / resume training
+        if args.resume_from:
+            print(f"[Resume] Loading predictor from: {args.resume_from}")
+            predictor = MultiModalPredictor.load(args.resume_from)
+            # Ensure newly added config fields exist when resuming from older checkpoints
+            try:
+                cfg = predictor._learner._config
+                if "model" in cfg and "sam" in cfg.model:
+                    sam_cfg = cfg.model.sam
+                    if "adapter_gspo_amplification_factor" not in sam_cfg:
+                        sam_cfg.adapter_gspo_amplification_factor = 4.0
+                    if "gspo_lora_attention_amplification_factor" not in sam_cfg:
+                        sam_cfg.gspo_lora_attention_amplification_factor = 4.0
+            except Exception:
+                # fallback: ignore if structure unexpected; overrides will still try
+                pass
+            # ensure new hyperparameters are applied on resume
+            predictor._config = None  # force re-merge config with new hyperparameters
+            predictor.fit(train_data=train_df, tuning_data=val_df, hyperparameters=hyperparameters, seed=args.seed)
+        else:
+            predictor = MultiModalPredictor(
+                problem_type="semantic_segmentation",
+                validation_metric=validation_metric,
+                eval_metric=validation_metric,
+                hyperparameters=hyperparameters,
+                label="label",
+            )
+
+            # Configure training-time box prompt mixing
+            predictor._learner._train_box_prompt_cfg = {
+                "mode": args.train_box_prompt_mode,
+                "p_no": args.train_box_prob_no_prompt,
+                "p_gt": args.train_box_prob_gt,
+                "p_noisy": args.train_box_prob_noisy,
+                "noise_frac": args.train_box_noise_frac,
+            }
+
+            # Setup bbox predictor for training if mode=predict
+            if args.train_box_prompt_mode == "predict":
+                if not args.train_bbox_model_ckpt:
+                    raise ValueError("train_box_prompt_mode=predict requires --train_bbox_model_ckpt.")
+                train_bbox_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+                train_bbox_predictor = BBoxPromptPredictor(
+                    ckpt_path=args.train_bbox_model_ckpt,
+                    device=train_bbox_device,
+                    image_size=args.train_bbox_model_image_size,
+                )
+                predictor._learner._train_bbox_predictor = train_bbox_predictor
+                print(f"\n[Info] Training-time bbox predictor loaded from: {args.train_bbox_model_ckpt}")
+                print(f"       Input size: {args.train_bbox_model_image_size}\n")
+
+            # 打印当前实验的模型保存目录，便于后续通过 AutogluonModels 路径追溯到具体实验日志
+            try:
+                # MultiModalPredictor 会在内部根据时间戳生成类似 AutogluonModels/ag-YYYYMMDD_HHMMSS 的目录
+                model_path = predictor.path
+            except AttributeError:
+                # 兼容极端情况：如果未来接口变化，没有 path 属性，则显式提示
+                model_path = None
+
+            if model_path is not None:
+                print("\n========================================")
+                print("Training MultiModalPredictor")
+                print(f"  Task        : {dataset_name}")
+                print(f"  Save path   : {model_path}")
+                print("  (You can use this directory name to link back to the training log.)")
+                print("========================================\n")
+            else:
+                print("\n[Warning] MultiModalPredictor has no 'path' attribute. "
+                      "Model save directory cannot be printed.\n")
+
+            predictor.fit(train_data=train_df, tuning_data=val_df, seed=args.seed)
+
+    # Enable TTA if requested
+    if args.tta_enable:
+        print(f"\n{'='*60}")
+        print(f"Enabling Test-Time Augmentation (TTA)")
+        print(f"  Scales: {args.tta_scales}")
+        print(f"  Flips: {args.tta_flips}")
+        print(f"  Rotations: {args.tta_rotations}")
+        print(f"  Fusion: {args.tta_fusion}")
+        print(f"  Resize method: {args.tta_resize_method}")
+        print(f"  Total augmentations: {len(args.tta_scales) * len(args.tta_flips) * len(args.tta_rotations)}")
+        print(f"{'='*60}\n")
+        
+        predictor.enable_tta(
+            scales=args.tta_scales,
+            flips=args.tta_flips,
+            rotations=args.tta_rotations,
+            fusion_method=args.tta_fusion,
+            resize_method=args.tta_resize_method,
+            threshold=args.tta_threshold,
+            min_area_ratio=args.tta_min_area,
+            use_morphology=args.tta_morphology,
+            cache_dir=args.tta_cache_dir,
+            resume_from_cache=not args.tta_no_resume,
+            box_prompt_mode=args.tta_box_prompt_mode,
+        )
+
+    # Optional bbox predictor for predicted box prompts
+    bbox_predictor = None
+    if args.bbox_prompt_source == "predict":
+        if not args.bbox_model_ckpt and not args.bbox_preds_csv:
+            raise ValueError("bbox_prompt_source=predict requires --bbox_model_ckpt or --bbox_preds_csv.")
+        if args.bbox_model_ckpt:
+            bbox_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            bbox_predictor = BBoxPromptPredictor(
+                ckpt_path=args.bbox_model_ckpt,
+                device=bbox_device,
+                image_size=args.bbox_model_image_size,
+            )
+        if args.tta_box_prompt_mode == "off":
+            print("[Warning] bbox_prompt_source=predict set but tta_box_prompt_mode=off; box prompts will be ignored.")
+
+    def attach_pred_boxes(df: pd.DataFrame) -> pd.DataFrame:
+        """Attach predicted or precomputed boxes to dataframe."""
+        df = df.copy()
+        if args.bbox_preds_csv:
+            preds = pd.read_csv(args.bbox_preds_csv)
+            merged = df.merge(preds, on="image", how="left")
+            if merged[["bbox_x1", "bbox_y1", "bbox_x2", "bbox_y2"]].isna().all().all():
+                preds["image_basename"] = preds["image"].apply(lambda p: os.path.basename(p))
+                merged["image_basename"] = merged["image"].apply(lambda p: os.path.basename(p))
+                merged = merged.merge(
+                    preds.drop(columns=["image"]), on="image_basename", how="left", suffixes=("", "_pred")
+                )
+                merged.drop(columns=["image_basename"], inplace=True)
+                for col in ["bbox_x1", "bbox_y1", "bbox_x2", "bbox_y2"]:
+                    pred_col = f"{col}_pred"
+                    if pred_col in merged.columns:
+                        merged[col] = merged[col].fillna(merged[pred_col])
+                        merged.drop(columns=[pred_col], inplace=True)
+            df = merged
+        elif bbox_predictor is not None:
+            boxes = []
+            for _, r in df.iterrows():
+                box = bbox_predictor.predict(r["image"])
+                boxes.append(box)
+            boxes = np.stack(boxes, axis=0)
+            df["bbox_x1"] = boxes[:, 0]
+            df["bbox_y1"] = boxes[:, 1]
+            df["bbox_x2"] = boxes[:, 2]
+            df["bbox_y2"] = boxes[:, 3]
+        return df
+
+    # evaluation
+    metric_file = os.path.join(args.output_dir, "metrics.txt")
+    f = open(metric_file, "a")
+    if dataset_name in ["isic2017", "SBU-shadow", "road_segmentation", "leaf_disease_segmentation"]:
+        test_df = expand_path(pd.read_csv(os.path.join(dataset_dir, f"test.csv")), dataset_dir)
+        
+        # Apply quick test / debug mode (方案 1: 快速验证模式)
+        original_size = len(test_df)
+        if args.debug:
+            test_df = test_df.head(5)
+            print(f"\n🔍 DEBUG MODE: Processing only first 5 images (out of {original_size})\n")
+        elif args.quick_test is not None:
+            test_df = test_df.head(args.quick_test)
+            print(f"\n🔍 QUICK TEST MODE: Processing only first {args.quick_test} images (out of {original_size})\n")
+        
+        if dataset_name == "SBU-shadow":
+            eval_metrics = ["ber"]
+        else:
+            eval_metrics = ["iou", "dice"]  # Evaluate both IoU and DICE
+
+        # Attach predicted bbox prompts if requested
+        if args.bbox_prompt_source == "predict" and (args.bbox_preds_csv or bbox_predictor):
+            test_df = attach_pred_boxes(test_df)
+
+        res = predictor.evaluate(test_df, metrics=eval_metrics)
+        print(f"Evaluation results for test dataset {dataset_name}: ", res)
+        f.write(f"Evaluation results for test dataset {dataset_name}: {res} \n")
+    elif dataset_name in ["polyp", "camo_sem_seg"]:
+        if dataset_name == "polyp":
+            test_datasets = ["CVC-ClinicDB", "Kvasir"]
+        elif dataset_name == "camo_sem_seg":
+            test_datasets = ["CAMO"]
+        else:
+            raise ValueError(f"Unknown dataset name: {dataset_name}.")
+        for per_dataset in test_datasets:
+            test_df = expand_path(pd.read_csv(os.path.join(dataset_dir, f"test_{per_dataset}.csv")), dataset_dir)
+            
+            # Apply quick test / debug mode (方案 1: 快速验证模式)
+            original_size = len(test_df)
+            if args.debug:
+                test_df = test_df.head(5)
+                print(f"\n🔍 DEBUG MODE: Processing only first 5 images (out of {original_size}) for {per_dataset}\n")
+            elif args.quick_test is not None:
+                test_df = test_df.head(args.quick_test)
+                print(f"\n🔍 QUICK TEST MODE: Processing only first {args.quick_test} images (out of {original_size}) for {per_dataset}\n")
+            
+            if args.bbox_prompt_source == "predict" and (args.bbox_preds_csv or bbox_predictor):
+                test_df = attach_pred_boxes(test_df)
+
+            res = predictor.evaluate(test_df, metrics=["sm", "fm", "em", "mae"])
+            print(f"Evaluation results for test dataset {per_dataset}: ", res)
+            f.write(f"Evaluation results for test dataset {per_dataset}: {res} \n")
+    else:
+        raise ValueError(f"Unknown dataset name: {dataset_name}.")
+
+    f.close()
+
+```
+
+已修复：在 `--resume_from` 续训时，如果旧 checkpoint 的 config 里缺少新增的 `adapter_gspo_amplification_factor` / `gspo_lora_attention_amplification_factor`，会在加载后自动补默认值，避免 KeyError。请重新运行你的命令即可。路径：`examples/automm/Conv-LoRA/run_semantic_segmentation.py` 已更新并通过 linter。
 

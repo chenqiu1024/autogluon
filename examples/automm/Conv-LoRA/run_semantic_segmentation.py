@@ -322,6 +322,18 @@ if __name__ == "__main__":
         if args.resume_from:
             print(f"[Resume] Loading predictor from: {args.resume_from}")
             predictor = MultiModalPredictor.load(args.resume_from)
+            # Ensure newly added config fields exist when resuming from older checkpoints
+            try:
+                cfg = predictor._learner._config
+                if "model" in cfg and "sam" in cfg.model:
+                    sam_cfg = cfg.model.sam
+                    if "adapter_gspo_amplification_factor" not in sam_cfg:
+                        sam_cfg.adapter_gspo_amplification_factor = 4.0
+                    if "gspo_lora_attention_amplification_factor" not in sam_cfg:
+                        sam_cfg.gspo_lora_attention_amplification_factor = 4.0
+            except Exception:
+                # fallback: ignore if structure unexpected; overrides will still try
+                pass
             # ensure new hyperparameters are applied on resume
             predictor._config = None  # force re-merge config with new hyperparameters
             predictor.fit(train_data=train_df, tuning_data=val_df, hyperparameters=hyperparameters, seed=args.seed)
