@@ -73,6 +73,12 @@ if __name__ == "__main__":
         help="The effective batch size. If batch_size > per_gpu_batch_size * num_gpus, gradient accumulation would be used.",
     )
     parser.add_argument("--eval", action="store_true")
+    parser.add_argument(
+        "--resume_from",
+        type=str,
+        default=None,
+        help="Path to a saved MultiModalPredictor (e.g., outputs/.../AutogluonModels/ag-YYYYMMDD_HHMMSS) to resume training.",
+    )
     
     # GSPO parameters
     parser.add_argument("--gspo_enable", action="store_true", help="Enable GSPO (Group Sequence Policy Optimization) training")
@@ -312,58 +318,65 @@ if __name__ == "__main__":
 
     if args.eval:  # load a checkpoint for evaluation
         predictor = MultiModalPredictor.load(args.ckpt_path)
-    else:  # training
-        predictor = MultiModalPredictor(
-            problem_type="semantic_segmentation",
-            validation_metric=validation_metric,
-            eval_metric=validation_metric,
-            hyperparameters=hyperparameters,
-            label="label",
-        )
-
-        # Configure training-time box prompt mixing
-        predictor._learner._train_box_prompt_cfg = {
-            "mode": args.train_box_prompt_mode,
-            "p_no": args.train_box_prob_no_prompt,
-            "p_gt": args.train_box_prob_gt,
-            "p_noisy": args.train_box_prob_noisy,
-            "noise_frac": args.train_box_noise_frac,
-        }
-
-        # Setup bbox predictor for training if mode=predict
-        if args.train_box_prompt_mode == "predict":
-            if not args.train_bbox_model_ckpt:
-                raise ValueError("train_box_prompt_mode=predict requires --train_bbox_model_ckpt.")
-            train_bbox_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            train_bbox_predictor = BBoxPromptPredictor(
-                ckpt_path=args.train_bbox_model_ckpt,
-                device=train_bbox_device,
-                image_size=args.train_bbox_model_image_size,
-            )
-            predictor._learner._train_bbox_predictor = train_bbox_predictor
-            print(f"\n[Info] Training-time bbox predictor loaded from: {args.train_bbox_model_ckpt}")
-            print(f"       Input size: {args.train_bbox_model_image_size}\n")
-
-        # 打印当前实验的模型保存目录，便于后续通过 AutogluonModels 路径追溯到具体实验日志
-        try:
-            # MultiModalPredictor 会在内部根据时间戳生成类似 AutogluonModels/ag-YYYYMMDD_HHMMSS 的目录
-            model_path = predictor.path
-        except AttributeError:
-            # 兼容极端情况：如果未来接口变化，没有 path 属性，则显式提示
-            model_path = None
-
-        if model_path is not None:
-            print("\n========================================")
-            print("Training MultiModalPredictor")
-            print(f"  Task        : {dataset_name}")
-            print(f"  Save path   : {model_path}")
-            print("  (You can use this directory name to link back to the training log.)")
-            print("========================================\n")
+    else:  # training / resume training
+        if args.resume_from:
+            print(f"[Resume] Loading predictor from: {args.resume_from}")
+            predictor = MultiModalPredictor.load(args.resume_from)
+            # ensure new hyperparameters are applied on resume
+            predictor._config = None  # force re-merge config with new hyperparameters
+            predictor.fit(train_data=train_df, tuning_data=val_df, hyperparameters=hyperparameters, seed=args.seed)
         else:
-            print("\n[Warning] MultiModalPredictor has no 'path' attribute. "
-                  "Model save directory cannot be printed.\n")
+            predictor = MultiModalPredictor(
+                problem_type="semantic_segmentation",
+                validation_metric=validation_metric,
+                eval_metric=validation_metric,
+                hyperparameters=hyperparameters,
+                label="label",
+            )
 
-        predictor.fit(train_data=train_df, tuning_data=val_df, seed=args.seed)
+            # Configure training-time box prompt mixing
+            predictor._learner._train_box_prompt_cfg = {
+                "mode": args.train_box_prompt_mode,
+                "p_no": args.train_box_prob_no_prompt,
+                "p_gt": args.train_box_prob_gt,
+                "p_noisy": args.train_box_prob_noisy,
+                "noise_frac": args.train_box_noise_frac,
+            }
+
+            # Setup bbox predictor for training if mode=predict
+            if args.train_box_prompt_mode == "predict":
+                if not args.train_bbox_model_ckpt:
+                    raise ValueError("train_box_prompt_mode=predict requires --train_bbox_model_ckpt.")
+                train_bbox_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+                train_bbox_predictor = BBoxPromptPredictor(
+                    ckpt_path=args.train_bbox_model_ckpt,
+                    device=train_bbox_device,
+                    image_size=args.train_bbox_model_image_size,
+                )
+                predictor._learner._train_bbox_predictor = train_bbox_predictor
+                print(f"\n[Info] Training-time bbox predictor loaded from: {args.train_bbox_model_ckpt}")
+                print(f"       Input size: {args.train_bbox_model_image_size}\n")
+
+            # 打印当前实验的模型保存目录，便于后续通过 AutogluonModels 路径追溯到具体实验日志
+            try:
+                # MultiModalPredictor 会在内部根据时间戳生成类似 AutogluonModels/ag-YYYYMMDD_HHMMSS 的目录
+                model_path = predictor.path
+            except AttributeError:
+                # 兼容极端情况：如果未来接口变化，没有 path 属性，则显式提示
+                model_path = None
+
+            if model_path is not None:
+                print("\n========================================")
+                print("Training MultiModalPredictor")
+                print(f"  Task        : {dataset_name}")
+                print(f"  Save path   : {model_path}")
+                print("  (You can use this directory name to link back to the training log.)")
+                print("========================================\n")
+            else:
+                print("\n[Warning] MultiModalPredictor has no 'path' attribute. "
+                      "Model save directory cannot be printed.\n")
+
+            predictor.fit(train_data=train_df, tuning_data=val_df, seed=args.seed)
 
     # Enable TTA if requested
     if args.tta_enable:
