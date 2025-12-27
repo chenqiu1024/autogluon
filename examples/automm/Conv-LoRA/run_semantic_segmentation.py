@@ -100,84 +100,8 @@ if __name__ == "__main__":
     # Allow switching SAM backbone to MedSAM or other checkpoints
     if args.sam_checkpoint:
         hyperparameters["model.sam.checkpoint_name"] = args.sam_checkpoint
-    
-    # GSPO configuration
-    if args.gspo_enable:
-        print(f"Enabling GSPO with group_size={args.gspo_group_size}, warmup_epochs={args.gspo_warmup_epochs}")
-        hyperparameters.update({
-            "optim.lora.gspo_enabled": True,
-            "optim.lora.gspo_group_size": args.gspo_group_size,
-            "optim.lora.gspo_quality_momentum": args.gspo_quality_momentum,
-            "optim.lora.gspo_warmup_epochs": args.gspo_warmup_epochs,
-            "optim.lora.gspo_contrastive_weight": args.gspo_contrastive_weight,
-            # GSPO reward / loss shaping
-            "optim.gspo.lambda_smooth": args.lambda_smooth,
-            "optim.gspo.lambda_boundary": args.lambda_boundary,
-            "optim.gspo.w_boundary": args.w_boundary,
-            "optim.gspo.w_smooth": args.w_smooth,
-            "optim.gspo.w_thin": args.w_thin,
-        })
-
-    # Adapter configuration
-    if args.adapter_enable:
-        print(f"Enabling Standard Encoder Adapters with dim={args.adapter_dim}")
-        hyperparameters.update({
-            "model.sam.adapter_enabled": True,
-            "model.sam.adapter_dim": args.adapter_dim,
-        })
-        
-        # GSPO-Adapter extension configuration (Phase 1-2)
-        if args.gspo_adapter_enable:
-            if not args.gspo_enable:
-                print("Warning: --gspo_adapter_enable requires --gspo_enable. Enabling GSPO automatically.")
-                args.gspo_enable = True
-            print(f"Enabling GSPO-Adapter extension with momentum={args.gspo_adapter_momentum}, amplification_factor={args.gspo_adapter_amplification_factor}")
-            hyperparameters.update({
-                "optim.gspo.adapter_enabled": True,
-                "optim.gspo.adapter_momentum": args.gspo_adapter_momentum,
-                "model.sam.adapter_gspo_enabled": True,
-                "model.sam.adapter_gspo_momentum": args.gspo_adapter_momentum,
-                "model.sam.adapter_gspo_amplification_factor": args.gspo_adapter_amplification_factor,
-            })
-            # Pass scale adaptation to model config
-            if args.gspo_adapter_scale_adaptation:
-                print("Enabling GSPO-Adapter scale adaptation (Phase 2)")
-                hyperparameters.update({
-                    "optim.gspo.adapter_scale_adaptation": True,
-                    "model.sam.adapter_gspo_scale_adaptation": True,
-                })
-    
-    # Decoder Attention LoRA configuration
-    if args.decoder_attn_lora_enable:
-        gspo_lora_info = ""
-        if args.gspo_lora_attention_enable:
-            gspo_lora_info = f", GSPO enabled (momentum={args.gspo_lora_attention_momentum}"
-            if args.gspo_lora_attention_scale_adaptation:
-                gspo_lora_info += ", scale_adaptation=True"
-            gspo_lora_info += ")"
-        print(f"Enabling Decoder Attention LoRA: r={args.decoder_attn_lora_r}, "
-              f"alpha={args.decoder_attn_lora_alpha}, dropout={args.decoder_attn_lora_dropout}{gspo_lora_info}")
-        hyperparameters.update({
-            "model.sam.decoder_attention_lora_r": args.decoder_attn_lora_r,
-            "model.sam.decoder_attention_lora_alpha": args.decoder_attn_lora_alpha,
-            "model.sam.decoder_attention_lora_dropout": args.decoder_attn_lora_dropout,
-        })
-        
-        # GSPO-LoRA on Attention configuration (NEW)
-        if args.gspo_lora_attention_enable:
-            hyperparameters.update({
-                "model.sam.gspo_lora_attention_enabled": True,
-                "model.sam.gspo_lora_attention_momentum": args.gspo_lora_attention_momentum,
-                "model.sam.gspo_lora_attention_scale_adaptation": args.gspo_lora_attention_scale_adaptation,
-                "model.sam.gspo_lora_attention_amplification_factor": args.gspo_lora_attention_amplification_factor,
-            })
-        
-    # Decoder Adapter configuration
-    if args.decoder_adapter_enable:
-        print(f"Enabling Decoder MLP-Adapters with dim={args.decoder_adapter_dim}")
         hyperparameters.update({
             "model.sam.decoder_adapter_enabled": True,
-            "model.sam.decoder_adapter_dim": args.decoder_adapter_dim,
         })
 
     if args.eval:  # load a checkpoint for evaluation
