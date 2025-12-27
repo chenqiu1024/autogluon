@@ -249,6 +249,7 @@ model:
 
   sam:
     checkpoint_name: "facebook/sam-vit-huge"
+    backend: "hf"  # hf: Transformers SamModel; sa: segment_anything backend
     image_norm: "imagenet"
     data_types:
       - "semantic_segmentation_img"

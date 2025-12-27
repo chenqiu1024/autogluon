@@ -65,6 +65,13 @@ if __name__ == "__main__":
         default="facebook/sam-vit-huge",
         help="SAM/MedSAM checkpoint name or local path (e.g., bowanglab/medsam-vit-huge).",
     )
+    parser.add_argument(
+        "--sam_backend",
+        type=str,
+        default="hf",
+        choices=["hf", "sa"],
+        help="Select SAM backend: hf (Transformers SamModel) or sa (segment_anything). Default: hf.",
+    )
     parser.add_argument("--per_gpu_batch_size", type=int, default=1, help="The batch size for each GPU.")
     parser.add_argument(
         "--batch_size",
@@ -231,6 +238,7 @@ if __name__ == "__main__":
             "optim.lr": lr,
             "env.per_gpu_batch_size": args.per_gpu_batch_size,
             "env.batch_size": args.batch_size,
+            "model.sam.backend": args.sam_backend,
         }
     )
     # Allow switching SAM backbone to MedSAM or other checkpoints

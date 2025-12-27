@@ -1549,6 +1549,7 @@ def create_model(
             frozen_layers=model_config.frozen_layers,
             num_mask_tokens=model_config.num_mask_tokens,
             image_norm=model_config.image_norm,
+            backend=getattr(model_config, "backend", "hf"),
         )
     elif model_name.lower().startswith(META_TRANSFORMER):
         from .meta_transformer import MetaTransformer

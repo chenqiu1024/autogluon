@@ -272,6 +272,7 @@ class SAMForSemanticSegmentation(nn.Module):
         frozen_layers: Optional[list] = None,
         num_mask_tokens: int = 1,
         image_norm: Optional[str] = None,
+        backend: str = "hf",
         adapter_enabled: bool = False,
         adapter_dim: int = 64,
         adapter_gspo_enabled: bool = False,
@@ -331,6 +332,7 @@ class SAMForSemanticSegmentation(nn.Module):
         super().__init__()
         self.prefix = prefix
         self.pretrained = pretrained
+        self.backend = backend
         self.checkpoint_name = checkpoint_name
         self.num_classes = num_classes
         self.frozen_layers = frozen_layers
@@ -411,37 +413,33 @@ class SAMForSemanticSegmentation(nn.Module):
         self.output_moe_loss = False
 
     def _load_checkpoint(self, checkpoint_name):
+        if self.backend == "sa":
+            raise NotImplementedError(
+                "segment_anything backend is not yet integrated with Conv-LoRA/Adapter/GSPO. "
+                "Please use --sam_backend hf (default)."
+            )
+        # HF backend (default, backward compatible)
         if self.pretrained:
-            # Load configuration and inject decoder attention LoRA parameters
             try:
                 config = SamConfig.from_pretrained(checkpoint_name, local_files_only=True)
-            except:
+            except Exception:
                 config = SamConfig.from_pretrained(checkpoint_name)
-            
-            # Propagate decoder adapter settings into mask decoder config (if present)
             if hasattr(config, "mask_decoder_config") and config.mask_decoder_config is not None:
                 config.mask_decoder_config.decoder_adapter_enabled = self.decoder_adapter_enabled
                 config.mask_decoder_config.decoder_adapter_dim = self.decoder_adapter_dim
-
-            # Inject LoRA parameters into mask decoder config
             config.mask_decoder_config.decoder_attention_lora_r = self.decoder_attention_lora_r
             config.mask_decoder_config.decoder_attention_lora_alpha = self.decoder_attention_lora_alpha
             config.mask_decoder_config.decoder_attention_lora_dropout = self.decoder_attention_lora_dropout
-            
-            # Inject GSPO-LoRA parameters into mask decoder config (NEW)
             config.mask_decoder_config.gspo_lora_enabled = self.gspo_lora_attention_enabled
             config.mask_decoder_config.gspo_lora_momentum = self.gspo_lora_attention_momentum
             config.mask_decoder_config.gspo_lora_scale_adaptation = self.gspo_lora_attention_scale_adaptation
             config.mask_decoder_config.gspo_lora_amplification_factor = self.gspo_lora_attention_amplification_factor
-            
-            # Try to load from local cache first to avoid network issues
             try:
                 self.model = SamModel.from_pretrained(checkpoint_name, config=config, local_files_only=True)
                 logger.info(f"Loaded model from local cache: {checkpoint_name}")
-            except Exception as e:
+            except Exception:
                 logger.info(f"Local cache not found, downloading from Hugging Face: {checkpoint_name}")
                 self.model = SamModel.from_pretrained(checkpoint_name, config=config)
-            
             if self.decoder_attention_lora_r > 0:
                 gspo_info = ""
                 if self.gspo_lora_attention_enabled:
@@ -449,19 +447,18 @@ class SAMForSemanticSegmentation(nn.Module):
                     if self.gspo_lora_attention_scale_adaptation:
                         gspo_info += ", scale_adaptation=True"
                     gspo_info += ")"
-                logger.info(f"Decoder Attention LoRA enabled: r={self.decoder_attention_lora_r}, "
-                          f"alpha={self.decoder_attention_lora_alpha}, dropout={self.decoder_attention_lora_dropout}{gspo_info}")
+                logger.info(
+                    f"Decoder Attention LoRA enabled: r={self.decoder_attention_lora_r}, "
+                    f"alpha={self.decoder_attention_lora_alpha}, dropout={self.decoder_attention_lora_dropout}{gspo_info}"
+                )
         else:
             config = SamConfig(name_or_path=checkpoint_name)
             if hasattr(config, "mask_decoder_config") and config.mask_decoder_config is not None:
                 config.mask_decoder_config.decoder_adapter_enabled = self.decoder_adapter_enabled
                 config.mask_decoder_config.decoder_adapter_dim = self.decoder_adapter_dim
-
             config.mask_decoder_config.decoder_attention_lora_r = self.decoder_attention_lora_r
             config.mask_decoder_config.decoder_attention_lora_alpha = self.decoder_attention_lora_alpha
             config.mask_decoder_config.decoder_attention_lora_dropout = self.decoder_attention_lora_dropout
-            
-            # GSPO-LoRA parameters (NEW)
             config.mask_decoder_config.gspo_lora_enabled = self.gspo_lora_attention_enabled
             config.mask_decoder_config.gspo_lora_momentum = self.gspo_lora_attention_momentum
             config.mask_decoder_config.gspo_lora_scale_adaptation = self.gspo_lora_attention_scale_adaptation
