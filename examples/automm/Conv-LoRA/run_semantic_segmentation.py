@@ -97,8 +97,6 @@ if __name__ == "__main__":
             "env.batch_size": args.batch_size,
         }
     )
-<<<<<<< HEAD
-=======
     # Allow switching SAM backbone to MedSAM or other checkpoints
     if args.sam_checkpoint:
         hyperparameters["model.sam.checkpoint_name"] = args.sam_checkpoint
@@ -181,7 +179,6 @@ if __name__ == "__main__":
             "model.sam.decoder_adapter_enabled": True,
             "model.sam.decoder_adapter_dim": args.decoder_adapter_dim,
         })
->>>>>>> d7a55d6c (MedSAM substitute)
 
     if args.eval:  # load a checkpoint for evaluation
         predictor = MultiModalPredictor.load(args.ckpt_path)
