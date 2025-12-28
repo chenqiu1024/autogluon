@@ -64,6 +64,13 @@ if __name__ == "__main__":
         help="The effective batch size. If batch_size > per_gpu_batch_size * num_gpus, gradient accumulation would be used.",
     )
     parser.add_argument("--eval", action="store_true")
+    parser.add_argument(
+        "--backend",
+        type=str,
+        default="sam",
+        choices=["sam", "nnunet"],
+        help="选择语义分割后端：sam（默认）或 nnunet（ResEnc UNet）。",
+    )
     args = parser.parse_args()
 
     dataset_name = args.task
@@ -91,6 +98,18 @@ if __name__ == "__main__":
             "env.batch_size": args.batch_size,
         }
     )
+
+    # 选择模型后端
+    if args.backend == "nnunet":
+        hyperparameters.update(
+            {
+                "model.names": ["nnunet"],
+                "model.nnunet.image_size": 512,
+                "model.nnunet.image_norm": "imagenet",
+            }
+        )
+    else:
+        hyperparameters.update({"model.names": ["sam"]})
 
     if args.eval:  # load a checkpoint for evaluation
         predictor = MultiModalPredictor.load(args.ckpt_path)

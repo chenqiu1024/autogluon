@@ -48,6 +48,7 @@ from ..constants import (
     PEFT_ADDITIVE_STRATEGIES,
     REGRESSION,
     SAM,
+    NNUNET,
     SEMANTIC_MASK,
     SEMANTIC_SEGMENTATION,
     SEMANTIC_SEGMENTATION_IMG,
@@ -56,7 +57,7 @@ from ..constants import (
     TEXT_NER,
     TIMM_IMAGE,
 )
-from .adaptation_layers import ConvLoRALinear, IA3Linear, IA3LoRALinear, LoRALinear
+from .adaptation_layers import ConvLoRAConv2d, ConvLoRALinear, IA3Linear, IA3LoRALinear, LoRALinear
 
 logger = logging.getLogger(__name__)
 
@@ -582,15 +583,72 @@ def inject_adaptation_to_linear_layer(
         if not module_filter or any(re.match(filter_module, m_name) for filter_module in module_filter):
             for c_name, layer in dict(module.named_children()).items():
                 if not filter or any(re.match(filter_layer, c_name) for filter_layer in filter):
-                    assert isinstance(
-                        layer, nn.Linear
-                    ), f"LoRA can only be applied to torch.nn.Linear, but {layer} is {type(layer)}."
+                    # 对非 Linear 直接跳过（让 conv-only 网络也能使用 peft=conv_lora，通过 Conv2d 注入生效）
+                    if not isinstance(layer, nn.Linear):
+                        continue
                     adaptation_layer = create_adaptation(peft, layer, lora_r, lora_alpha, **kwargs)
                     adaptation_layer.weight = layer.weight
                     adaptation_layer.bias = layer.bias
                     setattr(module, c_name, adaptation_layer)
 
     return model  # return model to enable method chaining
+
+
+def inject_adaptation_to_conv2d_layer(
+    model: nn.Module,
+    peft: str,
+    lora_r: int = None,
+    lora_alpha: int = None,
+    filter: Optional[List[str]] = None,
+    module_filter: Optional[List[str]] = None,
+    extra_trainable_params: Optional[List[str]] = None,
+    **kwargs,
+) -> nn.Module:
+    """
+    将 LoRA/Conv-LoRA 注入到 Conv2d（用于 nnU-Net 等卷积网络）。
+
+    约定：
+    - 仅对 `torch.nn.Conv2d` 生效
+    - 目前 `peft` 仅支持 `conv_lora`（其它策略未来可扩展）
+    - 注入后原卷积权重被冻结，新增参数以 `lora_*` 命名，便于 `get_peft_param_names` 选择可训练参数
+    """
+    if peft is None:
+        return model
+    if "conv_lora" not in peft:
+        # 当前只扩展 conv_lora 到 Conv2d，其它 PEFT 保持原逻辑（linear-only）
+        return model
+
+    for m_name, module in dict(model.named_modules()).items():
+        if extra_trainable_params and any(re.match(filter_layer, m_name) for filter_layer in extra_trainable_params):
+            continue
+        if hasattr(model, "frozen_layers") and any(re.search(filter_layer, m_name) for filter_layer in model.frozen_layers):
+            continue
+        if not module_filter or any(re.match(filter_module, m_name) for filter_module in module_filter):
+            for c_name, layer in dict(module.named_children()).items():
+                if not filter or any(re.match(filter_layer, c_name) for filter_layer in filter):
+                    if not isinstance(layer, nn.Conv2d):
+                        continue
+                    adaptation_layer = ConvLoRAConv2d(
+                        in_channels=layer.in_channels,
+                        out_channels=layer.out_channels,
+                        kernel_size=layer.kernel_size,
+                        stride=layer.stride,
+                        padding=layer.padding,
+                        dilation=layer.dilation,
+                        groups=layer.groups,
+                        bias=layer.bias is not None,
+                        padding_mode=layer.padding_mode,
+                        r=lora_r,
+                        lora_alpha=lora_alpha,
+                        merge_weights=False,
+                        conv_lora_expert_num=kwargs["conv_lora_expert_num"],
+                    )
+                    # 复用原参数对象（weight/bias），确保 state_dict 兼容且冻结生效
+                    adaptation_layer.weight = layer.weight
+                    adaptation_layer.bias = layer.bias
+                    setattr(module, c_name, adaptation_layer)
+
+    return model
 
 
 def get_model_head(model: nn.Module):
@@ -1547,6 +1605,21 @@ def create_model(
             num_mask_tokens=model_config.num_mask_tokens,
             image_norm=model_config.image_norm,
         )
+    elif model_name.lower().startswith(NNUNET):
+        from .nnunet import ResEncUNetForSemanticSegmentation
+
+        model = ResEncUNetForSemanticSegmentation(
+            prefix=model_name,
+            num_classes=num_classes,
+            image_size=model_config.image_size,
+            image_norm=model_config.image_norm,
+            pretrained=pretrained,
+            n_stages=model_config.n_stages,
+            features_per_stage=tuple(model_config.features_per_stage),
+            n_blocks_per_stage=tuple(model_config.n_blocks_per_stage),
+            n_conv_per_stage_decoder=tuple(model_config.n_conv_per_stage_decoder),
+            deep_supervision=model_config.deep_supervision,
+        )
     elif model_name.lower().startswith(META_TRANSFORMER):
         from .meta_transformer import MetaTransformer
 
@@ -1683,7 +1756,19 @@ def apply_peft_adaptation(model: nn.Module, config: DictConfig) -> nn.Module:
         A DictConfig object. The optimization config should be accessible by "config.optimization".
     """
     if config.optim.peft in PEFT_ADDITIVE_STRATEGIES:
+        # 先注入 Linear（现有逻辑，SAM/Transformer 用）
         model = inject_adaptation_to_linear_layer(
+            model=model,
+            peft=config.optim.peft,
+            lora_r=config.optim.lora.r,
+            lora_alpha=config.optim.lora.alpha,
+            module_filter=config.optim.lora.module_filter,
+            filter=config.optim.lora.filter,
+            extra_trainable_params=config.optim.extra_trainable_params,
+            conv_lora_expert_num=config.optim.lora.conv_lora_expert_num,
+        )
+        # 再注入 Conv2d（新增逻辑，nnU-Net 等卷积网络用）
+        model = inject_adaptation_to_conv2d_layer(
             model=model,
             peft=config.optim.peft,
             lora_r=config.optim.lora.r,

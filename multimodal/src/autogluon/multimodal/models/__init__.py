@@ -17,6 +17,7 @@ from .mmocr_text_recognition import MMOCRAutoModelForTextRecognition
 from .ner_text import HFAutoModelForNER
 from .numerical_mlp import NumericalMLP
 from .sam import SAMForSemanticSegmentation
+from .nnunet import ResEncUNetForSemanticSegmentation
 from .t_few import TFewModel
 from .timm_image import TimmAutoModelForImagePrediction
 from .utils import (

@@ -308,6 +308,7 @@ DOCUMENT_TRANSFORMER = "document_transformer"
 HF_MODELS = (HF_TEXT, T_FEW, CLIP, NER_TEXT, DOCUMENT_TRANSFORMER)
 MMLAB_MODELS = (MMDET_IMAGE, MMOCR_TEXT_DET, MMOCR_TEXT_RECOG)
 SAM = "sam"
+NNUNET = "nnunet"
 META_TRANSFORMER = "meta_transformer"
 
 # matcher loss type

@@ -603,6 +603,157 @@ class LoRAConv2d(nn.Conv2d, LoRALayer):
         return nn.Conv2d.forward(self, x)
 
 
+class ConvLoRAConv2d(nn.Conv2d, LoRALayer):
+    """
+    Conv-LoRA for Conv2d.
+
+    设计目标：把现有 `ConvLoRALinear` 的 “低秩 + MoE-Conv(upsample_ratio 专家) + moe_loss” 思路迁移到 Conv2d，
+    用于卷积网络（如 nnU-Net/ResEnc UNet）的 PEFT。
+
+    - 冻结原始 Conv2d 权重 (self.weight)。
+    - 低秩分支：x -> (1x1 conv, stride=原stride) -> MoEConv(r通道) -> (1x1 conv) -> add to base output。
+    - MoE gating：GAP + 线性门控，top-1，带 load balancing loss（与 ConvLoRALinear 相同形式）。
+
+    备注：当前仅支持 groups==1（nnU-Net 默认即如此）。
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size,
+        stride=1,
+        padding=0,
+        dilation=1,
+        groups=1,
+        bias: bool = True,
+        padding_mode: str = "zeros",
+        device=None,
+        dtype=None,
+        r: int = 0,
+        lora_alpha: int = 1,
+        lora_dropout: float = 0.0,
+        merge_weights: bool = False,
+        conv_lora_expert_num: Optional[int] = None,
+    ):
+        nn.Conv2d.__init__(
+            self,
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=padding,
+            dilation=dilation,
+            groups=groups,
+            bias=bias,
+            padding_mode=padding_mode,
+            device=device,
+            dtype=dtype,
+        )
+        LoRALayer.__init__(self, r=r, lora_alpha=lora_alpha, lora_dropout=lora_dropout, merge_weights=merge_weights)
+
+        if groups != 1:
+            raise NotImplementedError("ConvLoRAConv2d 暂不支持 groups!=1 的卷积层。")
+
+        self.scaling = self.lora_alpha / self.r if self.r > 0 else 1.0
+        self.moe_loss = None
+
+        if self.r > 0:
+            if conv_lora_expert_num is None or conv_lora_expert_num <= 0:
+                raise ValueError("conv_lora_expert_num 必须为正整数")
+
+            # 低秩 1x1 “A”：用参数矩阵实现（等价于 1x1 conv），stride 使用原 stride 以对齐输出分辨率
+            self.lora_A = nn.Parameter(torch.zeros((self.r, in_channels)))
+            # 低秩 1x1 “B”
+            self.lora_B = nn.Parameter(torch.zeros((out_channels, self.r)))
+
+            # 冻结原始权重
+            self.weight.requires_grad = False
+            if self.bias is not None:
+                self.bias.requires_grad = False
+
+            # MoE-Conv（与 ConvLoRALinear 保持一致：不同 upsample_ratio 的专家）
+            topk = 1
+            self.lora_moe_gating = MoEGate(M=conv_lora_expert_num, d=self.r, K=topk)
+            self.lora_moe_experts = nn.ModuleList([])
+            self.upsample_ratios = list(range(1, conv_lora_expert_num + 1))
+            for upsample_ratio in self.upsample_ratios:
+                expert = nn.Conv2d(in_channels=self.r, out_channels=self.r, kernel_size=3, stride=1, padding=1, bias=True)
+                expert.bias.data.zero_()
+                self.lora_moe_experts.append(nn.Sequential(expert, nn.GELU()))
+            self.num_experts = conv_lora_expert_num
+            self.multiply_by_gates = False
+
+            self.reset_parameters()
+
+    def reset_parameters(self):
+        nn.Conv2d.reset_parameters(self)
+        if hasattr(self, "lora_A"):
+            nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
+            nn.init.zeros_(self.lora_B)
+
+    def _conv1x1_from_A(self) -> torch.Tensor:
+        # [r, in] -> [r, in, 1, 1]
+        return self.lora_A.view(self.r, self.in_channels, 1, 1)
+
+    def _conv1x1_from_B(self) -> torch.Tensor:
+        # [out, r] -> [out, r, 1, 1]
+        return self.lora_B.view(self.out_channels, self.r, 1, 1)
+
+    def forward(self, x: torch.Tensor):
+        # base conv
+        result = nn.Conv2d.forward(self, x)
+        if self.r <= 0:
+            self.moe_loss = None
+            return result
+
+        # low-rank branch: down-proj (stride aligns output resolution)
+        lora_in = self.lora_dropout(x)
+        lora_res = F.conv2d(
+            lora_in,
+            self._conv1x1_from_A(),
+            bias=None,
+            stride=self.stride,
+            padding=0,
+            dilation=1,
+            groups=1,
+        )
+
+        # MoEConv on low-rank features
+        gates, moe_loss = self.lora_moe_gating(lora_res)
+        dispatcher = SparseDispatcher(self.num_experts, gates)
+        expert_inputs = dispatcher.dispatch(lora_res)
+        expert_outputs = []
+        H, W = lora_res.shape[-2:]
+        for i in range(self.num_experts):
+            if len(expert_inputs[i]) == 0:
+                continue
+            upsample_ratio = self.upsample_ratios[i]
+            cur = expert_inputs[i]
+            if upsample_ratio != 1:
+                cur = F.interpolate(cur, scale_factor=upsample_ratio, mode="bicubic")
+            cur = self.lora_moe_experts[i](cur)
+            if upsample_ratio != 1:
+                cur = F.interpolate(cur, size=(int(H), int(W)), mode="bicubic")
+            expert_outputs.append(cur)
+        temp = dispatcher.combine(expert_outputs, multiply_by_gates=self.multiply_by_gates)
+        lora_res = lora_res + temp
+
+        # up-proj
+        delta = F.conv2d(
+            lora_res,
+            self._conv1x1_from_B(),
+            bias=None,
+            stride=1,
+            padding=0,
+            dilation=1,
+            groups=1,
+        )
+
+        self.moe_loss = moe_loss
+        return result + delta * self.scaling
+
+
 class ConvLoRALinear(nn.Linear, LoRALayer):
     """
     Conv-LoRA incorporated in Linear Layer. Weights of linear layer are set to be frozen per default.
