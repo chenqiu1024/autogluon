@@ -1780,6 +1780,25 @@ def apply_peft_adaptation(model: nn.Module, config: DictConfig) -> nn.Module:
         )
         model.name_to_id = model.get_layer_ids()  # Need to update name to id dictionary.
 
+        # 如果是 conv_lora，显式只训练 LoRA/MoE 相关参数，其余冻结，避免出现“全冻结/0 可训练参数”或反向传播无梯度
+        if config.optim.peft == "conv_lora":
+            trainable_patterns = (
+                r".*lora_.*",  # lora_A / lora_B
+                r".*lora_moe_.*",  # gating/experts容器的命名
+                r".*w_gate.*",
+                r".*w_noise.*",
+            )
+            for name, param in model.named_parameters():
+                if any(re.match(pat, name) for pat in trainable_patterns):
+                    param.requires_grad = True
+                else:
+                    param.requires_grad = False
+            # 更新 name_to_id：trainable 设为 0，其余设为 1，便于 layerwise lr 不再把可训练参数意外冻结
+            name_to_id = {}
+            for name, param in model.named_parameters():
+                name_to_id[name] = 0 if param.requires_grad else 1
+            model.name_to_id = name_to_id
+
     return model
 
 

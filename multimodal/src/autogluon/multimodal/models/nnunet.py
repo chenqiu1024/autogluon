@@ -46,6 +46,8 @@ class ResEncUNetForSemanticSegmentation(nn.Module):
         self.num_classes = num_classes
         self.image_size = image_size
         self.image_mean, self.image_std = image_mean_std(image_norm)
+        # name_to_id 用于 layerwise lr 等插件；简单全部设 0
+        self.name_to_id = {n: 0 for n, _ in self.named_parameters()}
 
         from dynamic_network_architectures.architectures.unet import ResidualEncoderUNet
 
