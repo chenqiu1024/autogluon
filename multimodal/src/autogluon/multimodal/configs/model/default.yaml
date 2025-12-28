@@ -269,6 +269,16 @@ model:
       - "semantic_segmentation_img"
     image_norm: "imagenet"
     image_size: 512
+    train_transforms:
+      - "random_horizontal_flip"
+    val_transforms:
+      - "resize_to_square"
+    img_transforms:
+      - "resize_to_square"
+    gt_transforms:
+      - "resize_gt_to_square"
+    max_img_num_per_col: 1
+    ignore_label: 255
     # ResEnc UNet
     n_stages: 7
     features_per_stage: [32, 64, 128, 256, 512, 512, 512]

@@ -1,5 +1,5 @@
 # NnUNet ISIC2017 图像分割指南
-_Exported on 12/27/2025 at 22:50:50 PST from Cursor (2.2.44)_
+_Exported on 12/27/2025 at 23:29:49 PST from Cursor (2.2.44)_
 
 ---
 
@@ -10894,4 +10894,586 @@ if __name__ == "__main__":
 - 训练一开始会打印：**权重/日志保存路径**
 
 如果你希望把 **Dice 也作为 early-stopping 的 validation_metric**（而不是仍用 IoU），我也可以再加一个 `--val_metric {iou,dice}` 开关。
+
+---
+
+**User**
+
+是的，我希望“先跑一个 nnUNet(ResEnc) 不加 Conv‑LoRA 的纯基线”
+
+---
+
+**Cursor**
+
+我会在 `run_semantic_segmentation.py` 里加一个开关（例如 `--peft none|conv_lora`），让你可以同一套脚手架直接跑 **nnunet 纯基线（无 Conv‑LoRA）** 或 **nnunet+Conv‑LoRA**。实现上就是：当 `--peft none` 时不设置 `optim.peft`，并不注入任何 LoRA 参数。随后我会做一次快速 smoke（只创建 predictor 不训练）确保不报错。
+
+```python
+import argparse
+import os
+
+import pandas as pd
+
+from autogluon.multimodal import MultiModalPredictor
+
+
+def get_default_training_setting(dataset_name):
+    validation_metric = "iou"
+    loss = "structure_loss"
+    max_epoch = 30
+    lr = 1e-4
+
+    if dataset_name == "SBU-shadow":
+        validation_metric = "ber"
+        loss = "balanced_bce"
+        max_epoch = 10
+
+    elif dataset_name == "polyp":
+        validation_metric = "sm"
+
+    elif dataset_name == "camo_sem_seg":
+        validation_metric = "sm"
+        max_epoch = 20
+
+    elif dataset_name == "road_segmentation":
+        validation_metric = "iou"
+        max_epoch = 20
+        lr = 3e-4
+
+    elif dataset_name == "leaf_disease_segmentation":
+        validation_metric = "iou"
+        lr = 3e-4
+
+    return validation_metric, loss, max_epoch, lr
+
+
+def expand_path(df, dataset_dir):
+    for col in ["image", "label"]:
+        df[col] = df[col].apply(lambda ele: os.path.join(dataset_dir, ele))
+    return df
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="This script support converting voc format xmls to coco format json")
+    parser.add_argument(
+        "--task",
+        type=str,
+        default="leaf_disease_segmentation",
+        choices=["polyp", "leaf_disease_segmentation", "camo_sem_seg", "isic2017", "road_segmentation", "SBU-shadow"],
+    )
+    parser.add_argument("--seed", type=int, default=42686693)
+    parser.add_argument("--rank", type=int, default=3)
+    parser.add_argument("--expert_num", type=int, default=8)
+    parser.add_argument("--num_gpus", type=int, default=1)
+    parser.add_argument("--output_dir", type=str, default="outputs")
+    parser.add_argument("--ckpt_path", type=str, default="outputs", help="Checkpoint path.")
+    parser.add_argument("--per_gpu_batch_size", type=int, default=1, help="The batch size for each GPU.")
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=4,
+        help="The effective batch size. If batch_size > per_gpu_batch_size * num_gpus, gradient accumulation would be used.",
+    )
+    parser.add_argument("--eval", action="store_true")
+    parser.add_argument(
+        "--backend",
+        type=str,
+        default="sam",
+        choices=["sam", "nnunet"],
+        help="选择语义分割后端：sam（默认）或 nnunet（ResEnc UNet）。",
+    )
+    parser.add_argument(
+        "--peft",
+        type=str,
+        default="conv_lora",
+        choices=["conv_lora", "none"],
+        help="是否启用 PEFT：conv_lora（默认）或 none（纯基线，不加 Conv-LoRA）。",
+    )
+    args = parser.parse_args()
+
+    dataset_name = args.task
+    dataset_dir = os.path.join(f"datasets/{dataset_name}", dataset_name)
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    # prepare dataframes
+    train_df = expand_path(pd.read_csv(os.path.join(dataset_dir, f"train.csv")), dataset_dir)
+    val_df = expand_path(pd.read_csv(os.path.join(dataset_dir, f"val.csv")), dataset_dir)
+
+    # get the validation metric
+    validation_metric, loss, max_epoch, lr = get_default_training_setting(dataset_name)
+
+    hyperparameters = {
+        "env.num_gpus": args.num_gpus,
+        "optim.loss_func": loss,
+        "optim.max_epochs": max_epoch,
+        "optim.lr": lr,
+        "env.per_gpu_batch_size": args.per_gpu_batch_size,
+        "env.batch_size": args.batch_size,
+    }
+
+    if args.peft == "conv_lora":
+        hyperparameters.update(
+            {
+                "optim.peft": "conv_lora",
+                "optim.lora.r": args.rank,
+                "optim.lora.conv_lora_expert_num": args.expert_num,
+            }
+        )
+    else:
+        # 纯基线：不注入任何 LoRA/Conv-LoRA
+        hyperparameters.update({"optim.peft": None})
+
+    # 选择模型后端
+    if args.backend == "nnunet":
+        hyperparameters.update(
+            {
+                "model.names": ["nnunet"],
+                "model.nnunet.image_size": 512,
+                "model.nnunet.image_norm": "imagenet",
+            }
+        )
+    else:
+        hyperparameters.update({"model.names": ["sam"]})
+
+    if args.eval:  # load a checkpoint for evaluation
+        predictor = MultiModalPredictor.load(args.ckpt_path)
+    else:  # training
+        predictor = MultiModalPredictor(
+            problem_type="semantic_segmentation",
+            validation_metric=validation_metric,
+            eval_metric=validation_metric,
+            hyperparameters=hyperparameters,
+            label="label",
+            path=args.output_dir,
+        )
+        print(f"[INFO] backend={args.backend}, peft={args.peft}")
+        print(f"[INFO] AutoGluon 模型权重/日志将保存至: {predictor.path}")
+        predictor.fit(train_data=train_df, tuning_data=val_df, seed=args.seed)
+
+    # evaluation
+    metric_file = os.path.join(args.output_dir, "metrics.txt")
+    f = open(metric_file, "a")
+    if dataset_name in ["isic2017", "SBU-shadow", "road_segmentation", "leaf_disease_segmentation"]:
+        test_df = expand_path(pd.read_csv(os.path.join(dataset_dir, f"test.csv")), dataset_dir)
+        if dataset_name == "SBU-shadow":
+            eval_metrics = ["ber"]
+        else:
+            eval_metrics = ["iou", "dice"]
+
+        res = predictor.evaluate(test_df, metrics=eval_metrics)
+        print(f"Evaluation results for test dataset {dataset_name}: ", res)
+        f.write(f"Evaluation results for test dataset {dataset_name}: {res} \n")
+    elif dataset_name in ["polyp", "camo_sem_seg"]:
+        if dataset_name == "polyp":
+            test_datasets = ["CVC-ClinicDB", "Kvasir"]
+        elif dataset_name == "camo_sem_seg":
+            test_datasets = ["CAMO"]
+        else:
+            raise ValueError(f"Unknown dataset name: {dataset_name}.")
+        for per_dataset in test_datasets:
+            test_df = expand_path(pd.read_csv(os.path.join(dataset_dir, f"test_{per_dataset}.csv")), dataset_dir)
+            res = predictor.evaluate(test_df, metrics=["sm", "fm", "em", "mae"])
+            print(f"Evaluation results for test dataset {per_dataset}: ", res)
+            f.write(f"Evaluation results for test dataset {per_dataset}: {res} \n")
+    else:
+        raise ValueError(f"Unknown dataset name: {dataset_name}.")
+
+    f.close()
+
+```
+
+已支持“**nnUNet(ResEnc) 纯基线（不加 Conv‑LoRA）**”。
+
+### 怎么跑纯基线
+在 `Conv-LoRA` 示例目录里加 `--peft none` 即可：
+
+```bash
+cd /root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA
+/root/autodl-tmp/envs/conv-lora/bin/python run_semantic_segmentation.py \
+  --task isic2017 --backend nnunet --peft none
+```
+
+### 跑 Conv‑LoRA 版本（对照）
+```bash
+cd /root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA
+/root/autodl-tmp/envs/conv-lora/bin/python run_semantic_segmentation.py \
+  --task isic2017 --backend nnunet --peft conv_lora --rank 4 --expert_num 4
+```
+
+### 额外说明
+- 运行开始会打印：`[INFO] backend=..., peft=...` 以及权重保存目录（`output_dir`）。
+- 训练过程中每个 epoch 的进度/控制台会包含 `val_iou`、`val_dice`；训练结束会在 test 上输出 `iou` 和 `dice`。
+
+```shellscript
+cd /root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA
+/root/autodl-tmp/envs/conv-lora/bin/python run_semantic_segmentation.py \
+  --task isic2017 --backend nnunet --peft none
+```
+
+```shellscript
+cd /root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA
+/root/autodl-tmp/envs/conv-lora/bin/python run_semantic_segmentation.py \
+  --task isic2017 --backend nnunet --peft conv_lora --rank 4 --expert_num 4
+```
+
+---
+
+**User**
+
+执行`nohup python run_semantic_segmentation.py \
+  --task isic2017 --backend nnunet --peft none \
+  --output_dir outputs/nnunet_baseline-251227 \
+> outputs/nnunet_baseline-251227.log 2>&1 &`报错了，错误日志在examples/automm/Conv-LoRA/outputs/nnunet_baseline-251227.log。仔细分析原因并解决它
+
+---
+
+**Cursor**
+
+```yaml
+model:
+  names:
+  categorical_mlp:
+    hidden_size: 64
+    activation: "leaky_relu"
+    num_layers: 1
+    dropout: 0.1
+    normalization: "layer_norm"
+    data_types:
+      - "categorical"
+
+  numerical_mlp:
+    hidden_size: 128
+    activation: "leaky_relu"
+    num_layers: 1
+    dropout: 0.1
+    normalization: "layer_norm"
+    token_dim: 8
+    embedding_arch:
+    data_types:
+      - "numerical"
+    merge: "concat"
+
+  hf_text:
+    checkpoint_name: "google/electra-base-discriminator"
+    gradient_checkpointing: False
+    pooling_mode: 'cls'  # The pooling mode, can be 'cls' or 'mean'
+    data_types:
+      - "text"
+    tokenizer_name: "hf_auto"
+    use_fast: True  # Use a fast Rust-based tokenizer if it is supported for a given model. If a fast tokenizer is not available for a given model, a normal Python-based tokenizer is returned instead.
+    max_text_len: 512  # If None or <=0, then use the max length of pretrained models.
+    insert_sep: True
+    low_cpu_mem_usage: False
+    text_segment_num: 2
+    stochastic_chunk: False
+    text_aug_detect_length: 10                # We perform text augmentation only if a text has more than text_detection_length words. It is used to differentiate text columns versus tabular columns that are treated as text.
+    text_trivial_aug_maxscale: 0.1            # augmentation magnitude randomly drawn from [0, text_trivial_aug_maxscale]
+    text_train_augment_types:        # specify augmentation space manually, will randomly select one from the following and identity
+      # - "random_swap(0.05)"          # less than 0.1 based on eda paper
+      # - "random_delete(0.05)"        # less than 0.1 based on eda paper
+      # - "syn_replacement(0.05)"  # less than 0.1 based on eda paper
+      # - "insert_punc(0.05)"
+
+  ner_text:
+    checkpoint_name: "bert-base-cased"
+    max_text_len: 512
+    gradient_checkpointing: False
+    low_cpu_mem_usage: False
+    data_types:
+      - "text_ner"
+    tokenizer_name: "hf_auto"
+    insert_sep: False
+    text_segment_num: 2
+    stochastic_chunk: False
+    special_tags: 
+      - X # CLS, SEP, and non-first tokens of a word will be labelled as X
+      - O # Outside of a named entity
+
+  document_transformer:
+    checkpoint_name: "microsoft/layoutlmv3-base" # document foundation models
+    gradient_checkpointing: False
+    pooling_mode: 'cls'  # The pooling mode, can be 'cls' or 'mean'
+    data_types:
+      - "document"
+    train_transforms:
+      - "resize_shorter_side"
+      - "center_crop"
+    val_transforms:
+      - "resize_shorter_side"
+      - "center_crop"
+    image_norm: "imagenet"
+    image_size: 224
+    tokenizer_name: "hf_auto"
+    max_text_len: 512  # If None or <=0, then use the max length of pretrained models.
+    insert_sep: True
+    low_cpu_mem_usage: False
+    text_segment_num: 2
+    stochastic_chunk: False
+    text_aug_detect_length: 10                # We perform text augmentation only if a text has more than text_detection_length words. It is used to differentiate text columns versus tabular columns that are treated as text.
+    text_trivial_aug_maxscale: 0.0            # augmentation magnitude randomly drawn from [0, text_trivial_aug_maxscale]
+
+  t_few:
+    checkpoint_name: "t5-small" #"bigscience/T0_3B"
+    gradient_checkpointing: False
+    data_types:
+      - "text"
+    tokenizer_name: "hf_auto"
+    length_norm: 1.0 # Normalizes length to adjust for length bias in target template
+    unlikely_loss: 1.0 # Adds loss term that lowers probability of incorrect outputs
+    mc_loss: 1.0 # Adds multiple choice cross entropy loss
+    max_text_len: 512  # If None or <=0, then use the max length of pretrained models.
+    text_segment_num: 2
+    insert_sep: True
+    low_cpu_mem_usage: False
+    stochastic_chunk: False
+    text_aug_detect_length: 10                # We perform text augmentation only if a text has more than text_detection_length words. It is used to differentiate text columns versus tabular columns that are treated as text.
+    text_trivial_aug_maxscale: 0.0            # augmentation magnititude randomly drawn from [0, text_trivial_aug_maxscale]
+    text_train_augment_types:
+
+  timm_image:
+    checkpoint_name: "swin_base_patch4_window7_224"
+    mix_choice: "all_logits"
+    data_types:
+      - "image"
+    train_transforms:
+      - "resize_shorter_side"
+      - "center_crop"
+      - "trivial_augment"
+    val_transforms:
+      - "resize_shorter_side"
+      - "center_crop"
+    image_norm: "imagenet"
+    image_size: null
+    image_chan_num: 3
+    use_learnable_image: False
+    max_image_num_per_column: 1
+
+  mmdet_image:
+    checkpoint_name: "yolov3_mobilenetv2_8xb24-320-300e_coco"
+    config_file: ""
+    data_types:
+      - "image"
+    max_img_num_per_col: 1
+    output_bbox_format: "xyxy"  # now support xyxy or xywh, for bbox format details see https://keras.io/api/keras_cv/bounding_box/formats/
+    frozen_layers: null
+    coco_root: null
+
+  mmocr_text_detection:
+    checkpoint_name: "TextSnake"
+    data_types:
+      - "image"
+    train_transforms:
+      - "resize_shorter_side"
+      - "center_crop"
+      - "trivial_augment"
+    val_transforms:
+      - "resize_shorter_side"
+      - "center_crop"
+    image_norm: "imagenet"
+    image_size: 224
+    max_img_num_per_col: 2
+
+  mmocr_text_recognition:
+    checkpoint_name: "ABINet"
+    data_types:
+      - "image"
+    train_transforms:
+      - "resize_shorter_side"
+      - "center_crop"
+      - "trivial_augment"
+    val_transforms:
+      - "resize_shorter_side"
+      - "center_crop"
+    image_norm: "imagenet"
+    image_size: 224
+    max_img_num_per_col: 2
+
+  clip:
+    checkpoint_name: "openai/clip-vit-base-patch32"
+    data_types:
+      - "image"
+      - "text"
+    train_transforms:
+      - "resize_shorter_side"
+      - "center_crop"
+      - "trivial_augment"
+    val_transforms:
+      - "resize_shorter_side"
+      - "center_crop"
+    image_norm: "clip"
+    image_size: 224
+    image_chan_num: 3
+    use_learnable_image: False
+    max_image_num_per_column: 1
+    tokenizer_name: "clip"
+    max_text_len: 77  # The maximum possible length.
+    insert_sep: False
+    text_segment_num: 1
+    stochastic_chunk: False
+    text_aug_detect_length: 10                     # We perform text augmentation only if a text has more than text_detection_length words. It is used to differentiate text columns versus tabular columns that are treated as text.
+    text_trivial_aug_maxscale: 0.0                      # scale randomly drawn from [0, text_trivial_aug_maxscale]
+    text_train_augment_types:        # specify augmentation space manually, will randomly select one from the following and identity
+      # - "random_swap(0.05)"          # less than 0.1 based on eda paper
+      # - "random_delete(0.05)"        # less than 0.1 based on eda paper
+      # - "syn_replacement(0.05)"  # less than 0.1 based on eda paper
+      # - "insert_punc(0.05)"
+
+  fusion_mlp:
+    aux_loss_weight:
+    adapt_in_features: "max"
+    hidden_sizes:
+      - 128
+    activation: "leaky_relu"
+    dropout: 0.1
+    normalization: "layer_norm"
+    data_types:
+
+  fusion_ner:
+    weight:
+    adapt_in_features: "max"
+    hidden_sizes:
+      - 128
+    activation: "leaky_relu"
+    drop_rate: 0.1
+    normalization: "layer_norm"
+    data_types:
+
+  fusion_transformer:
+    aux_loss_weight:
+    hidden_size: 192
+    num_blocks: 3
+    attention_num_heads: 8
+    adapt_in_features: "max"
+    attention_dropout: 0.2
+    residual_dropout: 0.0
+    ffn_dropout: 0.1
+    ffn_hidden_size: 192
+    normalization: "layer_norm"
+    ffn_activation: "geglu"
+    head_activation: "relu"
+    data_types:
+    additive_attention: False # Whether to use lightweight additive attention, can be True, False or "auto"
+    share_qv_weights: False # Whether to share weight for query and value, can be True, False or "auto"
+
+  ft_transformer:
+    data_types:
+      - "categorical"
+      - "numerical"
+    embedding_arch:
+      - 'linear'
+    token_dim: 192
+    hidden_size: 192
+    num_blocks: 3
+    attention_num_heads: 8
+    attention_dropout: 0.2
+    residual_dropout: 0.0
+    ffn_dropout: 0.1
+    ffn_hidden_size: 192
+    ffn_activation: "geglu"
+    head_activation: "relu"
+    normalization: "layer_norm"
+    merge: "concat"
+    requires_all_dtypes: False
+    additive_attention: False # Whether to use lightweight additive attention, can be True, False or "auto"
+    share_qv_weights: False # Whether to share weight for query and value, can be True, False or "auto"
+    pooling_mode: "cls"
+    checkpoint_name: null
+
+  sam:
+    checkpoint_name: "facebook/sam-vit-huge"
+    image_norm: "imagenet"
+    data_types:
+      - "semantic_segmentation_img"
+    train_transforms:
+      - "random_horizontal_flip"
+    val_transforms: []
+    img_transforms:
+      - "resize_to_square"
+    gt_transforms:
+      - "resize_gt_to_square"
+    max_img_num_per_col: 1
+    frozen_layers: ["mask_decoder.iou_prediction_head", "prompt_encoder"]
+    num_mask_tokens: 1
+    ignore_label: 255
+
+  nnunet:
+    data_types:
+      - "semantic_segmentation_img"
+    image_norm: "imagenet"
+    image_size: 512
+    train_transforms:
+      - "random_horizontal_flip"
+    val_transforms:
+      - "resize_to_square"
+    img_transforms:
+      - "resize_to_square"
+    gt_transforms:
+      - "resize_gt_to_square"
+    max_img_num_per_col: 1
+    ignore_label: 255
+    # ResEnc UNet
+    n_stages: 7
+    features_per_stage: [32, 64, 128, 256, 512, 512, 512]
+    n_blocks_per_stage: [1, 3, 4, 6, 6, 6, 6]
+    n_conv_per_stage_decoder: [1, 1, 1, 1, 1, 1]
+    deep_supervision: False
+
+  meta_transformer:
+    data_types:
+      - "image"
+      - "text"
+      - "categorical"
+      - "numerical"
+    checkpoint_path: null
+    model_version: "base"
+    requires_all_dtypes: False
+    train_transforms:
+      - "resize_shorter_side"
+      - "center_crop"
+      - "trivial_augment"
+    val_transforms:
+      - "resize_shorter_side"
+      - "center_crop"
+    image_norm: "imagenet"
+    image_size: 224
+    image_chan_num: 3
+    use_learnable_image: False
+    max_image_num_per_column: 1
+    tokenizer_name: "hf_auto"
+    max_text_len: 512  # If None or <=0, then use the max length of pretrained models.
+    insert_sep: True
+    text_segment_num: 2
+    stochastic_chunk: False
+    text_aug_detect_length: 10     # We perform text augmentation only if a text has more than text_detection_length words. It is used to differentiate text columns versus tabular columns that are treated as text.
+    text_trivial_aug_maxscale: 0.1  # augmentation magnitude randomly drawn from [0, text_trivial_aug_maxscale]
+    text_train_augment_types:
+    merge: "concat"
+
+```
+
+日志报错是因为 `model.nnunet` 配置缺少 `img_transforms` 等必需字段，数据处理器在构建时找不到该键。
+
+我已在默认配置里为 `nnunet` 补齐与 SAM 同类的图像/GT变换和必要字段（见 `configs/model/default.yaml`）：
+- `img_transforms: [resize_to_square]`
+- `gt_transforms: [resize_gt_to_square]`
+- `train_transforms: [random_horizontal_flip]`
+- `val_transforms: [resize_to_square]`
+- 以及 `max_img_num_per_col: 1`, `ignore_label: 255`
+
+请重新运行纯基线命令（无需改参数）：
+```bash
+cd /root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA
+nohup /root/autodl-tmp/envs/conv-lora/bin/python run_semantic_segmentation.py \
+  --task isic2017 --backend nnunet --peft none \
+  --output_dir outputs/nnunet_baseline-251227 \
+> outputs/nnunet_baseline-251227.log 2>&1 &
+```
+若仍有问题，我再继续排查。
+
+```shellscript
+cd /root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA
+nohup /root/autodl-tmp/envs/conv-lora/bin/python run_semantic_segmentation.py \
+  --task isic2017 --backend nnunet --peft none \
+  --output_dir outputs/nnunet_baseline-251227 \
+> outputs/nnunet_baseline-251227.log 2>&1 &
+```
 
