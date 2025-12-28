@@ -71,6 +71,13 @@ if __name__ == "__main__":
         choices=["sam", "nnunet"],
         help="选择语义分割后端：sam（默认）或 nnunet（ResEnc UNet）。",
     )
+    parser.add_argument(
+        "--peft",
+        type=str,
+        default="conv_lora",
+        choices=["conv_lora", "none"],
+        help="是否启用 PEFT：conv_lora（默认）或 none（纯基线，不加 Conv-LoRA）。",
+    )
     args = parser.parse_args()
 
     dataset_name = args.task
@@ -84,20 +91,26 @@ if __name__ == "__main__":
     # get the validation metric
     validation_metric, loss, max_epoch, lr = get_default_training_setting(dataset_name)
 
-    hyperparameters = {}
-    hyperparameters.update(
-        {
-            "optim.lora.r": args.rank,
-            "optim.peft": "conv_lora",
-            "optim.lora.conv_lora_expert_num": args.expert_num,
-            "env.num_gpus": args.num_gpus,
-            "optim.loss_func": loss,
-            "optim.max_epochs": max_epoch,
-            "optim.lr": lr,
-            "env.per_gpu_batch_size": args.per_gpu_batch_size,
-            "env.batch_size": args.batch_size,
-        }
-    )
+    hyperparameters = {
+        "env.num_gpus": args.num_gpus,
+        "optim.loss_func": loss,
+        "optim.max_epochs": max_epoch,
+        "optim.lr": lr,
+        "env.per_gpu_batch_size": args.per_gpu_batch_size,
+        "env.batch_size": args.batch_size,
+    }
+
+    if args.peft == "conv_lora":
+        hyperparameters.update(
+            {
+                "optim.peft": "conv_lora",
+                "optim.lora.r": args.rank,
+                "optim.lora.conv_lora_expert_num": args.expert_num,
+            }
+        )
+    else:
+        # 纯基线：不注入任何 LoRA/Conv-LoRA
+        hyperparameters.update({"optim.peft": None})
 
     # 选择模型后端
     if args.backend == "nnunet":
@@ -122,6 +135,7 @@ if __name__ == "__main__":
             label="label",
             path=args.output_dir,
         )
+        print(f"[INFO] backend={args.backend}, peft={args.peft}")
         print(f"[INFO] AutoGluon 模型权重/日志将保存至: {predictor.path}")
         predictor.fit(train_data=train_df, tuning_data=val_df, seed=args.seed)
 
