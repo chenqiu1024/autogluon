@@ -1540,17 +1540,29 @@ def create_model(
         )
     elif model_name.lower().startswith(SAM):
         from .sam import SAMForSemanticSegmentation
+        from .sam_sa import SAMForSemanticSegmentationSA
 
-        model = SAMForSemanticSegmentation(
-            prefix=model_name,
-            checkpoint_name=model_config.checkpoint_name,
-            num_classes=num_classes,
-            pretrained=pretrained,
-            frozen_layers=model_config.frozen_layers,
-            num_mask_tokens=model_config.num_mask_tokens,
-            image_norm=model_config.image_norm,
-            backend=getattr(model_config, "backend", "hf"),
-        )
+        backend = getattr(model_config, "backend", "hf")
+        if backend == "sa":
+            model = SAMForSemanticSegmentationSA(
+                prefix=model_name,
+                checkpoint_name=model_config.checkpoint_name,
+                num_classes=num_classes,
+                frozen_layers=model_config.frozen_layers,
+                num_mask_tokens=model_config.num_mask_tokens,
+                image_norm=model_config.image_norm,
+            )
+        else:
+            model = SAMForSemanticSegmentation(
+                prefix=model_name,
+                checkpoint_name=model_config.checkpoint_name,
+                num_classes=num_classes,
+                pretrained=pretrained,
+                frozen_layers=model_config.frozen_layers,
+                num_mask_tokens=model_config.num_mask_tokens,
+                image_norm=model_config.image_norm,
+                backend=backend,
+            )
     elif model_name.lower().startswith(META_TRANSFORMER):
         from .meta_transformer import MetaTransformer
 

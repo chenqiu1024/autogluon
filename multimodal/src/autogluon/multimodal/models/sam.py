@@ -9,6 +9,19 @@ from transformers import SamConfig
 from ..constants import CLASS_LABEL, CLASS_LOGITS, COLUMN, IMAGE, IMAGE_VALID_NUM, LABEL, LOGITS, MASK_LABEL, MOE_LOSS
 from .adaptation_layers import ConvLoRALinear, AdapterLayer
 from .custom_hf_models.modeling_sam_for_conv_lora import SamImageSegmentationOutput, SamModel
+# SA backend (segment_anything)
+try:
+    from segment_anything import sam_model_registry as sa_model_registry
+    SA_AVAILABLE = True
+except Exception:
+    SA_AVAILABLE = False
+# SA backend (segment_anything)
+try:
+    from segment_anything import sam_model_registry as sa_model_registry
+    from segment_anything import SamPredictor as _  # noqa: F401
+    SA_AVAILABLE = True
+except Exception:
+    SA_AVAILABLE = False
 from .utils import assign_layer_ids, freeze_model_layers, image_mean_std
 
 logger = logging.getLogger(__name__)
@@ -414,10 +427,25 @@ class SAMForSemanticSegmentation(nn.Module):
 
     def _load_checkpoint(self, checkpoint_name):
         if self.backend == "sa":
-            raise NotImplementedError(
-                "segment_anything backend is not yet integrated with Conv-LoRA/Adapter/GSPO. "
-                "Please use --sam_backend hf (default)."
-            )
+            if not SA_AVAILABLE:
+                raise ImportError(
+                    "segment_anything is not installed. Please install it or use --sam_backend hf."
+                )
+            model_type = "vit_h"
+            lower_name = str(checkpoint_name).lower()
+            if "vit_l" in lower_name:
+                model_type = "vit_l"
+            elif "vit_b" in lower_name:
+                model_type = "vit_b"
+            if model_type not in sa_model_registry:
+                raise ValueError(f"Unsupported model type for SA backend: {model_type}")
+            try:
+                self.model = sa_model_registry[model_type](checkpoint=checkpoint_name)
+                logger.info(f"[SA] Loaded SAM ({model_type}) from {checkpoint_name}")
+            except Exception as e:
+                raise RuntimeError(f"[SA] Failed to load SAM from {checkpoint_name}: {e}") from e
+            # NOTE: no Conv-LoRA/Adapter/GSPO injection yet
+            return
         # HF backend (default, backward compatible)
         if self.pretrained:
             try:
