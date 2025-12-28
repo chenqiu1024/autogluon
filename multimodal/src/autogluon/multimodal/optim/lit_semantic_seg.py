@@ -103,7 +103,7 @@ class SemanticSegmentationLitModule(LitModule):
         if self.model_postprocess_fn:
             output = self.model_postprocess_fn(output)
         # By default, on_step=False and on_epoch=True
-        self.log("val_loss", loss)
+        self.log("val_loss", loss, prog_bar=True)
         if isinstance(self.loss_func, Mask2FormerLoss):
             self._compute_metric_score(
                 metric=self.validation_metric,
@@ -125,4 +125,23 @@ class SemanticSegmentationLitModule(LitModule):
             self.validation_metric,
             on_step=False,
             on_epoch=True,
+            prog_bar=True,
         )
+
+        # 额外记录 Dice（按 epoch 汇总），确保进度条/控制台能看到 val_dice
+        # 仅对二值分割（num_classes==1）启用
+        if getattr(self.model, "num_classes", None) == 1:
+            logits = output[self.model.prefix][LOGITS]
+            label = batch[self.model.label_key]
+            # 兼容 [B, 1, H, W] / [B, H, W]
+            if logits.dim() == 3:
+                logits = logits.unsqueeze(1)
+            if label.dim() == 3:
+                label = label.unsqueeze(1)
+            prob = torch.sigmoid(logits) if (logits.min() < 0 or logits.max() > 1) else logits
+            pred = (prob > 0.5).to(torch.int32)
+            gt = (label > 0.5).to(torch.int32)
+            inter = (pred & gt).sum(dim=(1, 2, 3)).float()
+            denom = pred.sum(dim=(1, 2, 3)).float() + gt.sum(dim=(1, 2, 3)).float()
+            dice = (2 * inter + 1e-6) / (denom + 1e-6)
+            self.log("val_dice", dice.mean(), on_step=False, on_epoch=True, prog_bar=True)

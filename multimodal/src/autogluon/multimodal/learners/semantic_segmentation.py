@@ -15,6 +15,7 @@ from autogluon.core.metrics import Scorer
 from ..constants import LABEL, LOGITS, SEMANTIC_MASK, SEMANTIC_SEGMENTATION_IMG
 from ..optim import SemanticSegmentationLitModule, get_loss_func, get_norm_layer_param_names, get_peft_param_names
 from ..optim.metrics.semantic_seg_metrics import Balanced_Error_Rate_Pred as Balanced_Error_Rate
+from ..optim.metrics.semantic_seg_metrics import Binary_Dice_Pred as Binary_Dice
 from ..optim.metrics.semantic_seg_metrics import Binary_IoU_Pred as Binary_IoU
 from ..optim.metrics.semantic_seg_metrics import COD_METRICS_NAMES_Pred as COD_METRICS_NAMES
 from ..optim.metrics.semantic_seg_metrics import Multiclass_IoU_Pred as Multiclass_IoU
@@ -23,7 +24,7 @@ from .base import BaseLearner
 
 logger = logging.getLogger(__name__)
 
-from ..constants import BER, EM, FM, IOU, MAE, SEMANTIC_SEGMENTATION, SM
+from ..constants import BER, DICE, EM, FM, IOU, MAE, SEMANTIC_SEGMENTATION, SM
 
 
 class SemanticSegmentationLearner(BaseLearner):
@@ -194,6 +195,11 @@ class SemanticSegmentationLearner(BaseLearner):
                 return Balanced_Error_Rate()
             elif metric_name in [SM, EM, FM, MAE]:
                 return COD_METRICS_NAMES[metric_name]
+            elif metric_name == DICE:
+                if num_classes == 1:
+                    return Binary_Dice()
+                else:
+                    raise ValueError("dice 目前仅支持 num_classes==1 的二值分割。")
             elif metric_name == IOU:
                 if num_classes == 1:
                     return Binary_IoU()

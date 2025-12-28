@@ -120,7 +120,9 @@ if __name__ == "__main__":
             eval_metric=validation_metric,
             hyperparameters=hyperparameters,
             label="label",
+            path=args.output_dir,
         )
+        print(f"[INFO] AutoGluon 模型权重/日志将保存至: {predictor.path}")
         predictor.fit(train_data=train_df, tuning_data=val_df, seed=args.seed)
 
     # evaluation
@@ -131,7 +133,7 @@ if __name__ == "__main__":
         if dataset_name == "SBU-shadow":
             eval_metrics = ["ber"]
         else:
-            eval_metrics = ["iou"]
+            eval_metrics = ["iou", "dice"]
 
         res = predictor.evaluate(test_df, metrics=eval_metrics)
         print(f"Evaluation results for test dataset {dataset_name}: ", res)

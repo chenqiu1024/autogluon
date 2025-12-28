@@ -817,6 +817,44 @@ class Binary_IoU_Pred:
         return torch.mean(torch.tensor(res_list))
 
 
+class Binary_Dice_Pred:
+    """
+    Compute Dice for binary semantic segmentation on multiple samples by iterating per sample.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.logits = []
+        self.labels = []
+
+    def update(self, logits, labels):
+        self.logits.append(logits)
+        self.labels.append(labels)
+
+    @staticmethod
+    def _to_prob(x: torch.Tensor) -> torch.Tensor:
+        # 兼容 logits / prob 两种输入
+        if x.min() < 0 or x.max() > 1:
+            return torch.sigmoid(x)
+        return x
+
+    def compute(self):
+        logits = torch.cat(self.logits).cpu()
+        labels = torch.cat(self.labels).cpu()
+
+        res_list = []
+        for logit, label in zip(logits, labels):
+            prob = self._to_prob(logit)
+            pred = (prob > 0.5).to(torch.int32)
+            gt = (label > 0.5).to(torch.int32)
+
+            inter = (pred & gt).sum().float()
+            denom = pred.sum().float() + gt.sum().float()
+            dice = (2 * inter + 1e-6) / (denom + 1e-6)
+            res_list.append(dice)
+        return torch.mean(torch.stack(res_list))
+
+
 class Balanced_Error_Rate_Pred:
     """
     Compute the balanced error rate.

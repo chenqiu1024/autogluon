@@ -1,5 +1,5 @@
 # NnUNet ISIC2017 图像分割指南
-_Exported on 12/27/2025 at 21:22:29 PST from Cursor (2.2.44)_
+_Exported on 12/27/2025 at 22:50:50 PST from Cursor (2.2.44)_
 
 ---
 
@@ -8602,4 +8602,2296 @@ cd /root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA
 /root/autodl-tmp/envs/conv-lora/bin/python run_semantic_segmentation.py \
   --task isic2017 --backend nnunet --rank 4 --expert_num 4
 ```
+
+---
+
+**User**
+
+还有一点请确保在代码中实现：在训练时，控制台输出的进度显示中应包含每个epoch完成后在验证集上的验证性能指标，包括IoU和DICE；在训练完成之后，也应该输出在测试集上做推理评估的性能指标；此外，训练开始时的控制台输出中应包含生成的模型权重文件将被存放在什么位置的信息
+
+---
+
+**Cursor**
+
+计划：我会在 AutoGluon 的语义分割训练循环里增加一个 **按 epoch 汇总的 val_dice**（并确保和现有 val_iou 一起出现在进度条/控制台），同时把 `run_semantic_segmentation.py` 的测试评估改成 **同时输出 IoU + Dice**；最后在训练启动时打印 **模型权重保存目录（predictor.path）**，避免训练完才去翻文件夹。接下来我先定位现有 metric/日志实现位置再动手改代码。
+
+我会先把现有语义分割 IoU 指标是怎么实现/调用的定位出来（`semantic_seg_metrics.py` 里应该已有 Binary_IoU），然后按同样模式补一个 Binary_Dice，并在 Lightning 的 `validation_step` 里把 `val_iou`/`val_dice` 都设置成 `prog_bar=True`，确保每个 epoch 的进度条能看到；最后把 `run_semantic_segmentation.py` 的测试评估 metrics 改为 `["iou","dice"]`，并在训练开始打印 `predictor.path`（权重目录）。
+
+```python
+"""Storing the constants"""
+
+from autogluon.core.metrics import METRICS
+
+# Column/Label Types
+NULL = "null"
+CATEGORICAL = "categorical"
+TEXT = "text"
+TEXT_NER = "text_ner"  # Added for NER text column
+NUMERICAL = "numerical"
+IMAGE_PATH = "image_path"
+IMAGE_BYTEARRAY = "image_bytearray"
+IMAGE_BASE64_STR = "image_base64_str"
+IDENTIFIER = "identifier"
+DOCUMENT = "document"
+DOCUMENT_IMAGE = "document_image"
+DOCUMENT_PDF = "document_pdf"
+
+# Scarcity modes
+FEW_SHOT = "few_shot"
+DEFAULT_SHOT = "default_shot"
+ZERO_SHOT = "zero_shot"
+
+# Problem types
+CLASSIFICATION = "classification"
+BINARY = "binary"
+MULTICLASS = "multiclass"
+REGRESSION = "regression"
+NER = "ner"
+NAMED_ENTITY_RECOGNITION = "named_entity_recognition"
+FEATURE_EXTRACTION = "feature_extraction"
+ZERO_SHOT_IMAGE_CLASSIFICATION = "zero_shot_image_classification"
+OBJECT_DETECTION = "object_detection"
+OCR = "ocr"
+OCR_TEXT_DETECTION = f"{OCR}_text_detection"
+OCR_TEXT_RECOGNITION = f"{OCR}_text_recognition"
+IMAGE_SIMILARITY = "image_similarity"
+TEXT_SIMILARITY = "text_similarity"
+IMAGE_TEXT_SIMILARITY = "image_text_similarity"
+FEW_SHOT_CLASSIFICATION = "few_shot_classification"
+SEMANTIC_SEGMENTATION = "semantic_segmentation"
+
+# Input keys
+IMAGE = "image"
+IMAGE_META = "image_meta"
+IMAGE_VALID_NUM = "image_valid_num"
+LABEL = "label"
+TEXT_TOKEN_IDS = "text_token_ids"
+CHOICES_IDS = "choices_ids"
+TEXT_VALID_LENGTH = "text_valid_length"
+TEXT_SEGMENT_IDS = "text_segment_ids"
+COLUMN = "column"
+ATTENTION_MASK = "attention_mask"
+TOKEN_TYPE_IDS = "token_type_ids"
+PIXEL_VALUES = "pixel_values"
+INPUT_IDS = "input_ids"
+SEMANTIC_SEGMENTATION_IMG = "semantic_segmentation_img"
+SEMANTIC_SEGMENTATION_GT = "semantic_segmentation_gt"
+
+# Output keys
+LOGITS = "logits"
+ORI_LOGITS = "ori_logits"
+AUG_LOGITS = "aug_logits"
+TEMPLATE_LOGITS = "template_logits"
+LM_TARGET = "lm_target"
+LOSS = "loss"
+OUTPUT = "output"
+WEIGHT = "weight"
+FEATURES = "features"
+MULTIMODAL_FEATURES = "multimodal_features"  # used for the adapted multimodal features before the fusion module
+MULTIMODAL_FEATURES_PRE_AUG = "multimodal_features_pre_aug"
+MULTIMODAL_FEATURES_POST_AUG = "multimodal_features_post_aug"
+RAW_FEATURES = "raw_features"
+MASKS = "masks"
+PROBABILITY = "probability"
+COLUMN_FEATURES = "column_features"
+BBOX = "bbox"
+ROIS = "rois"
+SCORE = "score"
+LOGIT_SCALE = "logit_scale"
+VAE_MEAN = "vae_mean"
+VAE_VAR = "vae_var"
+
+# Loss
+MOE_LOSS = "moe_loss"
+
+# Metric for Object Detection
+MAP = "map"
+MEAN_AVERAGE_PRECISION = "mean_average_precision"
+MAP_50 = "map_50"
+MAP_75 = "map_75"
+MAP_SMALL = "map_small"
+MAP_MEDIUM = "map_medium"
+MAP_LARGE = "map_large"
+MAR_1 = "mar_1"
+MAR_10 = "mar_10"
+MAR_100 = "mar_100"
+MAR_SMALL = "mar_small"
+MAR_MEDIUM = "mar_medium"
+MAR_LARGE = "mar_large"
+DETECTION_METRICS = [
+    MAP,
+    MEAN_AVERAGE_PRECISION,
+    MAP_50,
+    MAP_75,
+    MAP_SMALL,
+    MAP_MEDIUM,
+    MAP_LARGE,
+    MAR_1,
+    MAR_10,
+    MAR_100,
+    MAR_SMALL,
+    MAR_MEDIUM,
+    MAR_LARGE,
+]
+
+# Metric
+MAX = "max"
+MIN = "min"
+ACCURACY = "accuracy"
+ACC = "acc"
+OVERALL_ACCURACY = "overall_accuracy"
+RMSE = "rmse"
+ROOT_MEAN_SQUARED_ERROR = "root_mean_squared_error"
+R2 = "r2"
+PEARSONR = "pearsonr"
+SPEARMANR = "spearmanr"
+QUADRATIC_KAPPA = "quadratic_kappa"
+ROC_AUC = "roc_auc"
+AVERAGE_PRECISION = "average_precision"
+LOG_LOSS = "log_loss"
+CROSS_ENTROPY = "cross_entropy"
+COSINE_EMBEDDING_LOSS = "cosine_embedding_loss"
+F1 = "f1"
+OVERALL_F1 = "overall_f1"
+F1_MACRO = "f1_macro"
+F1_MICRO = "f1_micro"
+F1_WEIGHTED = "f1_weighted"
+NER_TOKEN_F1 = "ner_token_f1"
+DIRECT_LOSS = "direct_loss"
+HIT_RATE = "hit_rate"
+NDCG = "ndcg"
+PRECISION = "precision"
+RECALL = "recall"
+MRR = "mrr"
+SM = "sm"
+EM = "em"
+FM = "fm"
+MAE = "mae"
+BER = "ber"
+IOU = "iou"
+DICE = "dice"
+COVERAGE = "coverage"
+RETRIEVAL_METRICS = [NDCG, PRECISION, RECALL, MRR]
+METRIC_MODE_MAP = {
+    ACC: MAX,
+    ACCURACY: MAX,
+    DIRECT_LOSS: MIN,
+    RMSE: MIN,
+    ROOT_MEAN_SQUARED_ERROR: MIN,
+    R2: MAX,
+    QUADRATIC_KAPPA: MAX,
+    ROC_AUC: MAX,
+    LOG_LOSS: MIN,
+    CROSS_ENTROPY: MIN,
+    PEARSONR: MAX,
+    SPEARMANR: MAX,
+    F1: MAX,
+    F1_MACRO: MAX,
+    F1_MICRO: MAX,
+    F1_WEIGHTED: MAX,
+    MAP: MAX,
+    MEAN_AVERAGE_PRECISION: MAX,
+    NER_TOKEN_F1: MAX,
+    OVERALL_F1: MAX,
+    RECALL: MAX,
+    SM: MAX,
+    IOU: MAX,
+    DICE: MAX,
+    BER: MIN,
+    COVERAGE: MAX,
+}
+
+MATCHING_METRICS = {
+    BINARY: [ROC_AUC, ROC_AUC],
+    MULTICLASS: [SPEARMANR, SPEARMANR],
+    REGRESSION: [SPEARMANR, SPEARMANR],
+}
+MATCHING_METRICS_WITHOUT_PROBLEM_TYPE = [RECALL, NDCG]
+
+EVALUATION_METRICS = {
+    # Use evaluation metrics from METRICS for these types
+    BINARY: list(METRICS[BINARY].keys()) + [COVERAGE],
+    MULTICLASS: METRICS[MULTICLASS].keys(),
+    REGRESSION: METRICS[REGRESSION].keys(),
+    OBJECT_DETECTION: DETECTION_METRICS,
+    SEMANTIC_SEGMENTATION: [IOU, DICE, BER, SM],
+    NER: [OVERALL_F1, NER_TOKEN_F1],
+    NAMED_ENTITY_RECOGNITION: [OVERALL_F1, NER_TOKEN_F1],
+    FEW_SHOT_CLASSIFICATION: METRICS[MULTICLASS].keys(),
+}
+
+VALIDATION_METRICS = {
+    problem_type: [metric for metric in metrics if metric in METRIC_MODE_MAP] + [DIRECT_LOSS]
+    for problem_type, metrics in EVALUATION_METRICS.items()
+}
+
+# Training status
+TRAIN = "train"
+VALIDATE = "validate"
+VAL = "val"
+TEST = "test"
+PREDICT = "predict"
+
+# Model sources
+HUGGINGFACE = "huggingface"
+TIMM = "timm"
+MMDET = "mmdet"
+MMOCR = "mmocr"
+
+# Modality keys. may need to update here if new modality keys are added in above.
+ALL_MODALITIES = [IMAGE, TEXT, CATEGORICAL, NUMERICAL, TEXT_NER, DOCUMENT, SEMANTIC_SEGMENTATION_IMG]
+
+# Keys to compute metrics
+Y_PRED = "y_pred"
+Y_PRED_PROB = "y_pred_prob"
+Y_TRUE = "y_true"
+
+# Configuration keys
+MODEL = "model"
+DATA = "data"
+OPTIM = "optim"
+ENV = "env"
+DISTILLER = "distiller"
+MATCHER = "matcher"
+VALID_CONFIG_KEYS = [MODEL, DATA, OPTIM, ENV, DISTILLER, MATCHER]
+
+# Image normalization mean and std. This is only to normalize images for the CLIP model.
+CLIP_IMAGE_MEAN = (0.48145466, 0.4578275, 0.40821073)
+CLIP_IMAGE_STD = (0.26862954, 0.26130258, 0.27577711)
+
+# Logger name
+AUTOMM = "automm"
+
+# environment variables
+AUTOMM_TUTORIAL_MODE = "AUTOMM_TUTORIAL_MODE"
+
+# error try
+GET_ITEM_ERROR_RETRY = 50
+
+# top-k checkpoint average methods
+UNIFORM_SOUP = "uniform_soup"
+GREEDY_SOUP = "greedy_soup"
+BEST = "best"
+
+# efficient finetuning strategies
+NORM_FIT = "norm_fit"
+BIT_FIT = "bit_fit"
+LORA = "lora"
+LORA_BIAS = "lora_bias"
+LORA_NORM = "lora_norm"
+IA3 = "ia3"
+IA3_BIAS = "ia3_bias"
+IA3_NORM = "ia3_norm"
+IA3_LORA = "ia3_lora"
+IA3_LORA_BIAS = "ia3_lora_bias"
+IA3_LORA_NORM = "Ia3_lora_norm"
+CONV_LORA = "conv_lora"
+PEFT_ADDITIVE_STRATEGIES = [
+    LORA,
+    LORA_BIAS,
+    LORA_NORM,
+    IA3,
+    IA3_BIAS,
+    IA3_NORM,
+    IA3_LORA,
+    IA3_LORA_BIAS,
+    IA3_LORA_NORM,
+    CONV_LORA,
+]
+PEFT_NON_ADDITIVE_STRATEGIES = [
+    BIT_FIT,
+    NORM_FIT,
+]
+PEFT_STRATEGIES = list(set(PEFT_ADDITIVE_STRATEGIES) | set(PEFT_NON_ADDITIVE_STRATEGIES))
+
+# DeepSpeed constants
+DEEPSPEED_OFFLOADING = "deepspeed_stage_3_offload"
+DEEPSPEED_STRATEGY = "deepspeed"
+DEEPSPEED_MODULE = "autogluon.multimodal.optim.deepspeed"
+DEEPSPEED_MIN_PL_VERSION = "1.7.1"
+
+# registered model keys. TODO: document how to add new models.
+CLIP = "clip"
+TIMM_IMAGE = "timm_image"
+HF_TEXT = "hf_text"
+T_FEW = "t_few"
+NUMERICAL_MLP = "numerical_mlp"
+CATEGORICAL_MLP = "categorical_mlp"
+FUSION = "fusion"
+FUSION_MLP = f"{FUSION}_mlp"
+FUSION_TRANSFORMER = f"{FUSION}_transformer"
+FT_TRANSFORMER = "ft_transformer"
+FUSION_NER = f"{FUSION}_{NER}"
+MMDET_IMAGE = "mmdet_image"
+MMOCR_TEXT_DET = "mmocr_text_detection"
+MMOCR_TEXT_RECOG = "mmocr_text_recognition"
+NER_TEXT = "ner_text"
+DOCUMENT_TRANSFORMER = "document_transformer"
+HF_MODELS = (HF_TEXT, T_FEW, CLIP, NER_TEXT, DOCUMENT_TRANSFORMER)
+MMLAB_MODELS = (MMDET_IMAGE, MMOCR_TEXT_DET, MMOCR_TEXT_RECOG)
+SAM = "sam"
+NNUNET = "nnunet"
+META_TRANSFORMER = "meta_transformer"
+
+# matcher loss type
+CONTRASTIVE_LOSS = "contrastive_loss"
+MULTI_NEGATIVES_SOFTMAX_LOSS = "multi_negatives_softmax_loss"
+
+# matcher distance type
+COSINE_SIMILARITY = "cosine_similarity"
+
+# matcher miner type
+PAIR_MARGIN_MINER = "pair_margin_miner"
+
+# checkpoints
+RAY_TUNE_CHECKPOINT = "ray_tune_checkpoint.ckpt"
+BEST_K_MODELS_FILE = "best_k_models.yaml"
+LAST_CHECKPOINT = "last.ckpt"
+MODEL_CHECKPOINT = "model.ckpt"
+
+# url
+S3_PREFIX = "s3://"
+SOURCEPROMPT_URL = "https://automl-mm-bench.s3.amazonaws.com/few_shot/templates.zip"
+SOURCEPROMPT_SHA1 = "c25cdf3730ff96ab4859b72e18d46ff117b62bd6"
+
+# ner
+ENTITY_GROUP = "entity_group"
+START_OFFSET = "start"
+END_OFFSET = "end"
+TOKEN_WORD_MAPPING = "token_word_mapping"
+WORD_OFFSETS = "word_offsets"
+NER_RET = "ner_ret"
+NER_ANNOTATION = "ner_annotation"
+
+# matcher
+QUERY = "query"
+RESPONSE = "response"
+QUERY_RESPONSE = f"{QUERY}_{RESPONSE}"
+PAIR = "pair"
+TRIPLET = "triplet"
+
+# mmdet
+XYWH = "xywh"
+XYXY = "xyxy"
+BBOX_FORMATS = [XYWH, XYXY]
+
+# sam (multi-class)
+CLASS_LOGITS = "class_logits"
+MASK_LABEL = "mask_label"
+CLASS_LABEL = "class_label"
+SEMANTIC_MASK = "semantic_mask"
+
+# presets
+DEFAULT = "default"
+HIGH_QUALITY = "high_quality"
+MEDIUM_QUALITY = "medium_quality"
+BEST_QUALITY = "best_quality"
+ALL_MODEL_QUALITIES = [HIGH_QUALITY, MEDIUM_QUALITY, BEST_QUALITY, DEFAULT]
+
+# datasets
+DEFAULT_DATASET = "default_dataset"
+MULTI_IMAGE_MIX_DATASET = "multi_image_mix_dataset"
+
+# strategies
+DDP = "ddp"
+DDP_FIND_UNUSED_PARAMETERS_FALSE = "ddp_find_unused_parameters_false"
+DDP_FIND_UNUSED_PARAMETERS_TRUE = "ddp_find_unused_parameters_true"
+DDP_STRATEGIES = [DDP, DDP_FIND_UNUSED_PARAMETERS_FALSE, DDP_FIND_UNUSED_PARAMETERS_TRUE]
+
+# torch constants
+TORCH_COMPILE_MIN_VERSION = "2.2.0.dev20230908"
+
+```
+
+```python
+# -*- coding: utf-8 -*-
+
+import numpy as np
+import torch
+import torchmetrics
+from scipy.ndimage import convolve
+from scipy.ndimage import distance_transform_edt as bwdist
+
+_EPS = np.spacing(1)  # the different implementation of epsilon (extreme min value) between numpy and matlab
+_TYPE = np.float64
+
+
+def _prepare_data(pred: np.ndarray, gt: np.ndarray) -> tuple:
+    """
+    A numpy-based function for preparing ``pred`` and ``gt``.
+    - for ``pred``, it looks like ``mapminmax(im2double(...))`` of matlab;
+    - ``gt`` will be binarized by 128.
+    :param pred: prediction
+    :param gt: mask
+    :return: pred, gt
+    """
+    gt = gt > 128
+    # im2double, mapminmax
+    pred = pred / 255
+    if pred.max() != pred.min():
+        pred = (pred - pred.min()) / (pred.max() - pred.min())
+    return pred, gt
+
+
+def _get_adaptive_threshold(matrix: np.ndarray, max_value: float = 1) -> float:
+    """
+    Return an adaptive threshold, which is equal to twice the mean of ``matrix``.
+    :param matrix: a data array
+    :param max_value: the upper limit of the threshold
+    :return: min(2 * matrix.mean(), max_value)
+    """
+    return min(2 * matrix.mean(), max_value)
+
+
+class Fmeasure(object):
+    def __init__(self, beta: float = 1.0):
+        """
+        F-measure for SOD.
+        ::
+            @inproceedings{Fmeasure,
+                title={Frequency-tuned salient region detection},
+                author={Achanta, Radhakrishna and Hemami, Sheila and Estrada, Francisco and S{\"u}sstrunk, Sabine},
+                booktitle=CVPR,
+                number={CONF},
+                pages={1597--1604},
+                year={2009}
+            }
+        :param beta: the weight of the precision
+        """
+        self.beta = beta
+        self.precisions = []
+        self.recalls = []
+        self.adaptive_fms = []
+        self.changeable_fms = []
+
+    def step(self, pred: np.ndarray, gt: np.ndarray):
+        pred, gt = _prepare_data(pred, gt)
+
+        adaptive_fm = self.cal_adaptive_fm(pred=pred, gt=gt)
+        self.adaptive_fms.append(adaptive_fm)
+
+        precisions, recalls, changeable_fms = self.cal_pr(pred=pred, gt=gt)
+        self.precisions.append(precisions)
+        self.recalls.append(recalls)
+        self.changeable_fms.append(changeable_fms)
+
+    def cal_adaptive_fm(self, pred: np.ndarray, gt: np.ndarray) -> float:
+        """
+        Calculate the adaptive F-measure.
+        :return: adaptive_fm
+        """
+        # ``np.count_nonzero`` is faster and better
+        adaptive_threshold = _get_adaptive_threshold(pred, max_value=1)
+        binary_predcition = pred >= adaptive_threshold
+        area_intersection = binary_predcition[gt].sum()
+        if area_intersection == 0:
+            adaptive_fm = 0
+        else:
+            pre = area_intersection / np.count_nonzero(binary_predcition)
+            rec = area_intersection / np.count_nonzero(gt)
+            adaptive_fm = (1 + self.beta) * pre * rec / (self.beta * pre + rec)
+        return adaptive_fm
+
+    def cal_pr(self, pred: np.ndarray, gt: np.ndarray) -> tuple:
+        """
+        Calculate the corresponding precision and recall when the threshold changes from 0 to 255.
+        These precisions and recalls can be used to obtain the mean F-measure, maximum F-measure,
+        precision-recall curve and F-measure-threshold curve.
+        For convenience, ``changeable_fms`` is provided here, which can be used directly to obtain
+        the mean F-measure, maximum F-measure and F-measure-threshold curve.
+        :return: precisions, recalls, changeable_fms
+        """
+        pred = (pred * 255).astype(np.uint8)
+        bins = np.linspace(0, 256, 257)
+        fg_hist, _ = np.histogram(pred[gt], bins=bins)
+        bg_hist, _ = np.histogram(pred[~gt], bins=bins)
+
+        fg_w_thrs = np.cumsum(np.flip(fg_hist), axis=0)
+        bg_w_thrs = np.cumsum(np.flip(bg_hist), axis=0)
+
+        TPs = fg_w_thrs
+        Ps = fg_w_thrs + bg_w_thrs
+
+        Ps[Ps == 0] = 1
+        T = max(np.count_nonzero(gt), 1)
+
+        precisions = TPs / Ps
+        recalls = TPs / T
+
+        numerator = (1 + self.beta) * precisions * recalls
+        denominator = np.where(numerator == 0, 1, self.beta * precisions + recalls)
+        changeable_fms = numerator / denominator
+        return precisions, recalls, changeable_fms
+
+    def get_results(self) -> dict:
+        """
+        Return the results about F-measure.
+        :return: dict(fm=dict(adp=adaptive_fm, curve=changeable_fm), pr=dict(p=precision, r=recall))
+        """
+        adaptive_fm = np.mean(np.array(self.adaptive_fms, _TYPE))
+        changeable_fm = np.mean(np.array(self.changeable_fms, dtype=_TYPE), axis=0)
+        precision = np.mean(np.array(self.precisions, dtype=_TYPE), axis=0)  # N, 256
+        recall = np.mean(np.array(self.recalls, dtype=_TYPE), axis=0)  # N, 256
+        return dict(fm=dict(adp=adaptive_fm, curve=changeable_fm), pr=dict(p=precision, r=recall))
+
+
+class MAE_SOD(object):
+    def __init__(self):
+        """
+        MAE(mean absolute error) for SOD.
+        ::
+            @inproceedings{MAE,
+                title={Saliency filters: Contrast based filtering for salient region detection},
+                author={Perazzi, Federico and Kr{\"a}henb{\"u}hl, Philipp and Pritch, Yael and Hornung, Alexander},
+                booktitle=CVPR,
+                pages={733--740},
+                year={2012}
+            }
+        """
+        self.maes = []
+
+    def step(self, pred: np.ndarray, gt: np.ndarray):
+        pred, gt = _prepare_data(pred, gt)
+
+        mae = self.cal_mae(pred, gt)
+        # mae = np.sum(cv2.absdiff(gt.astype(float), pred.astype(float))) / (pred.shape[1] * pred.shape[0])
+        self.maes.append(mae)
+
+    def cal_mae(self, pred: np.ndarray, gt: np.ndarray) -> np.ndarray:
+        """
+        Calculate the mean absolute error.
+        :return: mae
+        """
+        mae = np.mean(np.abs(pred - gt))
+        return mae
+
+    def get_results(self) -> dict:
+        """
+        Return the results about MAE.
+        :return: dict(mae=mae)
+        """
+        mae = np.mean(np.array(self.maes, _TYPE))
+        return dict(mae=mae)
+
+
+class Smeasure(object):
+    def __init__(self, alpha: float = 0.5):
+        """
+        S-measure(Structure-measure) of SOD.
+        ::
+            @inproceedings{Smeasure,
+                title={Structure-measure: A new way to eval foreground maps},
+                author={Fan, Deng-Ping and Cheng, Ming-Ming and Liu, Yun and Li, Tao and Borji, Ali},
+                booktitle=ICCV,
+                pages={4548--4557},
+                year={2017}
+            }
+        :param alpha: the weight for balancing the object score and the region score
+        """
+        self.sms = []
+        self.alpha = alpha
+
+    def step(self, pred: np.ndarray, gt: np.ndarray):
+        pred, gt = _prepare_data(pred=pred, gt=gt)
+
+        sm = self.cal_sm(pred, gt)
+        self.sms.append(sm)
+
+    def cal_sm(self, pred: np.ndarray, gt: np.ndarray) -> float:
+        """
+        Calculate the S-measure.
+        :return: s-measure
+        """
+        y = np.mean(gt)
+        if y == 0:
+            sm = 1 - np.mean(pred)
+        elif y == 1:
+            sm = np.mean(pred)
+        else:
+            sm = self.alpha * self.object(pred, gt) + (1 - self.alpha) * self.region(pred, gt)
+            sm = max(0, sm)
+        return sm
+
+    def object(self, pred: np.ndarray, gt: np.ndarray) -> float:
+        """
+        Calculate the object score.
+        """
+        fg = pred * gt
+        bg = (1 - pred) * (1 - gt)
+        u = np.mean(gt)
+        object_score = u * self.s_object(fg, gt) + (1 - u) * self.s_object(bg, 1 - gt)
+        return object_score
+
+    def s_object(self, pred: np.ndarray, gt: np.ndarray) -> float:
+        x = np.mean(pred[gt == 1])
+        sigma_x = np.std(pred[gt == 1], ddof=1)
+        score = 2 * x / (np.power(x, 2) + 1 + sigma_x + _EPS)
+        return score
+
+    def region(self, pred: np.ndarray, gt: np.ndarray) -> float:
+        """
+        Calculate the region score.
+        """
+        x, y = self.centroid(gt)
+        part_info = self.divide_with_xy(pred, gt, x, y)
+        w1, w2, w3, w4 = part_info["weight"]
+        # assert np.isclose(w1 + w2 + w3 + w4, 1), (w1 + w2 + w3 + w4, pred.mean(), gt.mean())
+
+        pred1, pred2, pred3, pred4 = part_info["pred"]
+        gt1, gt2, gt3, gt4 = part_info["gt"]
+        score1 = self.ssim(pred1, gt1)
+        score2 = self.ssim(pred2, gt2)
+        score3 = self.ssim(pred3, gt3)
+        score4 = self.ssim(pred4, gt4)
+
+        return w1 * score1 + w2 * score2 + w3 * score3 + w4 * score4
+
+    def centroid(self, matrix: np.ndarray) -> tuple:
+        """
+        To ensure consistency with the matlab code, one is added to the centroid coordinate,
+        so there is no need to use the redundant addition operation when dividing the region later,
+        because the sequence generated by ``1:X`` in matlab will contain ``X``.
+        :param matrix: a bool data array
+        :return: the centroid coordinate
+        """
+        h, w = matrix.shape
+        area_object = np.count_nonzero(matrix)
+        if area_object == 0:
+            x = np.round(w / 2)
+            y = np.round(h / 2)
+        else:
+            # More details can be found at: https://www.yuque.com/lart/blog/gpbigm
+            y, x = np.argwhere(matrix).mean(axis=0).round()
+        return int(x) + 1, int(y) + 1
+
+    def divide_with_xy(self, pred: np.ndarray, gt: np.ndarray, x: int, y: int) -> dict:
+        """
+        Use (x,y) to divide the ``pred`` and the ``gt`` into four submatrices, respectively.
+        """
+        h, w = gt.shape
+        area = h * w
+
+        gt_LT = gt[0:y, 0:x]
+        gt_RT = gt[0:y, x:w]
+        gt_LB = gt[y:h, 0:x]
+        gt_RB = gt[y:h, x:w]
+
+        pred_LT = pred[0:y, 0:x]
+        pred_RT = pred[0:y, x:w]
+        pred_LB = pred[y:h, 0:x]
+        pred_RB = pred[y:h, x:w]
+
+        w1 = x * y / area
+        w2 = y * (w - x) / area
+        w3 = (h - y) * x / area
+        w4 = 1 - w1 - w2 - w3
+
+        return dict(
+            gt=(gt_LT, gt_RT, gt_LB, gt_RB),
+            pred=(pred_LT, pred_RT, pred_LB, pred_RB),
+            weight=(w1, w2, w3, w4),
+        )
+
+    def ssim(self, pred: np.ndarray, gt: np.ndarray) -> float:
+        """
+        Calculate the ssim score.
+        """
+        h, w = pred.shape
+        N = h * w
+
+        x = np.mean(pred)
+        y = np.mean(gt)
+
+        sigma_x = np.sum((pred - x) ** 2) / (N - 1)
+        sigma_y = np.sum((gt - y) ** 2) / (N - 1)
+        sigma_xy = np.sum((pred - x) * (gt - y)) / (N - 1)
+
+        alpha = 4 * x * y * sigma_xy
+        beta = (x**2 + y**2) * (sigma_x + sigma_y)
+
+        if alpha != 0:
+            score = alpha / (beta + _EPS)
+        elif alpha == 0 and beta == 0:
+            score = 1
+        else:
+            score = 0
+        return score
+
+    def get_results(self) -> dict:
+        """
+        Return the results about S-measure.
+        :return: dict(sm=sm)
+        """
+        sm = np.mean(np.array(self.sms, dtype=_TYPE))
+        return dict(sm=sm)
+
+
+class Emeasure(object):
+    def __init__(self):
+        """
+        E-measure(Enhanced-alignment Measure) for SOD.
+        More details about the implementation can be found in https://www.yuque.com/lart/blog/lwgt38
+        ::
+            @inproceedings{Emeasure,
+                title="Enhanced-alignment Measure for Binary Foreground Map Evaluation",
+                author="Deng-Ping {Fan} and Cheng {Gong} and Yang {Cao} and Bo {Ren} and Ming-Ming {Cheng} and Ali {Borji}",
+                booktitle=IJCAI,
+                pages="698--704",
+                year={2018}
+            }
+        """
+        self.adaptive_ems = []
+        self.changeable_ems = []
+
+    def step(self, pred: np.ndarray, gt: np.ndarray):
+        pred, gt = _prepare_data(pred=pred, gt=gt)
+
+        self.gt_fg_numel = np.count_nonzero(gt)
+        self.gt_size = gt.shape[0] * gt.shape[1]
+
+        changeable_ems = self.cal_changeable_em(pred, gt)
+        self.changeable_ems.append(changeable_ems)
+        adaptive_em = self.cal_adaptive_em(pred, gt)
+        self.adaptive_ems.append(adaptive_em)
+
+    def cal_adaptive_em(self, pred: np.ndarray, gt: np.ndarray) -> float:
+        """
+        Calculate the adaptive E-measure.
+        :return: adaptive_em
+        """
+        adaptive_threshold = _get_adaptive_threshold(pred, max_value=1)
+        adaptive_em = self.cal_em_with_threshold(pred, gt, threshold=adaptive_threshold)
+        return adaptive_em
+
+    def cal_changeable_em(self, pred: np.ndarray, gt: np.ndarray) -> np.ndarray:
+        """
+        Calculate the changeable E-measure, which can be used to obtain the mean E-measure,
+        the maximum E-measure and the E-measure-threshold curve.
+        :return: changeable_ems
+        """
+        changeable_ems = self.cal_em_with_cumsumhistogram(pred, gt)
+        return changeable_ems
+
+    def cal_em_with_threshold(self, pred: np.ndarray, gt: np.ndarray, threshold: float) -> float:
+        """
+        Calculate the E-measure corresponding to the specific threshold.
+        Variable naming rules within the function:
+        ``[pred attribute(foreground fg, background bg)]_[gt attribute(foreground fg, background bg)]_[meaning]``
+        If only ``pred`` or ``gt`` is considered, another corresponding attribute location is replaced with '``_``'.
+        """
+        binarized_pred = pred >= threshold
+        fg_fg_numel = np.count_nonzero(binarized_pred & gt)
+        fg_bg_numel = np.count_nonzero(binarized_pred & ~gt)
+
+        fg___numel = fg_fg_numel + fg_bg_numel
+        bg___numel = self.gt_size - fg___numel
+
+        if self.gt_fg_numel == 0:
+            enhanced_matrix_sum = bg___numel
+        elif self.gt_fg_numel == self.gt_size:
+            enhanced_matrix_sum = fg___numel
+        else:
+            parts_numel, combinations = self.generate_parts_numel_combinations(
+                fg_fg_numel=fg_fg_numel,
+                fg_bg_numel=fg_bg_numel,
+                pred_fg_numel=fg___numel,
+                pred_bg_numel=bg___numel,
+            )
+
+            results_parts = []
+            for i, (part_numel, combination) in enumerate(zip(parts_numel, combinations)):
+                align_matrix_value = (
+                    2 * (combination[0] * combination[1]) / (combination[0] ** 2 + combination[1] ** 2 + _EPS)
+                )
+                enhanced_matrix_value = (align_matrix_value + 1) ** 2 / 4
+                results_parts.append(enhanced_matrix_value * part_numel)
+            enhanced_matrix_sum = sum(results_parts)
+
+        em = enhanced_matrix_sum / (self.gt_size - 1 + _EPS)
+        return em
+
+    def cal_em_with_cumsumhistogram(self, pred: np.ndarray, gt: np.ndarray) -> np.ndarray:
+        """
+        Calculate the E-measure corresponding to the threshold that varies from 0 to 255..
+        Variable naming rules within the function:
+        ``[pred attribute(foreground fg, background bg)]_[gt attribute(foreground fg, background bg)]_[meaning]``
+        If only ``pred`` or ``gt`` is considered, another corresponding attribute location is replaced with '``_``'.
+        """
+        pred = (pred * 255).astype(np.uint8)
+        bins = np.linspace(0, 256, 257)
+        fg_fg_hist, _ = np.histogram(pred[gt], bins=bins)
+        fg_bg_hist, _ = np.histogram(pred[~gt], bins=bins)
+        fg_fg_numel_w_thrs = np.cumsum(np.flip(fg_fg_hist), axis=0)
+        fg_bg_numel_w_thrs = np.cumsum(np.flip(fg_bg_hist), axis=0)
+
+        fg___numel_w_thrs = fg_fg_numel_w_thrs + fg_bg_numel_w_thrs
+        bg___numel_w_thrs = self.gt_size - fg___numel_w_thrs
+
+        if self.gt_fg_numel == 0:
+            enhanced_matrix_sum = bg___numel_w_thrs
+        elif self.gt_fg_numel == self.gt_size:
+            enhanced_matrix_sum = fg___numel_w_thrs
+        else:
+            parts_numel_w_thrs, combinations = self.generate_parts_numel_combinations(
+                fg_fg_numel=fg_fg_numel_w_thrs,
+                fg_bg_numel=fg_bg_numel_w_thrs,
+                pred_fg_numel=fg___numel_w_thrs,
+                pred_bg_numel=bg___numel_w_thrs,
+            )
+
+            results_parts = np.empty(shape=(4, 256), dtype=np.float64)
+            for i, (part_numel, combination) in enumerate(zip(parts_numel_w_thrs, combinations)):
+                align_matrix_value = (
+                    2 * (combination[0] * combination[1]) / (combination[0] ** 2 + combination[1] ** 2 + _EPS)
+                )
+                enhanced_matrix_value = (align_matrix_value + 1) ** 2 / 4
+                results_parts[i] = enhanced_matrix_value * part_numel
+            enhanced_matrix_sum = results_parts.sum(axis=0)
+
+        em = enhanced_matrix_sum / (self.gt_size - 1 + _EPS)
+        return em
+
+    def generate_parts_numel_combinations(self, fg_fg_numel, fg_bg_numel, pred_fg_numel, pred_bg_numel):
+        bg_fg_numel = self.gt_fg_numel - fg_fg_numel
+        bg_bg_numel = pred_bg_numel - bg_fg_numel
+
+        parts_numel = [fg_fg_numel, fg_bg_numel, bg_fg_numel, bg_bg_numel]
+
+        mean_pred_value = pred_fg_numel / self.gt_size
+        mean_gt_value = self.gt_fg_numel / self.gt_size
+
+        demeaned_pred_fg_value = 1 - mean_pred_value
+        demeaned_pred_bg_value = 0 - mean_pred_value
+        demeaned_gt_fg_value = 1 - mean_gt_value
+        demeaned_gt_bg_value = 0 - mean_gt_value
+
+        combinations = [
+            (demeaned_pred_fg_value, demeaned_gt_fg_value),
+            (demeaned_pred_fg_value, demeaned_gt_bg_value),
+            (demeaned_pred_bg_value, demeaned_gt_fg_value),
+            (demeaned_pred_bg_value, demeaned_gt_bg_value),
+        ]
+        return parts_numel, combinations
+
+    def get_results(self) -> dict:
+        """
+        Return the results about E-measure.
+        :return: dict(em=dict(adp=adaptive_em, curve=changeable_em))
+        """
+        adaptive_em = np.mean(np.array(self.adaptive_ems, dtype=_TYPE))
+        changeable_em = np.mean(np.array(self.changeable_ems, dtype=_TYPE), axis=0)
+        return dict(em=dict(adp=adaptive_em, curve=changeable_em))
+
+
+class WeightedFmeasure(object):
+    def __init__(self, beta: float = 0.3):
+        """
+        Weighted F-measure for SOD.
+        ::
+            @inproceedings{wFmeasure,
+                title={How to eval foreground maps?},
+                author={Margolin, Ran and Zelnik-Manor, Lihi and Tal, Ayellet},
+                booktitle=CVPR,
+                pages={248--255},
+                year={2014}
+            }
+        :param beta: the weight of the precision
+        """
+        self.beta = beta
+        self.weighted_fms = []
+
+    def step(self, pred: np.ndarray, gt: np.ndarray):
+        pred, gt = _prepare_data(pred=pred, gt=gt)
+
+        if np.all(~gt):
+            wfm = 0
+        else:
+            wfm = self.cal_wfm(pred, gt)
+        self.weighted_fms.append(wfm)
+
+    def cal_wfm(self, pred: np.ndarray, gt: np.ndarray) -> float:
+        """
+        Calculate the weighted F-measure.
+        """
+        # [Dst,IDXT] = bwdist(dGT);
+        Dst, Idxt = bwdist(gt == 0, return_indices=True)
+
+        # %Pixel dependency
+        # E = abs(FG-dGT);
+        E = np.abs(pred - gt)
+        # Et = E;
+        # Et(~GT)=Et(IDXT(~GT)); %To deal correctly with the edges of the foreground region
+        Et = np.copy(E)
+        Et[gt == 0] = Et[Idxt[0][gt == 0], Idxt[1][gt == 0]]
+
+        # K = fspecial('gaussian',7,5);
+        # EA = imfilter(Et,K);
+        K = self.matlab_style_gauss2D((7, 7), sigma=5)
+        EA = convolve(Et, weights=K, mode="constant", cval=0)
+        # MIN_E_EA = E;
+        # MIN_E_EA(GT & EA<E) = EA(GT & EA<E);
+        MIN_E_EA = np.where(gt & (EA < E), EA, E)
+
+        # %Pixel importance
+        # B = ones(size(GT));
+        # B(~GT) = 2-1*exp(log(1-0.5)/5.*Dst(~GT));
+        # Ew = MIN_E_EA.*B;
+        B = np.where(gt == 0, 2 - np.exp(np.log(0.5) / 5 * Dst), np.ones_like(gt))
+        Ew = MIN_E_EA * B
+
+        # TPw = sum(dGT(:)) - sum(sum(Ew(GT)));
+        # FPw = sum(sum(Ew(~GT)));
+        TPw = np.sum(gt) - np.sum(Ew[gt == 1])
+        FPw = np.sum(Ew[gt == 0])
+
+        # R = 1- mean2(Ew(GT)); %Weighed Recall
+        # P = TPw./(eps+TPw+FPw); %Weighted Precision
+        # 注意这里使用mask索引矩阵的时候不可使用Ew[gt]，这实际上仅在索引Ew的0维度
+        R = 1 - np.mean(Ew[gt == 1])
+        P = TPw / (TPw + FPw + _EPS)
+
+        # % Q = (1+Beta^2)*(R*P)./(eps+R+(Beta.*P));
+        Q = (1 + self.beta) * R * P / (R + self.beta * P + _EPS)
+
+        return Q
+
+    def matlab_style_gauss2D(self, shape: tuple = (7, 7), sigma: int = 5) -> np.ndarray:
+        """
+        2D gaussian mask - should give the same result as MATLAB's
+        fspecial('gaussian',[shape],[sigma])
+        """
+        m, n = [(ss - 1) / 2 for ss in shape]
+        y, x = np.ogrid[-m : m + 1, -n : n + 1]
+        h = np.exp(-(x * x + y * y) / (2 * sigma * sigma))
+        h[h < np.finfo(h.dtype).eps * h.max()] = 0
+        sumh = h.sum()
+        if sumh != 0:
+            h /= sumh
+        return h
+
+    def get_results(self) -> dict:
+        """
+        Return the results about weighted F-measure.
+        :return: dict(wfm=weighted_fm)
+        """
+        weighted_fm = np.mean(np.array(self.weighted_fms, dtype=_TYPE))
+        return dict(wfm=weighted_fm)
+
+
+class Multiclass_IoU(torchmetrics.Metric):
+    """
+    Compute the IoU for multi-class semantic segmentation based on https://github.com/xieenze/Trans2Seg/blob/master/segmentron/utils/score.py.
+    The direct use of torchmetrics for large dataset will lead to issues such as high CPU usage or insufficient memory.
+    """
+
+    def __init__(self, num_classes):
+        super().__init__()
+        self.add_state("total_inter", default=torch.zeros(num_classes), dist_reduce_fx=None)
+        self.add_state("total_union", default=torch.zeros(num_classes), dist_reduce_fx=None)
+        self.num_classes = num_classes
+
+    def update(self, logits, labels):
+        inter, union = self.batch_intersection_union(logits, labels)
+        self.total_inter += inter
+        self.total_union += union
+
+    def compute(self):
+        IoU = 1.0 * self.total_inter / (2.220446049250313e-16 + self.total_union)
+        return torch.tensor(IoU.mean().item())
+
+    def batch_intersection_union(self, output, target):
+        mini = 1
+        maxi = self.num_classes
+        nbins = self.num_classes
+        predict = torch.argmax(output, 1) + 1
+        target = target.float() + 1
+
+        predict = predict.float() * (target > 0).float()
+        intersection = predict * (predict == target).float()
+        # areas of intersection and union
+        area_inter = torch.histc(intersection, bins=nbins, min=mini, max=maxi)
+        area_pred = torch.histc(predict, bins=nbins, min=mini, max=maxi)
+        area_lab = torch.histc(target, bins=nbins, min=mini, max=maxi)
+        area_union = area_pred + area_lab - area_inter
+        assert torch.sum(area_inter > area_union).item() == 0, "Intersection area should be smaller than Union area"
+        return area_inter.float(), area_union.float()
+
+
+class Binary_IoU(torchmetrics.Metric):
+    """
+    Compute the IoU for binary semantic segmentation. The direct use of torchmetrics to calculate IoU for multiple samples does not yield accurate results.
+    So we iteratively calculate metric values and then take the average.
+    """
+
+    def __init__(
+        self,
+    ):
+        super().__init__()
+        self.add_state("logits", default=[], dist_reduce_fx=None)
+        self.add_state("labels", default=[], dist_reduce_fx=None)
+
+    def update(self, logits, labels):
+        self.logits.append(logits)
+        self.labels.append(labels)
+
+    def compute(self):
+        logits = torch.cat(self.logits).cpu()
+        labels = torch.cat(self.labels).cpu()
+
+        res_list = []
+        metric = torchmetrics.JaccardIndex(task="binary")
+        for logit, label in zip(logits, labels):
+            res_list.append(metric(logit, label))
+        return torch.mean(torch.tensor(res_list))
+
+
+class Balanced_Error_Rate(torchmetrics.Metric):
+    """
+    Compute the balanced error rate.
+    """
+
+    def __init__(
+        self,
+    ):
+        super().__init__()
+        self.add_state("logits", default=[], dist_reduce_fx=None)
+        self.add_state("labels", default=[], dist_reduce_fx=None)
+
+    def update(self, logits, labels):
+        self.logits.append(logits)
+        self.labels.append(labels)
+
+    def compute(self):
+        logits = torch.cat(self.logits).cpu()
+        labels = torch.cat(self.labels).cpu()
+
+        labels = (labels * 255) > 125
+        logits = (logits * 255) > 125
+        ber = 1 - torchmetrics.Accuracy(
+            task="multiclass", num_classes=2, average="macro", multidim_average="samplewise"
+        )(logits, labels)
+        return torch.mean(ber)
+
+
+class COD(torchmetrics.Metric):
+    def __init__(self):
+        super().__init__()
+        self.add_state("logits", default=[], dist_reduce_fx=None)
+        self.add_state("labels", default=[], dist_reduce_fx=None)
+
+    def update(self, logits, labels):
+        self.logits.append(logits)
+        self.labels.append(labels)
+
+    def compute(self):
+        pass
+
+
+class SM(COD):
+    def compute(self):
+        logits = torch.cat(self.logits)
+        labels = torch.cat(self.labels)
+        assert logits.shape == labels.shape
+        batchsize = labels.shape[0]
+
+        metric_SM = Smeasure()
+
+        for i in range(batchsize):
+            true, pred = labels[i, 0].cpu().data.numpy() * 255, logits[i, 0].cpu().data.numpy() * 255
+            metric_SM.step(pred=pred, gt=true)
+
+        return torch.tensor(metric_SM.get_results()["sm"])
+
+
+class FM(COD):
+    def compute(self):
+        logits = torch.cat(self.logits)
+        labels = torch.cat(self.labels)
+        assert logits.shape == labels.shape
+        batchsize = labels.shape[0]
+
+        metric_WFM = WeightedFmeasure()
+        for i in range(batchsize):
+            true, pred = labels[i, 0].cpu().data.numpy() * 255, logits[i, 0].cpu().data.numpy() * 255
+
+            metric_WFM.step(pred=pred, gt=true)
+
+        return torch.tensor(metric_WFM.get_results()["wfm"])
+
+
+class EM(COD):
+    def compute(self):
+        logits = torch.cat(self.logits)
+        labels = torch.cat(self.labels)
+        assert logits.shape == labels.shape
+        batchsize = labels.shape[0]
+
+        metric_EM = Emeasure()
+
+        for i in range(batchsize):
+            true, pred = labels[i, 0].cpu().data.numpy() * 255, logits[i, 0].cpu().data.numpy() * 255
+
+            metric_EM.step(pred=pred, gt=true)
+
+        return torch.tensor(metric_EM.get_results()["em"]["curve"].mean())
+
+
+class MAE(COD):
+    def compute(self):
+        logits = torch.cat(self.logits)
+        labels = torch.cat(self.labels)
+        assert logits.shape == labels.shape
+        batchsize = labels.shape[0]
+
+        metric_MAE = MAE_SOD()
+        for i in range(batchsize):
+            true, pred = labels[i, 0].cpu().data.numpy() * 255, logits[i, 0].cpu().data.numpy() * 255
+
+            metric_MAE.step(pred=pred, gt=true)
+
+        return torch.tensor(metric_MAE.get_results()["mae"])
+
+
+COD_METRICS_NAMES = {"sm": SM(), "fm": FM(), "em": EM(), "mae": MAE()}
+
+
+# TODO: Modify multi-gpu evaluation error. Maybe there will be a more elegant way.
+class Multiclass_IoU_Pred:
+    """
+    Compute the IoU for multi-class semantic segmentation based on https://github.com/xieenze/Trans2Seg/blob/master/segmentron/utils/score.py.
+    The direct use of torchmetrics for large dataset will lead to issues such as high CPU usage or insufficient memory.
+    """
+
+    def __init__(self, num_classes):
+        super().__init__()
+        self.total_inter = torch.zeros(num_classes)
+        self.total_union = torch.zeros(num_classes)
+        self.num_classes = num_classes
+
+    def update(self, logits, labels):
+        inter, union = self.batch_intersection_union(logits, labels)
+        self.total_inter += inter
+        self.total_union += union
+
+    def compute(self):
+        IoU = 1.0 * self.total_inter / (2.220446049250313e-16 + self.total_union)
+        return torch.tensor(IoU.mean().item())
+
+    def batch_intersection_union(self, output, target):
+        mini = 1
+        maxi = self.num_classes
+        nbins = self.num_classes
+        predict = torch.argmax(output, 1) + 1
+        target = target.float() + 1
+
+        predict = predict.float() * (target > 0).float()
+        intersection = predict * (predict == target).float()
+        # areas of intersection and union
+        area_inter = torch.histc(intersection, bins=nbins, min=mini, max=maxi)
+        area_pred = torch.histc(predict, bins=nbins, min=mini, max=maxi)
+        area_lab = torch.histc(target, bins=nbins, min=mini, max=maxi)
+        area_union = area_pred + area_lab - area_inter
+        assert torch.sum(area_inter > area_union).item() == 0, "Intersection area should be smaller than Union area"
+        return area_inter.float(), area_union.float()
+
+
+class Binary_IoU_Pred:
+    """
+    Compute the IoU for binary semantic segmentation. The direct use of torchmetrics to calculate IoU for multiple samples does not yield accurate results.
+    So we iteratively calculate metric values and then take the average.
+    """
+
+    def __init__(
+        self,
+    ):
+        super().__init__()
+        self.logits = []
+        self.labels = []
+
+    def update(self, logits, labels):
+        self.logits.append(logits)
+        self.labels.append(labels)
+
+    def compute(self):
+        logits = torch.cat(self.logits).cpu()
+        labels = torch.cat(self.labels).cpu()
+
+        res_list = []
+        metric = torchmetrics.JaccardIndex(task="binary")
+        for logit, label in zip(logits, labels):
+            res_list.append(metric(logit, label))
+        return torch.mean(torch.tensor(res_list))
+
+
+class Binary_Dice_Pred:
+    """
+    Compute Dice for binary semantic segmentation on multiple samples by iterating per sample.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.logits = []
+        self.labels = []
+
+    def update(self, logits, labels):
+        self.logits.append(logits)
+        self.labels.append(labels)
+
+    @staticmethod
+    def _to_prob(x: torch.Tensor) -> torch.Tensor:
+        # 兼容 logits / prob 两种输入
+        if x.min() < 0 or x.max() > 1:
+            return torch.sigmoid(x)
+        return x
+
+    def compute(self):
+        logits = torch.cat(self.logits).cpu()
+        labels = torch.cat(self.labels).cpu()
+
+        res_list = []
+        for logit, label in zip(logits, labels):
+            prob = self._to_prob(logit)
+            pred = (prob > 0.5).to(torch.int32)
+            gt = (label > 0.5).to(torch.int32)
+
+            inter = (pred & gt).sum().float()
+            denom = pred.sum().float() + gt.sum().float()
+            dice = (2 * inter + 1e-6) / (denom + 1e-6)
+            res_list.append(dice)
+        return torch.mean(torch.stack(res_list))
+
+
+class Balanced_Error_Rate_Pred:
+    """
+    Compute the balanced error rate.
+    """
+
+    def __init__(
+        self,
+    ):
+        super().__init__()
+        self.logits = []
+        self.labels = []
+
+    def update(self, logits, labels):
+        self.logits.append(logits)
+        self.labels.append(labels)
+
+    def compute(self):
+        logits = torch.cat(self.logits).cpu()
+        labels = torch.cat(self.labels).cpu()
+
+        labels = (labels * 255) > 125
+        logits = (logits * 255) > 125
+        ber = 1 - torchmetrics.Accuracy(
+            task="multiclass", num_classes=2, average="macro", multidim_average="samplewise"
+        )(logits, labels)
+        return torch.mean(ber)
+
+
+class COD_Pred:
+    def __init__(self):
+        super().__init__()
+        self.logits = []
+        self.labels = []
+
+    def update(self, logits, labels):
+        self.logits.append(logits)
+        self.labels.append(labels)
+
+    def compute(self):
+        pass
+
+    def reset(self):
+        self.logits = []
+        self.labels = []
+
+
+class SM_Pred(COD_Pred):
+    def compute(self):
+        logits = torch.cat(self.logits)
+        labels = torch.cat(self.labels)
+        assert logits.shape == labels.shape
+
+        batchsize = labels.shape[0]
+
+        metric_SM = Smeasure()
+
+        for i in range(batchsize):
+            true, pred = labels[i, 0].cpu().data.numpy() * 255, logits[i, 0].cpu().data.numpy() * 255
+            metric_SM.step(pred=pred, gt=true)
+        self.reset()
+        return torch.tensor(metric_SM.get_results()["sm"])
+
+
+class FM_Pred(COD_Pred):
+    def compute(self):
+        logits = torch.cat(self.logits)
+        labels = torch.cat(self.labels)
+        assert logits.shape == labels.shape
+        batchsize = labels.shape[0]
+
+        metric_WFM = WeightedFmeasure()
+        for i in range(batchsize):
+            true, pred = labels[i, 0].cpu().data.numpy() * 255, logits[i, 0].cpu().data.numpy() * 255
+
+            metric_WFM.step(pred=pred, gt=true)
+        self.reset()
+        return torch.tensor(metric_WFM.get_results()["wfm"])
+
+
+class EM_Pred(COD_Pred):
+    def compute(self):
+        logits = torch.cat(self.logits)
+        labels = torch.cat(self.labels)
+        assert logits.shape == labels.shape
+        batchsize = labels.shape[0]
+
+        metric_EM = Emeasure()
+
+        for i in range(batchsize):
+            true, pred = labels[i, 0].cpu().data.numpy() * 255, logits[i, 0].cpu().data.numpy() * 255
+
+            metric_EM.step(pred=pred, gt=true)
+        self.reset()
+        return torch.tensor(metric_EM.get_results()["em"]["curve"].mean())
+
+
+class MAE_Pred(COD_Pred):
+    def compute(self):
+        logits = torch.cat(self.logits)
+        labels = torch.cat(self.labels)
+        assert logits.shape == labels.shape
+        batchsize = labels.shape[0]
+
+        metric_MAE = MAE_SOD()
+        for i in range(batchsize):
+            true, pred = labels[i, 0].cpu().data.numpy() * 255, logits[i, 0].cpu().data.numpy() * 255
+
+            metric_MAE.step(pred=pred, gt=true)
+        self.reset()
+        return torch.tensor(metric_MAE.get_results()["mae"])
+
+
+COD_METRICS_NAMES_Pred = {"sm": SM_Pred(), "fm": FM_Pred(), "em": EM_Pred(), "mae": MAE_Pred()}
+
+```
+
+```python
+*** Begin Patch
+*** Update File: /root/autodl-tmp/works/autogluon/multimodal/src/autogluon/multimodal/learners/semantic_segmentation.py
+@@
+-from ..constants import BER, EM, FM, IOU, MAE, SEMANTIC_SEGMENTATION, SM
++from ..constants import BER, DICE, EM, FM, IOU, MAE, SEMANTIC_SEGMENTATION, SM
+@@
+-from ..optim.metrics.semantic_seg_metrics import Balanced_Error_Rate_Pred as Balanced_Error_Rate
++from ..optim.metrics.semantic_seg_metrics import Balanced_Error_Rate_Pred as Balanced_Error_Rate
++from ..optim.metrics.semantic_seg_metrics import Binary_Dice_Pred as Binary_Dice
+ from ..optim.metrics.semantic_seg_metrics import Binary_IoU_Pred as Binary_IoU
+ from ..optim.metrics.semantic_seg_metrics import COD_METRICS_NAMES_Pred as COD_METRICS_NAMES
+ from ..optim.metrics.semantic_seg_metrics import Multiclass_IoU_Pred as Multiclass_IoU
+@@
+             if metric_name == BER:
+                 return Balanced_Error_Rate()
++            elif metric_name == DICE:
++                if num_classes == 1:
++                    return Binary_Dice()
++                else:
++                    # TODO: 多类 dice 可按需补齐；当前 Conv-LoRA/ISIC2017 走二值
++                    raise ValueError("dice 目前仅支持 num_classes==1 的二值分割。")
+             elif metric_name in [SM, EM, FM, MAE]:
+                 return COD_METRICS_NAMES[metric_name]
+             elif metric_name == IOU:
+                 if num_classes == 1:
+                     return Binary_IoU()
+*** End Patch
+```
+
+```python
+import logging
+import os
+from typing import Dict, Iterable, List, Optional, Union
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn.functional as F
+from PIL import Image
+from scipy.special import softmax
+
+from autogluon.core.metrics import Scorer
+
+from ..constants import LABEL, LOGITS, SEMANTIC_MASK, SEMANTIC_SEGMENTATION_IMG
+from ..optim import SemanticSegmentationLitModule, get_loss_func, get_norm_layer_param_names, get_peft_param_names
+from ..optim.metrics.semantic_seg_metrics import Balanced_Error_Rate_Pred as Balanced_Error_Rate
+from ..optim.metrics.semantic_seg_metrics import Binary_Dice_Pred as Binary_Dice
+from ..optim.metrics.semantic_seg_metrics import Binary_IoU_Pred as Binary_IoU
+from ..optim.metrics.semantic_seg_metrics import COD_METRICS_NAMES_Pred as COD_METRICS_NAMES
+from ..optim.metrics.semantic_seg_metrics import Multiclass_IoU_Pred as Multiclass_IoU
+from ..utils import extract_from_output, setup_save_path
+from .base import BaseLearner
+
+logger = logging.getLogger(__name__)
+
+from ..constants import BER, DICE, EM, FM, IOU, MAE, SEMANTIC_SEGMENTATION, SM
+
+
+class SemanticSegmentationLearner(BaseLearner):
+    def __init__(
+        self,
+        label: Optional[str] = None,
+        problem_type: Optional[str] = SEMANTIC_SEGMENTATION,
+        presets: Optional[str] = None,
+        eval_metric: Optional[Union[str, Scorer]] = "iou",
+        hyperparameters: Optional[dict] = None,
+        path: Optional[str] = None,
+        verbosity: Optional[int] = 2,
+        num_classes: Optional[int] = None,  # TODO: can we infer this from data?
+        warn_if_exist: Optional[bool] = True,
+        enable_progress_bar: Optional[bool] = None,
+        pretrained: Optional[bool] = True,
+        validation_metric: Optional[str] = "iou",
+        sample_data_path: Optional[str] = None,
+        **kwargs,
+    ):
+        super().__init__(
+            label=label,
+            problem_type=problem_type,
+            presets=presets,
+            eval_metric=eval_metric,
+            hyperparameters=hyperparameters,
+            path=path,
+            verbosity=verbosity,
+            warn_if_exist=warn_if_exist,
+            enable_progress_bar=enable_progress_bar,
+            pretrained=pretrained,
+            validation_metric=validation_metric,
+        )
+        self._output_shape = num_classes
+        self._sample_data_path = sample_data_path
+
+        if self._sample_data_path is not None:
+            infer_output_shape = self.get_semantic_segmentation_class_num(self._sample_data_path)
+            if num_classes is not None:
+                assert (
+                    num_classes == infer_output_shape
+                ), f"The provided number of classes '{num_classes}' and the inferred class number {infer_output_shape}' from the sample data should be consistent."
+            else:
+                self._output_shape = infer_output_shape
+
+    def get_semantic_segmentation_class_num(self, sample_data_path):
+        """
+        Get the number of classes for given data.
+
+        Parameters
+        ----------
+            sample_data_path
+                This is used for automatically inference num_classes of semantic segmentation dataset.
+                Could be an image directory, image file or pd.DataFrame.
+        Returns
+        -------
+            The number of classes.
+        """
+        if isinstance(sample_data_path, str):
+            if os.path.isdir(sample_data_path):
+                mask_files = os.listdir(sample_data_path)
+                num_classes = []
+                for mask_file in mask_files:
+                    per_num_classes = self.get_semantic_segmentation_class_num(
+                        os.path.join(sample_data_path, mask_file)
+                    )
+                    num_classes.append(per_num_classes)
+                return max(num_classes)
+            else:
+                mask = Image.open(sample_data_path)
+                mode = mask.mode
+
+                if mode == "1":
+                    return 1
+                classes = np.unique(mask)
+                if mode == "L" and np.array_equal(classes, np.array([0, 255])):
+                    return 1
+
+                return max(classes).item() + 1  # include background
+
+        elif isinstance(sample_data_path, pd.DataFrame):
+            num_classes = []
+            for idx in range(sample_data_path.shape[0]):
+                row = sample_data_path.iloc[idx]
+                mask_file = row[self._label_column]
+                per_num_classes = self.get_semantic_segmentation_class_num(mask_file)
+                num_classes.append(per_num_classes)
+            return max(num_classes)
+
+    def infer_output_shape(self):
+        if self._output_shape is None:
+            self._output_shape = self.get_semantic_segmentation_class_num(self._train_data)
+
+    @staticmethod
+    def get_peft_param_names_per_run(model, config):
+        peft_param_names = None
+        peft = config.optim.peft
+        if peft:
+            norm_param_names = get_norm_layer_param_names(model)
+            peft_param_names = get_peft_param_names(
+                norm_param_names,
+                peft=peft,
+                extra_params=config.optim.extra_trainable_params,
+            )
+        return peft_param_names
+
+    def get_loss_func_per_run(self, config, mixup_active=None):
+        loss_func = get_loss_func(
+            problem_type=self._problem_type,
+            loss_func_name=config.optim.loss_func,
+            config=config.optim,
+            num_classes=self._output_shape,
+        )
+        return loss_func, None
+
+    def evaluate_semantic_segmentation(
+        self,
+        data: Union[pd.DataFrame, dict, list, str],
+        metrics: Optional[Union[str, List[str]]] = None,
+        return_pred: Optional[bool] = False,
+        realtime: Optional[bool] = False,
+    ):
+        """
+        Evaluate semantic segmentation on a test dataset based on "torchmetrics".
+
+        Parameters
+        ----------
+        data
+            A dataframe, containing the same columns as the training data.
+            Or a str, that is a path of the annotation file for detection.
+        metrics
+            Metrics used for evaluation.
+        return_pred
+            Whether to return the prediction result of each row.
+        realtime
+            Whether to do realtime inference, which is efficient for small data (default None).
+            If provided None, we would infer it on based on the data modalities
+            and sample number.
+        """
+
+        def get_metric_predict(
+            metric_name: str,
+            num_classes: Optional[int] = None,
+        ):
+            """
+            Obtain a torchmerics.Metric from its name.
+            Define a customized metric function in case that torchmetrics doesn't support some metric.
+
+            Parameters
+            ----------
+            metric_name
+                Name of metric.
+            num_classes
+                Number of classes.
+            is_matching
+                Whether is matching.
+            problem_type
+                Type of problem, e.g., binary and multiclass.
+
+            Returns
+            -------
+            torchmetrics.Metric
+                A torchmetrics.Metric object.
+            custom_metric_func
+                A customized metric function.
+            """
+            if metric_name == BER:
+                return Balanced_Error_Rate()
+            elif metric_name in [SM, EM, FM, MAE]:
+                return COD_METRICS_NAMES[metric_name]
+            elif metric_name == DICE:
+                if num_classes == 1:
+                    return Binary_Dice()
+                else:
+                    raise ValueError("dice 目前仅支持 num_classes==1 的二值分割。")
+            elif metric_name == IOU:
+                if num_classes == 1:
+                    return Binary_IoU()
+                else:
+                    return Multiclass_IoU(num_classes=num_classes)
+            else:
+                raise ValueError(f"Unknown metric {metric_name}")
+
+        outputs = self.predict_per_run(
+            data=data,
+            realtime=realtime,
+            requires_label=False,
+        )
+
+        if self._output_shape == 1:
+            logits = extract_from_output(ret_type=LOGITS, outputs=outputs, as_ndarray=False)
+        else:
+            logits = extract_from_output(ret_type=SEMANTIC_MASK, outputs=outputs, as_ndarray=False)
+        y_pred = logits.float()
+        y_true = [ele[LABEL] for ele in outputs]
+        y_true = torch.cat(y_true)
+
+        assert len(y_true) == len(y_pred)
+
+        results = {}
+        if isinstance(metrics, str):
+            metrics = [metrics]
+        for per_metric_name in metrics:
+            per_metric = get_metric_predict(metric_name=per_metric_name.lower(), num_classes=self._output_shape)
+            for y_p, y_t in zip(y_pred, y_true):
+                per_metric.update(y_p.unsqueeze(0), y_t.unsqueeze(0))
+            score = per_metric.compute()
+            results[per_metric_name] = score.item()
+
+        if return_pred:
+            return results, outputs
+        else:
+            return results
+
+    def get_litmodule_per_run(
+        self,
+        model=None,
+        model_postprocess_fn=None,
+        peft_param_names=None,
+        optim_kwargs=None,
+        distillation_kwargs=None,
+        is_train=True,
+    ):
+        if is_train:
+            return SemanticSegmentationLitModule(
+                model=model,
+                model_postprocess_fn=model_postprocess_fn,
+                trainable_param_names=peft_param_names,
+                **optim_kwargs,
+            )
+        else:
+            return SemanticSegmentationLitModule(
+                model=self._model,
+                model_postprocess_fn=self._model_postprocess_fn,
+                **optim_kwargs,
+            )
+
+    def on_predict_start(self, data: pd.DataFrame):
+        data = self.data_to_df(data=data)
+        if self._output_shape is None:  # for zero-shot evaluation/prediction
+            self._output_shape = self.get_semantic_segmentation_class_num(data)
+        self.ensure_predict_ready()
+        return data
+
+    def evaluate(
+        self,
+        data: Union[pd.DataFrame, dict, list, str],
+        metrics: Optional[Union[str, List[str]]] = None,
+        return_pred: Optional[bool] = False,
+        realtime: Optional[bool] = False,
+        **kwargs,
+    ):
+        """
+        Evaluate model on a test dataset.
+
+        Parameters
+        ----------
+        data
+            A dataframe, containing the same columns as the training data.
+            Or a str, that is a path of the annotation file for detection.
+        metrics
+            A list of metric names to report.
+            If None, we only return the score for the stored `_eval_metric_name`.
+        return_pred
+            Whether to return the prediction result of each row.
+        realtime
+            Whether to do realtime inference, which is efficient for small data (default False).
+            If provided None, we would infer it on based on the data modalities
+            and sample number.
+
+        Returns
+        -------
+        A dictionary with the metric names and their corresponding scores.
+        Optionally return a dataframe of prediction results.
+        """
+        data = self.on_predict_start(data)
+        return self.evaluate_semantic_segmentation(data, metrics, realtime)
+
+    def predict(
+        self,
+        data: Union[pd.DataFrame, dict, list, str],
+        realtime: Optional[bool] = False,
+        save_results: Optional[bool] = None,
+        **kwargs,
+    ):
+        """
+        Predict values for the label column of new data.
+
+        Parameters
+        ----------
+        data
+            The data to make predictions for. Should contain same column names as training data and
+            follow same format (except for the `label` column).
+        realtime
+            Whether to do realtime inference, which is efficient for small data (default False).
+            If provided None, we would infer it on based on the data modalities
+            and sample number.
+        save_results
+            Whether to save the prediction results.
+
+        Returns
+        -------
+        Array of predictions, one corresponding to each row in given dataset.
+        When save_results is True, the output is a pandas dataframe containing the path of the predicted mask file for each input image.
+        Otherwise, the output will have shape (#samples, height, width).
+        """
+        data = self.on_predict_start(data)
+        if self._output_shape == 1:
+            ret_type = LOGITS
+        else:
+            ret_type = SEMANTIC_MASK
+
+        outputs = self.predict_per_run(
+            data=data,
+            realtime=realtime,
+            requires_label=False,
+        )
+
+        logits = self.post_process_prediction(data, outputs, ret_type)
+
+        pred = []
+        for logit in logits:
+            logit = logit.numpy()
+            if ret_type == SEMANTIC_MASK:
+                pred.append(logit.argmax(axis=1))
+            else:
+                pred.append((logit > 0.5).squeeze(axis=1))
+
+        if save_results:
+            self._save_path = setup_save_path(
+                old_save_path=self._save_path,
+                warn_if_exist=False,
+            )
+            pred = self.save_segmentation_result(
+                pred=pred,
+                data=data,
+                result_path=self._save_path,
+            )
+
+        return pred
+
+        # if (as_pandas is None and isinstance(data, pd.DataFrame)) or as_pandas is True:
+        #     # TODO
+        #     pred = self._as_pandas(data=data, to_be_converted=pred)
+
+    def predict_proba(
+        self,
+        data: Union[pd.DataFrame, dict, list],
+        as_pandas: Optional[bool] = None,
+        as_multiclass: Optional[bool] = True,
+        realtime: Optional[bool] = False,
+        **kwargs,
+    ):
+        """
+        Predict probabilities class probabilities rather than class labels.
+        This is only for the classification. Calling it for regression will throw an exception.
+
+        Parameters
+        ----------
+        data
+            The data to make predictions for. Should contain same column names as training data and
+              follow same format (except for the `label` column).
+        as_pandas
+            Whether to return the output as a pandas DataFrame(Series) (True) or numpy array (False).
+        as_multiclass
+            Whether to return the probability of all labels or
+            just return the probability of the positive class for binary classification problems.
+        realtime
+            Whether to do realtime inference, which is efficient for small data (default False).
+            If provided None, we would infer it on based on the data modalities
+            and sample number.
+
+        Returns
+        -------
+        Array of predicted class-probabilities, corresponding to each row in the given data.
+        The output will always have shape (#samples, #classes, height, width).
+        """
+        assert (self._output_shape == 1 and as_multiclass == False) or (
+            self._output_shape > 1 and as_multiclass == True
+        )
+        data = self.on_predict_start(data)
+
+        outputs = self.predict_per_run(
+            data=data,
+            realtime=realtime,
+            requires_label=False,
+        )
+
+        if as_multiclass:
+            ret_type = SEMANTIC_MASK
+        else:
+            ret_type = LOGITS
+
+        logits = self.post_process_prediction(data, outputs, ret_type)
+
+        prob = []
+        for logit in logits:
+            logit = logit.numpy()
+            if ret_type == SEMANTIC_MASK:
+                prob.append(softmax(logit, axis=1))
+            else:
+                prob.append(logit)
+
+        return prob
+
+    def extract_embedding(
+        self,
+        data: Union[pd.DataFrame, dict, list],
+        as_tensor: Optional[bool] = False,
+        as_pandas: Optional[bool] = False,
+        realtime: Optional[bool] = False,
+        **kwargs,
+    ):
+        raise NotImplementedError("Semantic segmentation doesn't support calling `extract_embedding` yet.")
+
+    def save_segmentation_result(self, pred: Iterable, data: Union[pd.DataFrame, Dict], result_path: str):
+        """
+        Saving segmentation results in pd.DataFrame format (per image)
+
+        Parameters
+        ----------
+        pred
+            List containing segmentation results for one image
+        data
+            Pandas data frame or dict containing the image information to be tested
+        result_path
+            Path to save result
+        Returns
+        -------
+        The paths of the segmentation results as pandas DataFrame
+        """
+
+        def show_mask(mask, ax):
+            color = np.concatenate([np.random.random(3), np.array([0.6])], axis=0)
+            h, w = mask.shape[-2:]
+            mask_image = mask.reshape(h, w, 1) * color.reshape(1, 1, -1)
+            ax.imshow(mask_image)
+
+        image_column_name = self.get_image_column_name(data)
+        if isinstance(data, dict):
+            image_names = data[image_column_name]
+        else:
+            image_names = data[image_column_name].to_list()
+        results = []
+
+        mask_path = os.path.join(result_path, "masks")
+        txt_path = os.path.join(result_path, "result.txt")
+        os.makedirs(mask_path, exist_ok=True)
+        for image_pred, image_name in zip(pred, image_names):
+            if self._output_shape == 1:
+                mask = Image.fromarray(image_pred.squeeze(axis=0))
+                per_mask_path = os.path.join(mask_path, os.path.basename(image_name))
+                mask.save(per_mask_path)
+            else:
+                masks = []
+                classes = np.unique(image_pred)
+                for class_id in classes:
+                    if class_id == 0:  # bg
+                        continue
+                    masks.append(image_pred == class_id)
+
+                for mask in masks:
+                    show_mask(mask, plt.gca())
+                mask_name = ""
+                for i in os.path.basename(image_name).split(".")[:-1]:
+                    mask_name += i
+                per_mask_path = os.path.join(mask_path, os.path.basename(image_name))
+                plt.axis("off")
+                plt.savefig(per_mask_path, bbox_inches="tight", dpi=300, pad_inches=0.0)
+
+            results.append([image_name, per_mask_path])
+
+        result_df = pd.DataFrame(results, columns=["image", "mask"])
+        result_df.to_csv(txt_path, index=False)
+        return result_df
+
+    def post_process_prediction(self, data, outputs, ret_type):
+        """
+        Post-process segmentation results to match the size of original input images.
+
+        Parameters
+        ----------
+        data
+            Pandas data frame or dict containing the image information.
+        outputs
+            A list of segmentation output results.
+        ret_type
+            What kind of information to extract from model outputs.
+
+        Returns
+        -------
+        A list of the post-processed segmentation results.
+        """
+        logits = [ele[ret_type] for ele in outputs]
+        image_column_name = self.get_image_column_name(data)
+        for idx in range(data.shape[0]):
+            ori_image_size = Image.open(data[image_column_name][idx]).size  # width, height
+            logits[idx] = F.interpolate(
+                logits[idx].float(), (ori_image_size[1], ori_image_size[0]), mode="bilinear", align_corners=False
+            )
+        return logits
+
+    def get_image_column_name(self, data: pd.DataFrame):
+        if self.column_types is None:
+            column_names = list(data.columns)
+            if self._label_column in column_names:
+                column_names.remove(self._label_column)
+            assert (
+                len(column_names) == 1
+            ), f"More than one image columns {column_names} exist in the data. Make sure to provide data with one image column."
+            return column_names[0]
+        else:
+            for k, v in self.column_types.items():
+                if v == SEMANTIC_SEGMENTATION_IMG:
+                    return k
+        return None
+
+```
+
+```python
+import logging
+from typing import Callable, Dict
+
+import torch
+import torchmetrics
+from transformers.models.mask2former.modeling_mask2former import Mask2FormerLoss
+
+from ..constants import CLASS_LOGITS, LOGITS, MOE_LOSS, SEMANTIC_MASK, WEIGHT
+from ..models.utils import run_model
+from .lit_module import LitModule
+from .metrics.semantic_seg_metrics import Multiclass_IoU
+
+logger = logging.getLogger(__name__)
+
+
+class SemanticSegmentationLitModule(LitModule):
+    """
+    Control the loops for training, evaluation, and prediction. This module is independent of
+    the model definition. This class inherits from the Pytorch Lightning's LightningModule:
+    https://lightning.ai/docs/pytorch/stable/common/lightning_module.html
+    """
+
+    def _compute_loss(self, output: Dict, label: torch.Tensor, **kwargs):
+        loss = 0
+        for _, per_output in output.items():
+            weight = per_output[WEIGHT] if WEIGHT in per_output else 1
+            if isinstance(self.loss_func, Mask2FormerLoss):
+                mask_labels = [mask_labels.to(per_output[LOGITS]) for mask_labels in kwargs["mask_labels"]]
+                dict_loss = self.loss_func(
+                    masks_queries_logits=per_output[LOGITS],  # bs, num_mask_tokens, height, width
+                    class_queries_logits=per_output[CLASS_LOGITS],  # bs, num_mask_tokens, num_classes
+                    mask_labels=mask_labels,
+                    class_labels=kwargs["class_labels"],
+                )
+                for v in dict_loss.values():
+                    loss += v
+            else:
+                loss += (
+                    self.loss_func(
+                        input=per_output[LOGITS],
+                        target=label,
+                    )
+                    * weight
+                )
+            # MoE loss
+            if MOE_LOSS in per_output:
+                loss += per_output[MOE_LOSS]
+
+        return loss
+
+    def _compute_metric_score(
+        self,
+        metric: torchmetrics.Metric,
+        custom_metric_func: Callable,
+        logits: torch.Tensor,
+        label: torch.Tensor,
+        **kwargs,
+    ):
+        if isinstance(metric, Multiclass_IoU):
+            metric.update(kwargs["semantic_masks"], label)
+        else:
+            metric.update(logits.float(), label)
+
+    def _shared_step(
+        self,
+        batch: Dict,
+    ):
+        label = batch[self.model.label_key]
+        # prepare_targets
+        output = run_model(self.model, batch)
+        if isinstance(self.loss_func, Mask2FormerLoss):
+            loss = self._compute_loss(
+                output=output,
+                label=label,
+                mask_labels=batch[self.model.mask_label_key],
+                class_labels=batch[self.model.class_label_key],
+            )
+        else:
+            loss = self._compute_loss(
+                output=output,
+                label=label,
+            )
+
+        return output, loss
+
+    def validation_step(self, batch, batch_idx, **kwargs):
+        """
+        Per validation step. This function is registered by LightningModule.
+        Refer to https://lightning.ai/docs/pytorch/stable/common/lightning_module.html#validation-loop
+
+        Parameters
+        ----------
+        batch
+            A dictionary containing the mini-batch data, including both input data and
+            ground-truth labels. The mini-batch data are passed to each individual model,
+            which indexes its required input data by keys with its model prefix. The
+            ground-truth labels are used here to compute the validation loss and metric.
+            The validation metric is used for top k model selection and early stopping.
+        batch_idx
+            Index of mini-batch.
+        """
+        output, loss = self._shared_step(batch)
+        if self.model_postprocess_fn:
+            output = self.model_postprocess_fn(output)
+        # By default, on_step=False and on_epoch=True
+        self.log("val_loss", loss, prog_bar=True)
+        if isinstance(self.loss_func, Mask2FormerLoss):
+            self._compute_metric_score(
+                metric=self.validation_metric,
+                custom_metric_func=self.custom_metric_func,
+                logits=output[self.model.prefix][LOGITS],
+                label=batch[self.model.label_key],
+                semantic_masks=output[self.model.prefix][SEMANTIC_MASK],
+            )
+        else:
+            self._compute_metric_score(
+                metric=self.validation_metric,
+                custom_metric_func=self.custom_metric_func,
+                logits=output[self.model.prefix][LOGITS],
+                label=batch[self.model.label_key],
+            )
+
+        self.log(
+            self.validation_metric_name,
+            self.validation_metric,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+        )
+
+        # 额外记录 Dice（按 epoch 汇总），确保进度条/控制台能看到 val_dice
+        # 仅对二值分割（num_classes==1）启用
+        if getattr(self.model, "num_classes", None) == 1:
+            logits = output[self.model.prefix][LOGITS]
+            label = batch[self.model.label_key]
+            # 兼容 [B, 1, H, W] / [B, H, W]
+            if logits.dim() == 3:
+                logits = logits.unsqueeze(1)
+            if label.dim() == 3:
+                label = label.unsqueeze(1)
+            prob = torch.sigmoid(logits) if (logits.min() < 0 or logits.max() > 1) else logits
+            pred = (prob > 0.5).to(torch.int32)
+            gt = (label > 0.5).to(torch.int32)
+            inter = (pred & gt).sum(dim=(1, 2, 3)).float()
+            denom = pred.sum(dim=(1, 2, 3)).float() + gt.sum(dim=(1, 2, 3)).float()
+            dice = (2 * inter + 1e-6) / (denom + 1e-6)
+            self.log("val_dice", dice.mean(), on_step=False, on_epoch=True, prog_bar=True)
+
+```
+
+```python
+import argparse
+import os
+
+import pandas as pd
+
+from autogluon.multimodal import MultiModalPredictor
+
+
+def get_default_training_setting(dataset_name):
+    validation_metric = "iou"
+    loss = "structure_loss"
+    max_epoch = 30
+    lr = 1e-4
+
+    if dataset_name == "SBU-shadow":
+        validation_metric = "ber"
+        loss = "balanced_bce"
+        max_epoch = 10
+
+    elif dataset_name == "polyp":
+        validation_metric = "sm"
+
+    elif dataset_name == "camo_sem_seg":
+        validation_metric = "sm"
+        max_epoch = 20
+
+    elif dataset_name == "road_segmentation":
+        validation_metric = "iou"
+        max_epoch = 20
+        lr = 3e-4
+
+    elif dataset_name == "leaf_disease_segmentation":
+        validation_metric = "iou"
+        lr = 3e-4
+
+    return validation_metric, loss, max_epoch, lr
+
+
+def expand_path(df, dataset_dir):
+    for col in ["image", "label"]:
+        df[col] = df[col].apply(lambda ele: os.path.join(dataset_dir, ele))
+    return df
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="This script support converting voc format xmls to coco format json")
+    parser.add_argument(
+        "--task",
+        type=str,
+        default="leaf_disease_segmentation",
+        choices=["polyp", "leaf_disease_segmentation", "camo_sem_seg", "isic2017", "road_segmentation", "SBU-shadow"],
+    )
+    parser.add_argument("--seed", type=int, default=42686693)
+    parser.add_argument("--rank", type=int, default=3)
+    parser.add_argument("--expert_num", type=int, default=8)
+    parser.add_argument("--num_gpus", type=int, default=1)
+    parser.add_argument("--output_dir", type=str, default="outputs")
+    parser.add_argument("--ckpt_path", type=str, default="outputs", help="Checkpoint path.")
+    parser.add_argument("--per_gpu_batch_size", type=int, default=1, help="The batch size for each GPU.")
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=4,
+        help="The effective batch size. If batch_size > per_gpu_batch_size * num_gpus, gradient accumulation would be used.",
+    )
+    parser.add_argument("--eval", action="store_true")
+    parser.add_argument(
+        "--backend",
+        type=str,
+        default="sam",
+        choices=["sam", "nnunet"],
+        help="选择语义分割后端：sam（默认）或 nnunet（ResEnc UNet）。",
+    )
+    args = parser.parse_args()
+
+    dataset_name = args.task
+    dataset_dir = os.path.join(f"datasets/{dataset_name}", dataset_name)
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    # prepare dataframes
+    train_df = expand_path(pd.read_csv(os.path.join(dataset_dir, f"train.csv")), dataset_dir)
+    val_df = expand_path(pd.read_csv(os.path.join(dataset_dir, f"val.csv")), dataset_dir)
+
+    # get the validation metric
+    validation_metric, loss, max_epoch, lr = get_default_training_setting(dataset_name)
+
+    hyperparameters = {}
+    hyperparameters.update(
+        {
+            "optim.lora.r": args.rank,
+            "optim.peft": "conv_lora",
+            "optim.lora.conv_lora_expert_num": args.expert_num,
+            "env.num_gpus": args.num_gpus,
+            "optim.loss_func": loss,
+            "optim.max_epochs": max_epoch,
+            "optim.lr": lr,
+            "env.per_gpu_batch_size": args.per_gpu_batch_size,
+            "env.batch_size": args.batch_size,
+        }
+    )
+
+    # 选择模型后端
+    if args.backend == "nnunet":
+        hyperparameters.update(
+            {
+                "model.names": ["nnunet"],
+                "model.nnunet.image_size": 512,
+                "model.nnunet.image_norm": "imagenet",
+            }
+        )
+    else:
+        hyperparameters.update({"model.names": ["sam"]})
+
+    if args.eval:  # load a checkpoint for evaluation
+        predictor = MultiModalPredictor.load(args.ckpt_path)
+    else:  # training
+        predictor = MultiModalPredictor(
+            problem_type="semantic_segmentation",
+            validation_metric=validation_metric,
+            eval_metric=validation_metric,
+            hyperparameters=hyperparameters,
+            label="label",
+            path=args.output_dir,
+        )
+        print(f"[INFO] AutoGluon 模型权重/日志将保存至: {predictor.path}")
+        predictor.fit(train_data=train_df, tuning_data=val_df, seed=args.seed)
+
+    # evaluation
+    metric_file = os.path.join(args.output_dir, "metrics.txt")
+    f = open(metric_file, "a")
+    if dataset_name in ["isic2017", "SBU-shadow", "road_segmentation", "leaf_disease_segmentation"]:
+        test_df = expand_path(pd.read_csv(os.path.join(dataset_dir, f"test.csv")), dataset_dir)
+        if dataset_name == "SBU-shadow":
+            eval_metrics = ["ber"]
+        else:
+            eval_metrics = ["iou", "dice"]
+
+        res = predictor.evaluate(test_df, metrics=eval_metrics)
+        print(f"Evaluation results for test dataset {dataset_name}: ", res)
+        f.write(f"Evaluation results for test dataset {dataset_name}: {res} \n")
+    elif dataset_name in ["polyp", "camo_sem_seg"]:
+        if dataset_name == "polyp":
+            test_datasets = ["CVC-ClinicDB", "Kvasir"]
+        elif dataset_name == "camo_sem_seg":
+            test_datasets = ["CAMO"]
+        else:
+            raise ValueError(f"Unknown dataset name: {dataset_name}.")
+        for per_dataset in test_datasets:
+            test_df = expand_path(pd.read_csv(os.path.join(dataset_dir, f"test_{per_dataset}.csv")), dataset_dir)
+            res = predictor.evaluate(test_df, metrics=["sm", "fm", "em", "mae"])
+            print(f"Evaluation results for test dataset {per_dataset}: ", res)
+            f.write(f"Evaluation results for test dataset {per_dataset}: {res} \n")
+    else:
+        raise ValueError(f"Unknown dataset name: {dataset_name}.")
+
+    f.close()
+
+```
+
+已按你的要求把 3 件事都补齐了：
+
+### 1) 训练进度条/控制台：每个 epoch 输出 **val_iou + val_dice**
+- 在 `SemanticSegmentationLitModule.validation_step` 里新增 **`val_dice`**（二值分割）并设置 `prog_bar=True`；
+- 同时把原本的 `val_loss`、`val_iou` 也设为 `prog_bar=True`，确保进度显示里能看到。
+
+对应改动文件：`multimodal/src/autogluon/multimodal/optim/lit_semantic_seg.py`
+
+### 2) 训练结束后：在测试集输出 **IoU + Dice**
+- 新增 `dice` 指标支持，并让示例脚本对 ISIC2017 的 test 评估改为 `["iou","dice"]`。
+
+对应改动文件：
+- `multimodal/src/autogluon/multimodal/constants.py`（新增 `DICE` 常量并加入语义分割指标列表）
+- `multimodal/src/autogluon/multimodal/optim/metrics/semantic_seg_metrics.py`（新增 `Binary_Dice_Pred`）
+- `multimodal/src/autogluon/multimodal/learners/semantic_segmentation.py`（让 `predictor.evaluate(..., metrics=["dice"])` 可用）
+- `examples/automm/Conv-LoRA/run_semantic_segmentation.py`（test eval 改为 iou+dice）
+
+### 3) 训练开始时：打印模型权重保存目录
+- 在 `run_semantic_segmentation.py` 创建 `MultiModalPredictor` 时显式传入 `path=args.output_dir`，并 `print`：
+  - `AutoGluon 模型权重/日志将保存至: {predictor.path}`
+
+对应改动文件：`examples/automm/Conv-LoRA/run_semantic_segmentation.py`
+
+### 你现在跑起来会看到什么
+- 训练时每个 epoch 的进度条里会出现：**`val_loss`、`val_iou`、`val_dice`**
+- 训练结束后会打印 test 集评估：**IoU + Dice**
+- 训练一开始会打印：**权重/日志保存路径**
+
+如果你希望把 **Dice 也作为 early-stopping 的 validation_metric**（而不是仍用 IoU），我也可以再加一个 `--val_metric {iou,dice}` 开关。
 
