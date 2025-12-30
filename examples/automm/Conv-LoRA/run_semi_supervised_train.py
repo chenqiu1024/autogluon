@@ -1,0 +1,79 @@
+#!/usr/bin/env python3
+"""半监督训练主脚本"""
+import argparse
+import os
+import torch
+import pandas as pd
+from autogluon.multimodal import MultiModalPredictor
+from semi_supervised import *
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--task", default="isic2017")
+    parser.add_argument("--data_dir", default="datasets/isic2017")
+    parser.add_argument("--output_dir", default="outputs/semi_supervised")
+    parser.add_argument("--labeled_ratio", type=float, default=0.1)
+    parser.add_argument("--max_epochs", type=int, default=30)
+    parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--quality_k_samples", type=int, default=5)
+    parser.add_argument("--quality_min_threshold", type=float, default=0.6)
+    parser.add_argument("--ema_momentum", type=float, default=0.999)
+    parser.add_argument("--gspo_enable", action="store_true")
+    parser.add_argument("--gspo_group_size", type=int, default=4)
+    parser.add_argument("--gspo_warmup_epochs", type=int, default=5)
+    parser.add_argument("--rank", type=int, default=4)
+    parser.add_argument("--expert_num", type=int, default=4)
+    parser.add_argument("--adapter_enable", action="store_true")
+    parser.add_argument("--adapter_dim", type=int, default=64)
+    args = parser.parse_args()
+    
+    # 加载数据
+    labeled_csv = os.path.join(args.data_dir, f"train_labeled_{int(args.labeled_ratio*100)}pct.csv")
+    weak_csv = os.path.join(args.data_dir, f"train_weak_{int((1-args.labeled_ratio)*100)}pct.csv")
+    data_module = SemiSupervisedDataModule(labeled_csv, weak_csv, args.batch_size)
+    train_df = data_module.merge_dataframes_for_autogluon()
+    val_df = pd.read_csv(os.path.join(args.data_dir, "val.csv"))
+    
+    # 配置模型
+    hyperparameters = {
+        "optimization.max_epochs": args.max_epochs,
+        "env.batch_size": args.batch_size,
+        "model.names": ["sam"],
+        "model.sam.checkpoint_name": "facebook/sam-vit-huge",
+        "model.sam.conv_lora_r": args.rank,
+        "model.sam.conv_lora_expert_num": args.expert_num,
+        "model.sam.conv_lora_enabled": True,
+        "model.sam.gspo_enabled": args.gspo_enable,
+    }
+    if args.adapter_enable:
+        hyperparameters.update({
+            "model.sam.encoder_adapter_enabled": True,
+            "model.sam.encoder_adapter_dim": args.adapter_dim,
+        })
+    
+    predictor = MultiModalPredictor(
+        problem_type="semantic_segmentation",
+        validation_metric="iou",
+        hyperparameters=hyperparameters,
+        label="label",
+        path=args.output_dir
+    )
+    
+    # 初始化半监督组件
+    ema_teacher = EMATeacher(predictor._learner.model, args.ema_momentum)
+    quality_estimator = ConsistencyQualityEstimator()
+    pseudo_label_gen = PseudoLabelGenerator(args.quality_min_threshold)
+    
+    if args.gspo_enable:
+        gspo_trainer = GSPOSemiSupervisedTrainer(predictor, args.gspo_group_size, args.gspo_warmup_epochs)
+        predictor._learner.ema_teacher = ema_teacher
+        predictor._learner.quality_estimator = quality_estimator
+        predictor._learner.pseudo_label_gen = pseudo_label_gen
+        predictor._learner.gspo_trainer = gspo_trainer
+    
+    print("\n开始训练...")
+    predictor.fit(train_data=train_df, tuning_data=val_df)
+    print(f"\n完成！模型保存在: {args.output_dir}")
+
+if __name__ == "__main__":
+    main()
