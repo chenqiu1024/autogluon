@@ -59,6 +59,7 @@ def main():
     parser.add_argument("--per_gpu_batch_size", type=int, default=1)
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--max_epochs", type=int, default=30)
+    parser.add_argument("--patience", type=int, default=10, help="Early stopping patience")
     parser.add_argument("--lr", type=float, default=1e-4)
     
     # EMA Teacher 参数
@@ -174,7 +175,7 @@ def main():
         "optim.lora.r": args.rank,  # LoRA rank
         "optim.lr": args.lr,
         "optim.max_epochs": args.max_epochs,
-        "optim.patience": 10,
+        "optim.patience": args.patience,
         "optim.val_check_interval": 1.0,
         "optim.loss_func": loss,
         "env.per_gpu_batch_size": args.per_gpu_batch_size,

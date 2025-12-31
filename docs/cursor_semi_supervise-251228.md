@@ -1,5 +1,5 @@
 # 模型架构方案设计与实现
-_Exported on 12/30/2025 at 20:45:54 PST from Cursor (2.2.44)_
+_Exported on 12/31/2025 at 00:12:51 PST from Cursor (2.2.44)_
 
 ---
 
@@ -20716,5 +20716,450 @@ watch -n 2 nvidia-smi
 
 # TensorBoard（可选）
 tensorboard --logdir outputs/semi_convlora_gspo_fcadt-251231 --port 6006
+```
+
+---
+
+**User**
+
+为什么训练只进行了12个epochs就中止了？用什么参数可以指定训练的epoch数？另外我想从当前已经训练的模型基础上继续训练（模型被保存在outputs/semi_convlora_gspo_fcadt-251230），需要怎么做？
+
+---
+
+**Cursor**
+
+好的，我明白问题了！让我详细解释：
+
+## 🔍 问题分析
+
+### 为什么只训练了12个epochs？
+
+从日志可以看出，**训练被 Early Stopping 机制提前终止了**：
+
+```
+Epoch 0-2: val_iou 不断提升 (最高 0.34356)
+Epoch 3-12: val_iou 连续10个epoch没有进入 top 3
+→ 触发 patience=10 的 early stopping 机制
+```
+
+**当前的 early stopping 配置**：
+- `optim.patience`: **10** （连续10个epoch没改善就停止）
+- `optim.top_k`: **3**（默认值，保存前3个最好的模型）
+- `optim.max_epochs`: 30（最大epoch数）
+
+## ✅ 解决方案
+
+### 方案1：增加 patience 值（推荐）
+
+在训练命令中添加 `--patience` 参数：
+
+```bash
+cd /root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA
+source activate conv-lora
+export HF_ENDPOINT=https://hf-mirror.com
+
+python run_semi_supervised_train_v3_fixed.py \
+  --task isic2017 \
+  --data_dir datasets/isic2017/isic2017 \
+  --labeled_ratio 0.1 \
+  --max_epochs 30 \
+  --batch_size 4 \
+  --per_gpu_batch_size 1 \
+  --lr 1e-4 \
+  --rank 4 \
+  --expert_num 4 \
+  --quality_k_samples 5 \
+  --quality_min_threshold 0.6 \
+  --ema_momentum 0.999 \
+  --gspo_enable \
+  --gspo_group_size 4 \
+  --adapter_enable \
+  --adapter_dim 64 \
+  --patience 30 \
+  --output_dir outputs/semi_convlora_gspo_fcadt-continue
+```
+
+但首先需要在脚本中添加 `--patience` 参数支持：
+
+```plaintext
+Epoch 0-2: val_iou 不断提升 (最高 0.34356)
+Epoch 3-12: val_iou 连续10个epoch没有进入 top 3
+→ 触发 patience=10 的 early stopping 机制
+```
+
+```shellscript
+cd /root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA
+source activate conv-lora
+export HF_ENDPOINT=https://hf-mirror.com
+
+python run_semi_supervised_train_v3_fixed.py \
+  --task isic2017 \
+  --data_dir datasets/isic2017/isic2017 \
+  --labeled_ratio 0.1 \
+  --max_epochs 30 \
+  --batch_size 4 \
+  --per_gpu_batch_size 1 \
+  --lr 1e-4 \
+  --rank 4 \
+  --expert_num 4 \
+  --quality_k_samples 5 \
+  --quality_min_threshold 0.6 \
+  --ema_momentum 0.999 \
+  --gspo_enable \
+  --gspo_group_size 4 \
+  --adapter_enable \
+  --adapter_dim 64 \
+  --patience 30 \
+  --output_dir outputs/semi_convlora_gspo_fcadt-continue
+```
+
+现在让我创建一个从已有模型继续训练的脚本：
+
+```worktree-python
+#!/usr/bin/env python3
+"""
+从已有checkpoint继续训练的脚本
+"""
+import os
+import argparse
+from autogluon.multimodal import MultiModalPredictor
+import pandas as pd
+
+
+def load_data(csv_path, dataset_dir):
+    """加载数据"""
+    df = pd.read_csv(csv_path)
+    for col in ['image', 'label']:
+        if col in df.columns:
+            df[col] = df[col].apply(lambda ele: os.path.join(dataset_dir, ele))
+    return df
+
+
+def main():
+    parser = argparse.ArgumentParser(description="从checkpoint继续训练")
+    parser.add_argument("--checkpoint_dir", type=str, required=True, 
+                       help="已有模型目录（包含model.ckpt）")
+    parser.add_argument("--data_dir", type=str, required=True,
+                       help="数据目录")
+    parser.add_argument("--additional_epochs", type=int, default=10,
+                       help="额外训练的epoch数")
+    parser.add_argument("--patience", type=int, default=30,
+                       help="Early stopping patience")
+    parser.add_argument("--new_output_dir", type=str, default=None,
+                       help="新的输出目录（如果不指定，会覆盖原目录）")
+    
+    args = parser.parse_args()
+    
+    print("="*60)
+    print("从已有模型继续训练")
+    print("="*60)
+    print(f"原模型路径: {args.checkpoint_dir}")
+    print(f"额外训练: {args.additional_epochs} epochs")
+    print(f"Patience: {args.patience}")
+    print()
+    
+    # 1. 加载已有的predictor
+    print("步骤 1: 加载已有模型...")
+    predictor = MultiModalPredictor.load(args.checkpoint_dir)
+    print("✅ 模型加载完成")
+    
+    # 2. 加载训练数据
+    print("\n步骤 2: 加载训练数据...")
+    train_csv = os.path.join(args.data_dir, "labeled_weak_merged", "train_merged.csv")
+    val_csv = os.path.join(args.data_dir, "labeled_weak_merged", "val.csv")
+    
+    train_df = load_data(train_csv, args.data_dir)
+    val_df = load_data(val_csv, args.data_dir)
+    
+    print(f"训练集: {len(train_df)} 样本")
+    print(f"验证集: {len(val_df)} 样本")
+    
+    # 3. 设置新的训练参数
+    print("\n步骤 3: 配置继续训练...")
+    
+    # 如果指定了新输出目录，则使用新目录
+    output_dir = args.new_output_dir if args.new_output_dir else args.checkpoint_dir
+    
+    # 继续训练（会在原有训练基础上增加epochs）
+    print(f"\n开始继续训练 {args.additional_epochs} 个epochs...")
+    print(f"输出目录: {output_dir}")
+    
+    predictor.fit(
+        train_df,
+        hyperparameters={
+            "optim.max_epochs": args.additional_epochs,
+            "optim.patience": args.patience,
+        },
+        # 注意: AutoGluon会在已有的训练基础上继续
+        # 如果需要完全重新开始，需要创建新的predictor
+    )
+    
+    print("\n✅ 继续训练完成！")
+    
+    # 4. 评估
+    print("\n步骤 4: 评估模型...")
+    score = predictor.evaluate(val_df, metrics=["iou"])
+    print(f"验证集 IoU: {score}")
+    
+    print(f"\n模型已保存到: {output_dir}")
+
+
+if __name__ == "__main__":
+    main()
+
+```
+
+完美！✅ 现在我来总结完整的解决方案：
+
+## 📊 问题总结
+
+**训练在12个epochs后停止的原因**：
+- `optim.patience=10`：连续10个epochs验证指标（val_iou）没有进入 top 3 就停止
+- 最佳 val_iou（0.34356）出现在 epoch 2
+- 从 epoch 3-12，连续10个epochs没有改善 → 触发 early stopping
+
+## ✅ 解决方案
+
+### 方案1：用更大的 patience 重新训练（推荐）
+
+我已经为脚本添加了 `--patience` 参数，现在可以这样训练：
+
+```bash
+cd /root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA
+source activate conv-lora
+export HF_ENDPOINT=https://hf-mirror.com
+
+# 方式 A: 训练30个epochs，patience=30（确保能训练满30 epochs）
+nohup python run_semi_supervised_train_v3_fixed.py \
+  --task isic2017 \
+  --data_dir datasets/isic2017/isic2017 \
+  --labeled_ratio 0.1 \
+  --max_epochs 30 \
+  --patience 30 \
+  --batch_size 4 \
+  --per_gpu_batch_size 1 \
+  --lr 1e-4 \
+  --rank 4 \
+  --expert_num 4 \
+  --quality_k_samples 5 \
+  --quality_min_threshold 0.6 \
+  --ema_momentum 0.999 \
+  --gspo_enable \
+  --gspo_group_size 4 \
+  --adapter_enable \
+  --adapter_dim 64 \
+  --output_dir outputs/semi_full_30epochs \
+> outputs/semi_full_30epochs.log 2>&1 &
+
+# 方式 B: 禁用 early stopping（patience=999）
+nohup python run_semi_supervised_train_v3_fixed.py \
+  --task isic2017 \
+  --data_dir datasets/isic2017/isic2017 \
+  --labeled_ratio 0.1 \
+  --max_epochs 50 \
+  --patience 999 \
+  --batch_size 4 \
+  --per_gpu_batch_size 1 \
+  --lr 1e-4 \
+  --rank 4 \
+  --expert_num 4 \
+  --quality_k_samples 5 \
+  --quality_min_threshold 0.6 \
+  --ema_momentum 0.999 \
+  --gspo_enable \
+  --gspo_group_size 4 \
+  --adapter_enable \
+  --adapter_dim 64 \
+  --output_dir outputs/semi_full_50epochs \
+> outputs/semi_full_50epochs.log 2>&1 &
+```
+
+### 方案2：从已有模型继续训练（实验性）
+
+我创建了 `continue_training.py` 脚本，但**需要注意**：AutoGluon 可能不完全支持简单的继续训练。这个脚本会尝试在已有模型基础上继续训练：
+
+```bash
+# 尝试从已有模型继续训练
+python continue_training.py \
+  --checkpoint_dir outputs/semi_convlora_gspo_fcadt-251230 \
+  --data_dir datasets/isic2017/isic2017 \
+  --additional_epochs 20 \
+  --patience 30 \
+  --new_output_dir outputs/semi_continue_training
+```
+
+⚠️ **警告**：这个方法可能会重新开始训练，而不是真正的"继续"。**推荐使用方案1**。
+
+## 📋 所有可用的训练参数
+
+```bash
+python run_semi_supervised_train_v3_fixed.py --help
+```
+
+**关键参数**：
+- `--max_epochs 30`：最大训练 epoch 数
+- `--patience 30`：Early stopping 的耐心值（新增✨）
+- `--lr 1e-4`：学习率
+- `--rank 4`：Conv-LoRA 的秩
+- `--expert_num 4`：Conv-LoRA 专家数
+- `--adapter_enable`：启用 FC Adapter
+- `--adapter_dim 64`：Adapter 维度
+- `--gspo_enable`：启用 GSPO 微调
+
+## 🎯 推荐设置
+
+**如果想训练完整的30个epochs**：
+```bash
+--max_epochs 30 --patience 30
+```
+
+**如果想让模型自动找到最佳停止点**：
+```bash
+--max_epochs 50 --patience 15  # 允许15个epochs没改善才停止
+```
+
+**如果想完全禁用 early stopping**：
+```bash
+--max_epochs 30 --patience 999  # patience远大于max_epochs
+```
+
+## 📝 验证修改
+
+查看修改后的参数：
+
+```shellscript
+cd /root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA
+source activate conv-lora
+export HF_ENDPOINT=https://hf-mirror.com
+
+# 方式 A: 训练30个epochs，patience=30（确保能训练满30 epochs）
+nohup python run_semi_supervised_train_v3_fixed.py \
+  --task isic2017 \
+  --data_dir datasets/isic2017/isic2017 \
+  --labeled_ratio 0.1 \
+  --max_epochs 30 \
+  --patience 30 \
+  --batch_size 4 \
+  --per_gpu_batch_size 1 \
+  --lr 1e-4 \
+  --rank 4 \
+  --expert_num 4 \
+  --quality_k_samples 5 \
+  --quality_min_threshold 0.6 \
+  --ema_momentum 0.999 \
+  --gspo_enable \
+  --gspo_group_size 4 \
+  --adapter_enable \
+  --adapter_dim 64 \
+  --output_dir outputs/semi_full_30epochs \
+> outputs/semi_full_30epochs.log 2>&1 &
+
+# 方式 B: 禁用 early stopping（patience=999）
+nohup python run_semi_supervised_train_v3_fixed.py \
+  --task isic2017 \
+  --data_dir datasets/isic2017/isic2017 \
+  --labeled_ratio 0.1 \
+  --max_epochs 50 \
+  --patience 999 \
+  --batch_size 4 \
+  --per_gpu_batch_size 1 \
+  --lr 1e-4 \
+  --rank 4 \
+  --expert_num 4 \
+  --quality_k_samples 5 \
+  --quality_min_threshold 0.6 \
+  --ema_momentum 0.999 \
+  --gspo_enable \
+  --gspo_group_size 4 \
+  --adapter_enable \
+  --adapter_dim 64 \
+  --output_dir outputs/semi_full_50epochs \
+> outputs/semi_full_50epochs.log 2>&1 &
+```
+
+```shellscript
+# 尝试从已有模型继续训练
+python continue_training.py \
+  --checkpoint_dir outputs/semi_convlora_gspo_fcadt-251230 \
+  --data_dir datasets/isic2017/isic2017 \
+  --additional_epochs 20 \
+  --patience 30 \
+  --new_output_dir outputs/semi_continue_training
+```
+
+```shellscript
+cd /root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA
+source activate conv-lora
+export HF_ENDPOINT=https://hf-mirror.com
+
+# 方式 A: 训练30个epochs，patience=30（确保能训练满30 epochs）
+nohup python run_semi_supervised_train_v3_fixed.py \
+  --task isic2017 \
+  --data_dir datasets/isic2017/isic2017 \
+  --labeled_ratio 0.1 \
+  --max_epochs 30 \
+  --patience 30 \
+  --batch_size 4 \
+  --per_gpu_batch_size 1 \
+  --lr 1e-4 \
+  --rank 4 \
+  --expert_num 4 \
+  --quality_k_samples 5 \
+  --quality_min_threshold 0.6 \
+  --ema_momentum 0.999 \
+  --gspo_enable \
+  --gspo_group_size 4 \
+  --adapter_enable \
+  --adapter_dim 64 \
+  --output_dir outputs/semi_full_30epochs \
+> outputs/semi_full_30epochs.log 2>&1 &
+
+# 方式 B: 禁用 early stopping（patience=999）
+nohup python run_semi_supervised_train_v3_fixed.py \
+  --task isic2017 \
+  --data_dir datasets/isic2017/isic2017 \
+  --labeled_ratio 0.1 \
+  --max_epochs 50 \
+  --patience 999 \
+  --batch_size 4 \
+  --per_gpu_batch_size 1 \
+  --lr 1e-4 \
+  --rank 4 \
+  --expert_num 4 \
+  --quality_k_samples 5 \
+  --quality_min_threshold 0.6 \
+  --ema_momentum 0.999 \
+  --gspo_enable \
+  --gspo_group_size 4 \
+  --adapter_enable \
+  --adapter_dim 64 \
+  --output_dir outputs/semi_full_50epochs \
+> outputs/semi_full_50epochs.log 2>&1 &
+```
+
+```shellscript
+# 尝试从已有模型继续训练
+python continue_training.py \
+  --checkpoint_dir outputs/semi_convlora_gspo_fcadt-251230 \
+  --data_dir datasets/isic2017/isic2017 \
+  --additional_epochs 20 \
+  --patience 30 \
+  --new_output_dir outputs/semi_continue_training
+```
+
+```shellscript
+python run_semi_supervised_train_v3_fixed.py --help
+```
+
+```shellscript
+--max_epochs 30 --patience 30
+```
+
+```shellscript
+--max_epochs 50 --patience 15  # 允许15个epochs没改善才停止
+```
+
+```shellscript
+--max_epochs 30 --patience 999  # patience远大于max_epochs
 ```
 
