@@ -50,8 +50,10 @@ def main():
     np.random.seed(args.box_seed)
     boxes = []
     for _, row in tqdm(weak_df.iterrows(), total=len(weak_df)):
-        mask_path = os.path.join(args.data_dir, os.path.basename(row['label']))
-        img_path = os.path.join(args.data_dir, os.path.basename(row['image']))
+        ##mask_path = os.path.join(args.data_dir, os.path.basename(row['label']))
+        ##img_path = os.path.join(args.data_dir, os.path.basename(row['image']))
+        mask_path = os.path.join(args.data_dir, row['label'])
+        img_path = os.path.join(args.data_dir, row['image'])
         mask = np.array(Image.open(mask_path).convert('L'))
         tight_box = compute_tight_box(mask)
         if tight_box:

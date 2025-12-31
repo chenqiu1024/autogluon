@@ -41,20 +41,17 @@ class EMATeacher(nn.Module):
         self.momentum = momentum
         self.update_freq = update_freq
         
-        # 深拷贝 student 模型参数到 teacher（如果提供）
-        if student_model is not None:
-            self.teacher_model = deepcopy(student_model)
-            
-            # 冻结 teacher 参数（不计算梯度）
-            for param in self.teacher_model.parameters():
-                param.requires_grad = False
-            
-            # 设置 teacher 为 eval 模式（但仍可通过 dropout 产生多样性）
-            self.teacher_model.eval()           
-            print(f"[EMA Teacher] 初始化完成，momentum={momentum}, update_freq={update_freq}")
-        else:
-            self.teacher_model = None
-            print(f"[EMA Teacher] 延迟初始化模式，momentum={momentum}, update_freq={update_freq}")
+        # 深拷贝 student 模型参数到 teacher
+        self.teacher_model = deepcopy(student_model)
+        
+        # 冻结 teacher 参数（不计算梯度）
+        for param in self.teacher_model.parameters():
+            param.requires_grad = False
+        
+        # 设置 teacher 为 eval 模式（但仍可通过 dropout 产生多样性）
+        self.teacher_model.eval()
+        
+        print(f"[EMA Teacher] 初始化完成，momentum={momentum}, update_freq={update_freq}")
     
     @torch.no_grad()
     def update(self, student_model: nn.Module):
