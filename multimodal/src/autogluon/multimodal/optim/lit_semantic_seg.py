@@ -37,6 +37,14 @@ class SemanticSegmentationLitModule(LitModule):
         }
         # BBoxPromptPredictor instance for "predict" mode
         self.train_bbox_predictor = train_bbox_predictor
+        
+        # 半监督组件（稍后注入）
+        self.ema_teacher = None
+        self.quality_estimator = None
+        self.pseudo_label_gen = None
+        self.semi_supervised_config = None
+        self.labeled_count = 0
+        self.weak_start_idx = 0
 
     def _compute_loss(self, output: Dict, label: torch.Tensor, **kwargs):
         loss = 0

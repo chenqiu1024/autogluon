@@ -20,6 +20,7 @@ class SemiSupervisedCallback(Callback):
         ema_teacher,
         quality_estimator,
         pseudo_label_gen,
+        data_module,
         gspo_trainer=None,
         semi_supervised_config=None
     ):
@@ -32,6 +33,8 @@ class SemiSupervisedCallback(Callback):
             质量评估器
         pseudo_label_gen : PseudoLabelGenerator
             伪标签生成器
+        data_module : SemiSupervisedDataModule
+            数据模块（用于获取 labeled_count 等信息）
         gspo_trainer : GSPOSemiSupervisedTrainer, optional
             GSPO 半监督训练器
         semi_supervised_config : dict, optional
@@ -40,6 +43,7 @@ class SemiSupervisedCallback(Callback):
         self.ema_teacher = ema_teacher
         self.quality_estimator = quality_estimator
         self.pseudo_label_gen = pseudo_label_gen
+        self.data_module = data_module
         self.gspo_trainer = gspo_trainer
         self.semi_supervised_config = semi_supervised_config or {}
         
@@ -80,6 +84,11 @@ class SemiSupervisedCallback(Callback):
         pl_module.pseudo_label_gen = self.pseudo_label_gen
         pl_module.semi_supervised_config = self.semi_supervised_config
         
+        # 传递数据集信息（用于判断 labeled vs weak）
+        pl_module.labeled_count = getattr(self.data_module, 'labeled_count', 0)
+        pl_module.weak_start_idx = getattr(self.data_module, 'weak_start_idx', 0)
+        pl_module.total_samples = pl_module.labeled_count + len(self.data_module.weak_df)
+        
         if self.gspo_trainer is not None:
             pl_module.gspo_trainer = self.gspo_trainer
             print(f"✓ GSPO 半监督训练器已注入")
@@ -87,6 +96,7 @@ class SemiSupervisedCallback(Callback):
         print(f"✓ EMA Teacher 已注入")
         print(f"✓ 质量评估器已注入")
         print(f"✓ 伪标签生成器已注入")
+        print(f"✓ 数据集信息已注入 (labeled={pl_module.labeled_count}, weak_start={pl_module.weak_start_idx})")
         print("="*60 + "\n")
     
     def on_train_epoch_start(self, trainer: pl.Trainer, pl_module: pl.LightningModule):

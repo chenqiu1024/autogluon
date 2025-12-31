@@ -68,24 +68,36 @@ class SemiSupervisedDataModule:
         """
         合并 labeled 和 weak 数据为单个 dataframe（用于 AutoGluon）
         
+        注意：AutoGluon 会过滤掉额外的列，所以不能添加 is_labeled 等元数据。
+        
         策略：
-        - Labeled 样本保留 image 和 label
-        - Weak 样本保留 image 和 box（label 设为 None 或占位符）
+        - Labeled 数据在前（索引 0 到 len(labeled)-1）
+        - Weak 数据在后（索引 len(labeled) 到 end）
+        - LitModule 需要根据索引或其他方式识别数据类型
         
         Returns:
-            merged_df: 合并后的 dataframe
+            merged_df: 合并后的 dataframe，只包含 image 和 label 列
         """
-        # 复制 labeled 数据
-        labeled = self.labeled_df.copy()
-        labeled['is_labeled'] = True
-        labeled['box'] = None  # 无 box
+        # 复制 labeled 数据（只保留 image 和 label）
+        labeled = self.labeled_df[['image', 'label']].copy()
         
         # 复制 weak 数据
-        weak = self.weak_df.copy()
-        weak['is_labeled'] = False
-        weak['label'] = labeled['label'].iloc[0]  # 占位符（训练时不使用）
+        weak = self.weak_df[['image']].copy()
+        # 为 weak 数据添加占位符 label（训练时会被忽略）
+        if len(labeled) > 0:
+            weak['label'] = labeled['label'].iloc[0]
+        else:
+            # 如果没有 labeled 数据，使用一个虚拟路径
+            weak['label'] = weak['image'].iloc[0]  # 占位符
         
-        # 合并
+        # 合并（labeled 在前，weak 在后）
         merged = pd.concat([labeled, weak], ignore_index=True)
+        
+        # 记录分界点（供 Callback 使用）
+        self.labeled_count = len(labeled)
+        self.weak_start_idx = len(labeled)
+        
+        print(f"[Data Module] Merged: {len(labeled)} labeled + {len(weak)} weak = {len(merged)} total")
+        print(f"[Data Module] Labeled indices: 0-{self.labeled_count-1}, Weak indices: {self.weak_start_idx}-{len(merged)-1}")
         
         return merged
