@@ -396,9 +396,27 @@ class SemanticSegmentationLitModule(LitModule):
             # mask 像素和为 0 视为 weak，占位或空 mask 不会被误判为 labeled
             is_labeled = (label_tensor.flatten(1).sum(dim=1) > 0)
 
-        has_weak = (~is_labeled).any()
-        has_labeled = is_labeled.any()
-        
+        # 将 weak 样本的外部 bbox 注入 batch（若有）
+        if getattr(self, "weak_box_map", None) is not None:
+            image_path_key = getattr(self.model, "image_path_key", None)
+            if image_path_key and image_path_key in batch:
+                paths = batch[image_path_key]
+                try:
+                    bsz = len(paths)
+                    boxes = torch.zeros((bsz, 1, 4), device=device, dtype=torch.float32)
+                    filled = False
+                    for i, p in enumerate(paths):
+                        box = self.weak_box_map.get(p, None)
+                        if box is None:
+                            continue
+                        if len(box) == 4:
+                            boxes[i, 0] = torch.tensor(box, device=device, dtype=torch.float32)
+                            filled = True
+                    if filled:
+                        batch[self.model.box_key] = boxes
+                except Exception:
+                    pass
+
         # 2. 对 weak 样本：Teacher 生成伪标签（Phase 1-2）
         pseudo_labels = None
         quality_scores = None

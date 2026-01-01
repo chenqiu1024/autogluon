@@ -125,6 +125,19 @@ def main():
     train_df = data_module.merge_dataframes_for_autogluon()
     train_df = expand_path(train_df, args.data_dir)
     
+    # 为弱标注样本构建 bbox 映射（绝对路径 -> [x1,y1,x2,y2])
+    weak_box_map = {}
+    if "box" in data_module.weak_df.columns:
+        for _, row in data_module.weak_df.iterrows():
+            try:
+                box = [float(x) for x in str(row["box"]).split(",")]
+                if len(box) != 4:
+                    continue
+                abs_path = os.path.join(args.data_dir, row["image"])
+                weak_box_map[abs_path] = box
+            except Exception:
+                continue
+    
     # 验证集
     val_csv = os.path.join(args.data_dir, "val.csv")
     val_df = None
@@ -220,6 +233,7 @@ def main():
         'pseudo_label_gen': pseudo_label_gen,
         'labeled_count': data_module.labeled_count,
         'weak_start_idx': data_module.weak_start_idx,
+        'weak_box_map': weak_box_map,
         'config': vars(args)
     }
     

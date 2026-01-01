@@ -819,8 +819,7 @@ class SemanticSegmentationLearner(BaseLearner):
         gspo_trainer = None
         if is_train:
             gspo_trainer = self._maybe_create_gspo_trainer()
-        if is_train:
-            return SemanticSegmentationLitModule(
+            litmodule = SemanticSegmentationLitModule(
                 model=model,
                 model_postprocess_fn=model_postprocess_fn,
                 trainable_param_names=peft_param_names,
@@ -830,13 +829,48 @@ class SemanticSegmentationLearner(BaseLearner):
                 **optim_kwargs,
             )
         else:
-            return SemanticSegmentationLitModule(
+            litmodule = SemanticSegmentationLitModule(
                 model=self._model,
                 model_postprocess_fn=self._model_postprocess_fn,
                 train_box_prompt_cfg=self._train_box_prompt_cfg,
                 train_bbox_predictor=self._train_bbox_predictor,
                 **optim_kwargs,
             )
+
+        # Inject semi-supervised components if provided (set by training script)
+        if is_train and hasattr(self, "_semi_supervised_components"):
+            from copy import deepcopy
+            components = self._semi_supervised_components
+
+            if components.get("ema_teacher") is not None:
+                ema_teacher = components["ema_teacher"]
+                if ema_teacher.teacher_model is None and model is not None:
+                    ema_teacher.teacher_model = deepcopy(model)
+                    for p in ema_teacher.teacher_model.parameters():
+                        p.requires_grad = False
+                    ema_teacher.teacher_model.eval()
+                ema_teacher.student_model = model
+                litmodule.ema_teacher = ema_teacher
+
+            litmodule.quality_estimator = components.get("quality_estimator")
+            litmodule.pseudo_label_gen = components.get("pseudo_label_gen")
+            litmodule.labeled_count = components.get("labeled_count", 0)
+            litmodule.weak_start_idx = components.get("weak_start_idx", 0)
+            litmodule.semi_supervised_config = components.get("config", {})
+            litmodule.weak_box_map = components.get("weak_box_map")
+
+            if components.get("gspo_trainer") is not None:
+                litmodule.gspo_trainer = components["gspo_trainer"]
+
+            logger.info(
+                "Semi-supervised components injected: EMA=%s, QE=%s, PLG=%s, weak_box_map=%s",
+                litmodule.ema_teacher is not None,
+                litmodule.quality_estimator is not None,
+                litmodule.pseudo_label_gen is not None,
+                litmodule.weak_box_map is not None,
+            )
+
+        return litmodule
 
     def _maybe_create_gspo_trainer(self):
         """
