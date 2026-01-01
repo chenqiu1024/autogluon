@@ -382,7 +382,8 @@ class SemanticSegmentationLitModule(LitModule):
         
         对应公式 2.1-2.5 的完整实现
         """
-        device = self.model.device
+        # Ensure we use the LightningModule device to avoid CPU/CUDA mismatch
+        device = self.device
         
         # 1. 区分 labeled 和 weak 样本
         # AutoGluon 会过滤掉自定义列，batch 里通常没有 is_labeled。
@@ -395,6 +396,10 @@ class SemanticSegmentationLitModule(LitModule):
                 label_tensor = label_tensor[:, 0, ...]
             # mask 像素和为 0 视为 weak，占位或空 mask 不会被误判为 labeled
             is_labeled = (label_tensor.flatten(1).sum(dim=1) > 0)
+
+        # 统计 weak / labeled 是否存在
+        has_weak = (~is_labeled).any()
+        has_labeled = is_labeled.any()
 
         # 将 weak 样本的外部 bbox 注入 batch（若有）
         if getattr(self, "weak_box_map", None) is not None:
