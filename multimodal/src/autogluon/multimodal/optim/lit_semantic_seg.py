@@ -39,6 +39,11 @@ class SemanticSegmentationLitModule(LitModule):
         self.train_bbox_predictor = train_bbox_predictor
 
     def _compute_loss(self, output: Dict, label: torch.Tensor, **kwargs):
+        # Guard against missing loss_fn (would raise "NoneType is not callable")
+        if self.loss_func is None:
+            raise ValueError(
+                "loss_func is None. Please set loss_func or specify optim.loss_func in config."
+            )
         loss = 0
         for _, per_output in output.items():
             weight = per_output[WEIGHT] if WEIGHT in per_output else 1
@@ -318,28 +323,28 @@ class SemanticSegmentationLitModule(LitModule):
             hasattr(self, 'quality_estimator') and
             hasattr(self, 'pseudo_label_gen')
         )
-        
+
         if use_semi_supervised:
             # 半监督训练（整合 Phase 1-4）
             loss = self._semi_supervised_training_step(batch, batch_idx)
         else:
-        # Check if GSPO should be used
-        use_gspo = (
-            self.gspo_trainer is not None and 
-            self.gspo_trainer.is_gspo_active(self.current_epoch)
-        )
-        
-        if use_gspo:
-            # GSPO-enhanced training
-            loss, metrics, selected_experts = self._gspo_training_step(batch)
-            
-            # Log GSPO-specific metrics
-            for key, value in metrics.items():
-                self.log(f"train_{key}", value, on_step=True, on_epoch=True)
-        else:
-            # Standard training (same as parent class)
-            output, loss = self._shared_step(batch)
-            selected_experts = None
+            # Check if GSPO should be used
+            use_gspo = (
+                self.gspo_trainer is not None
+                and self.gspo_trainer.is_gspo_active(self.current_epoch)
+            )
+
+            if use_gspo:
+                # GSPO-enhanced training
+                loss, metrics, selected_experts = self._gspo_training_step(batch)
+
+                # Log GSPO-specific metrics
+                for key, value in metrics.items():
+                    self.log(f"train_{key}", value, on_step=True, on_epoch=True)
+            else:
+                # Standard training (same as parent class)
+                output, loss = self._shared_step(batch)
+                selected_experts = None
         
         # Handle manual optimization if needed
         if not self.automatic_optimization:

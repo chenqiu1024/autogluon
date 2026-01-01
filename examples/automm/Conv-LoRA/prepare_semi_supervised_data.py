@@ -89,7 +89,7 @@ def add_box_noise(box, noise_std=0.10, img_width=None, img_height=None):
     return [int(x_min_noisy), int(y_min_noisy), int(x_max_noisy), int(y_max_noisy)]
 
 
-def stratified_split(df, mask_dir, labeled_ratio=0.1, random_seed=42):
+def stratified_split(df, data_dir, labeled_ratio=0.1, random_seed=42):
     """
     分层抽样（按 mask 面积四分位数）
     
@@ -109,7 +109,8 @@ def stratified_split(df, mask_dir, labeled_ratio=0.1, random_seed=42):
     print("计算 mask 面积用于分层...")
     areas = []
     for _, row in tqdm(df.iterrows(), total=len(df)):
-        mask_path = os.path.join(mask_dir, os.path.basename(row['label']))
+        # label 列已经是相对路径：train/ISIC-2017_Training_Part1_GroundTruth/xxx.png
+        mask_path = os.path.join(data_dir, row['label'])
         area = compute_mask_area(mask_path)
         areas.append(area)
     
@@ -146,7 +147,7 @@ def stratified_split(df, mask_dir, labeled_ratio=0.1, random_seed=42):
     return labeled_df, weak_df
 
 
-def generate_weak_labels(weak_df, mask_dir, image_dir, noise_std=0.10, box_seed=123):
+def generate_weak_labels(weak_df, data_dir, noise_std=0.10, box_seed=123):
     """
     为弱标注集生成 noisy box
     
@@ -166,8 +167,9 @@ def generate_weak_labels(weak_df, mask_dir, image_dir, noise_std=0.10, box_seed=
     boxes = []
     
     for idx, row in tqdm(weak_df.iterrows(), total=len(weak_df)):
-        mask_path = os.path.join(mask_dir, os.path.basename(row['label']))
-        image_path = os.path.join(image_dir, os.path.basename(row['image']))
+        # 直接使用 csv 中的相对路径拼 data_dir
+        mask_path = os.path.join(data_dir, row['label'])
+        image_path = os.path.join(data_dir, row['image'])
         
         # 读取 mask 计算 tight box
         mask = np.array(Image.open(mask_path).convert('L'))
@@ -194,7 +196,7 @@ def generate_weak_labels(weak_df, mask_dir, image_dir, noise_std=0.10, box_seed=
 def main():
     parser = argparse.ArgumentParser(description="准备半监督数据（10% mask + 90% noisy box）")
     parser.add_argument("--task", type=str, default="isic2017", help="任务名称")
-    parser.add_argument("--data_dir", type=str, default="datasets/isic2017", help="数据集根目录")
+    parser.add_argument("--data_dir", type=str, default="datasets/isic2017/isic2017", help="数据集根目录")
     parser.add_argument("--labeled_ratio", type=float, default=0.1, help="有标注比例")
     parser.add_argument("--box_noise_std", type=float, default=0.10, help="Box 噪声标准差")
     parser.add_argument("--random_seed", type=int, default=42, help="数据拆分随机种子")
@@ -204,8 +206,6 @@ def main():
     
     # 路径
     train_csv = os.path.join(args.data_dir, "train.csv")
-    mask_dir = os.path.join(args.data_dir, "train_masks")
-    image_dir = os.path.join(args.data_dir, "train_images")
     
     # 读取原始数据
     print(f"读取数据：{train_csv}")
@@ -214,14 +214,14 @@ def main():
     
     # 分层抽样
     labeled_df, weak_df = stratified_split(
-        df, mask_dir,
+        df, args.data_dir,
         labeled_ratio=args.labeled_ratio,
         random_seed=args.random_seed
     )
     
     # 生成弱标注 box
     weak_df = generate_weak_labels(
-        weak_df, mask_dir, image_dir,
+        weak_df, args.data_dir,
         noise_std=args.box_noise_std,
         box_seed=args.box_seed
     )
@@ -231,7 +231,7 @@ def main():
     zero_mask_path = os.path.join(args.data_dir, zero_mask_rel)
     if not os.path.exists(zero_mask_path):
         # 用第一张训练图的尺寸创建零掩码
-        first_img_path = os.path.join(image_dir, os.listdir(image_dir)[0])
+        first_img_path = os.path.join(args.data_dir, labeled_df['image'].iloc[0])
         img = Image.open(first_img_path).convert("RGB")
         w, h = img.size
         zero_mask = Image.new("L", (w, h), 0)
