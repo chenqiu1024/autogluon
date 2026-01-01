@@ -37,14 +37,6 @@ class SemanticSegmentationLitModule(LitModule):
         }
         # BBoxPromptPredictor instance for "predict" mode
         self.train_bbox_predictor = train_bbox_predictor
-        
-        # 半监督组件（稍后注入）
-        self.ema_teacher = None
-        self.quality_estimator = None
-        self.pseudo_label_gen = None
-        self.semi_supervised_config = None
-        self.labeled_count = 0
-        self.weak_start_idx = 0
 
     def _compute_loss(self, output: Dict, label: torch.Tensor, **kwargs):
         loss = 0
@@ -302,10 +294,12 @@ class SemanticSegmentationLitModule(LitModule):
     
     def training_step(self, batch, batch_idx):
         """
-        Per training step with GSPO enhancement.
+        Per training step with GSPO and Semi-Supervised enhancement.
         
-        If GSPO is enabled and warmed up, use group-level optimization.
-        Otherwise, fall back to standard training.
+        支持三种训练模式：
+        1. 标准监督学习
+        2. GSPO 策略优化（如果启用）
+        3. 半监督学习（如果启用）- 新增
         
         Parameters
         ----------
@@ -318,6 +312,17 @@ class SemanticSegmentationLitModule(LitModule):
         -------
         Average loss of the mini-batch data
         """
+        # Check if semi-supervised learning is enabled
+        use_semi_supervised = (
+            hasattr(self, 'ema_teacher') and 
+            hasattr(self, 'quality_estimator') and
+            hasattr(self, 'pseudo_label_gen')
+        )
+        
+        if use_semi_supervised:
+            # 半监督训练（整合 Phase 1-4）
+            loss = self._semi_supervised_training_step(batch, batch_idx)
+        else:
         # Check if GSPO should be used
         use_gspo = (
             self.gspo_trainer is not None and 
@@ -359,6 +364,190 @@ class SemanticSegmentationLitModule(LitModule):
         
         self.log("train_loss", loss)
         return loss
+    
+    def _semi_supervised_training_step(self, batch, batch_idx):
+        """
+        半监督训练步骤（完整实现 Phase 1-4）
+        
+        对应设计文档中的训练流程：
+        1. 区分 labeled 和 weak 样本
+        2. Teacher K 次采样 → 质量评估 → 伪标签生成
+        3. Student 前向 → 计算半监督损失
+        4. 更新 EMA Teacher
+        
+        对应公式 2.1-2.5 的完整实现
+        """
+        device = self.model.device
+        
+        # 1. 区分 labeled 和 weak 样本
+        # AutoGluon 会过滤掉自定义列，batch 里通常没有 is_labeled。
+        # 若缺失，则根据 mask 是否为空来推断：有正像素视为 labeled。
+        if 'is_labeled' in batch:
+            is_labeled = batch['is_labeled'].to(device)
+        else:
+            label_tensor = batch[self.model.label_key].to(device)
+            if label_tensor.dim() == 4 and label_tensor.shape[1] == 1:
+                label_tensor = label_tensor[:, 0, ...]
+            # mask 像素和为 0 视为 weak，占位或空 mask 不会被误判为 labeled
+            is_labeled = (label_tensor.flatten(1).sum(dim=1) > 0)
+
+        has_weak = (~is_labeled).any()
+        has_labeled = is_labeled.any()
+        
+        # 2. 对 weak 样本：Teacher 生成伪标签（Phase 1-2）
+        pseudo_labels = None
+        quality_scores = None
+        valid_mask = None
+        
+        if has_weak:
+            with torch.no_grad():
+                # 2.1 Teacher K 次采样（对应公式 2.1）
+                K = self.semi_supervised_config.get('quality_k_samples', 5)
+                teacher_predictions = self.ema_teacher.forward_k_times(batch, K=K)
+                
+                # 2.2 质量评估（对应公式 2.2）
+                quality_scores_full, q_cons, q_conf = self.quality_estimator.estimate_quality(
+                    teacher_predictions
+                )
+                
+                # 2.3 生成伪标签（对应公式 2.3）
+                pseudo_labels_full, valid_mask_full = self.pseudo_label_gen.generate_from_predictions(
+                    teacher_predictions, quality_scores_full
+                )
+            
+            # 日志记录
+            stats = self.pseudo_label_gen.get_statistics(quality_scores_full, valid_mask_full)
+            for key, value in stats.items():
+                self.log(f"semi/{key}", value, on_step=False, on_epoch=True, prog_bar=(key=='pseudo_label_ratio'))
+            
+            self.log("semi/q_cons", q_cons.mean(), on_step=False, on_epoch=True)
+            self.log("semi/q_conf", q_conf.mean(), on_step=False, on_epoch=True)
+            
+            # 只保留 weak 样本的部分
+            quality_scores = quality_scores_full
+            pseudo_labels = pseudo_labels_full
+            valid_mask = valid_mask_full
+        
+        # 3. Student 前向传播
+        output, _ = self._shared_step(batch)
+        student_pred = output[self.model.prefix][LOGITS]
+        
+        # 转换为概率 [B, H, W]
+        if student_pred.dim() == 4 and student_pred.shape[1] > 1:
+            student_pred_prob = torch.softmax(student_pred, dim=1)[:, 1]
+        elif student_pred.dim() == 4 and student_pred.shape[1] == 1:
+            student_pred_prob = torch.sigmoid(student_pred).squeeze(1)
+        else:
+            student_pred_prob = torch.sigmoid(student_pred) if student_pred.max() > 1 else student_pred
+        
+        # 4. 计算半监督损失（Phase 3）
+        # 检查是否有 GSPO 半监督训练器
+        use_gspo_semi = (
+            hasattr(self, 'gspo_trainer') and 
+            self.gspo_trainer is not None and
+            hasattr(self.gspo_trainer, 'compute_semi_supervised_loss')
+        )
+        
+        if use_gspo_semi:
+            # 使用 GSPO 半监督训练器（含质量联动）
+            
+            # 准备 GT mask
+            gt_mask = batch[self.model.label_key] if has_labeled else None
+            
+            # 计算质量权重
+            if has_weak and quality_scores is not None:
+                quality_weight = self.quality_estimator.compute_quality_weight(
+                    quality_scores,
+                    beta=self.semi_supervised_config.get('quality_weighting_beta', 10.0),
+                    q0=0.5
+                )
+                # 应用质量过滤
+                quality_weight = quality_weight * valid_mask.float()
+            else:
+                quality_weight = None
+            
+            # 计算损失（对应公式 2.4）
+            loss, loss_dict = self.gspo_trainer.compute_semi_supervised_loss(
+                student_pred=student_pred_prob,
+                gt_mask=gt_mask,
+                pseudo_label=pseudo_labels,
+                quality_weight=quality_weight,
+                is_labeled=is_labeled,
+                epoch=self.current_epoch,
+                loss_fn=self.loss_func
+            )
+            
+            # 记录各项损失
+            for key, value in loss_dict.items():
+                self.log(f"train/{key}", value, on_step=True, on_epoch=True)
+        
+        else:
+            # 简化版（无 GSPO）：直接计算监督 + 伪监督损失
+            loss = 0
+            
+            # 监督损失
+            if has_labeled:
+                labeled_pred = student_pred[is_labeled]
+                labeled_gt = batch[self.model.label_key][is_labeled]
+                loss_supervised = self.loss_func(input=labeled_pred, target=labeled_gt)
+                loss += loss_supervised
+                self.log("train/loss_supervised", loss_supervised, on_step=True, on_epoch=True)
+            
+            # 伪监督损失（计算质量权重）
+            if has_weak and pseudo_labels is not None and quality_scores is not None:
+                # 计算质量权重
+                quality_weight = self.quality_estimator.compute_quality_weight(
+                    quality_scores,
+                    beta=self.semi_supervised_config.get('quality_weighting_beta', 10.0),
+                    q0=0.5
+                )
+                # 应用质量过滤
+                quality_weight = quality_weight * valid_mask.float()
+                weak_pred = student_pred_prob[~is_labeled]
+                weak_pseudo = pseudo_labels[~is_labeled]
+                weak_weight = quality_weight[~is_labeled] * valid_mask[~is_labeled].float()
+                
+                # 计算加权伪监督损失
+                loss_pseudo_per_sample = self.loss_func(input=weak_pred, target=weak_pseudo)
+                loss_pseudo = (loss_pseudo_per_sample * weak_weight).sum() / (weak_weight.sum() + 1e-6)
+                
+                # 应用 warmup
+                config = getattr(self, 'semi_supervised_config', {})
+                warmup_epochs = config.get('pseudo_lambda_warmup_epochs', 5)
+                lambda_u = min(1.0, self.current_epoch / max(warmup_epochs, 1))
+                
+                loss_pseudo_weighted = lambda_u * loss_pseudo
+                loss += loss_pseudo_weighted
+                
+                self.log("train/loss_pseudo", loss_pseudo, on_step=True, on_epoch=True)
+                self.log("train/lambda_u", lambda_u, on_step=True, on_epoch=True)
+        
+        # 5. 更新 EMA Teacher（每步更新，对应公式 2.1）
+        config = getattr(self, 'semi_supervised_config', {})
+        ema_update_freq = config.get('ema_update_freq', 'step')
+        if ema_update_freq == 'step':
+            self.ema_teacher.update(self.model._model if hasattr(self.model, '_model') else self.model)
+        
+        return loss
+    
+    def on_train_epoch_end(self):
+        """
+        Epoch 结束时的处理
+        
+        如果 EMA 是 epoch 级别更新，在这里执行
+        """
+        # EMA Teacher 更新（如果是 epoch 级别）
+        if hasattr(self, 'ema_teacher'):
+            config = getattr(self, 'semi_supervised_config', {})
+            ema_update_freq = config.get('ema_update_freq', 'step')
+            if ema_update_freq == 'epoch':
+                self.ema_teacher.update(self.model._model if hasattr(self.model, '_model') else self.model)
+        
+        # 调用父类方法
+        try:
+            super().on_train_epoch_end()
+        except AttributeError:
+            pass
     
     def _gspo_training_step(self, batch):
         """

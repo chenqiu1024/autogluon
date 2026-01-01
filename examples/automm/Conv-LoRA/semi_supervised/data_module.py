@@ -81,14 +81,18 @@ class SemiSupervisedDataModule:
         # 复制 labeled 数据（只保留 image 和 label）
         labeled = self.labeled_df[['image', 'label']].copy()
         
-        # 复制 weak 数据
-        weak = self.weak_df[['image']].copy()
-        # 为 weak 数据添加占位符 label（训练时会被忽略）
-        if len(labeled) > 0:
-            weak['label'] = labeled['label'].iloc[0]
+        # 复制 weak 数据（优先使用真实 weak label 列，如果有的话）
+        weak_has_label = 'label' in self.weak_df.columns
+        if weak_has_label:
+            weak = self.weak_df[['image', 'label']].copy()
         else:
-            # 如果没有 labeled 数据，使用一个虚拟路径
-            weak['label'] = weak['image'].iloc[0]  # 占位符
+            weak = self.weak_df[['image']].copy()
+            # 为 weak 数据添加占位符 label（训练时会被忽略）
+            if len(labeled) > 0:
+                weak['label'] = labeled['label'].iloc[0]
+            else:
+                # 如果没有 labeled 数据，使用一个虚拟路径
+                weak['label'] = weak['image'].iloc[0]  # 占位符
         
         # 合并（labeled 在前，weak 在后）
         merged = pd.concat([labeled, weak], ignore_index=True)
