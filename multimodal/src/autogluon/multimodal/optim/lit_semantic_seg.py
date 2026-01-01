@@ -1,8 +1,10 @@
 import logging
+import hashlib
 from typing import Callable, Dict, Optional
 
 import torch
 import torchmetrics
+import torch.nn.functional as F
 from transformers.models.mask2former.modeling_mask2former import Mask2FormerLoss
 
 from ..constants import CLASS_LOGITS, LOGITS, MOE_LOSS, SEMANTIC_MASK, WEIGHT
@@ -37,6 +39,224 @@ class SemanticSegmentationLitModule(LitModule):
         }
         # BBoxPromptPredictor instance for "predict" mode
         self.train_bbox_predictor = train_bbox_predictor
+    
+    @staticmethod
+    def _stable_uniform_0_1(key: str, seed: int = 0) -> float:
+        """
+        Stable deterministic pseudo-random number in [0, 1) from a string key + seed.
+        Avoids python's randomized hash across processes.
+        """
+        h = hashlib.md5(f"{seed}::{key}".encode("utf-8")).digest()
+        # use first 8 bytes as uint64
+        x = int.from_bytes(h[:8], byteorder="little", signed=False)
+        return (x % (10**12)) / float(10**12)
+    
+    def _get_labeled_mask_from_paths(self, image_paths, labeled_fraction: float, seed: int) -> torch.Tensor:
+        """
+        image_paths: list[str] (len=B)
+        returns: bool tensor (B,)
+        """
+        labeled_fraction = float(labeled_fraction)
+        labeled_fraction = max(0.0, min(1.0, labeled_fraction))
+        if labeled_fraction >= 1.0:
+            return torch.ones(len(image_paths), dtype=torch.bool, device=self.device)
+        if labeled_fraction <= 0.0:
+            return torch.zeros(len(image_paths), dtype=torch.bool, device=self.device)
+        flags = []
+        for p in image_paths:
+            p = p or ""
+            u = self._stable_uniform_0_1(p, seed=seed)
+            flags.append(u < labeled_fraction)
+        return torch.tensor(flags, dtype=torch.bool, device=self.device)
+    
+    @staticmethod
+    def _compute_boxes_from_mask(mask: torch.Tensor) -> torch.Tensor:
+        """mask: (B,H,W) or (B,1,H,W) -> boxes (B,4) in pixel coords (x1,y1,x2,y2)."""
+        if mask.dim() == 4 and mask.shape[1] == 1:
+            mask = mask[:, 0, :, :]
+        b, h, w = mask.shape
+        boxes = torch.zeros((b, 4), device=mask.device, dtype=torch.float32)
+        for i in range(b):
+            ys, xs = torch.nonzero(mask[i] > 0, as_tuple=True)
+            if xs.numel() == 0:
+                continue
+            x1, x2 = xs.min(), xs.max()
+            y1, y2 = ys.min(), ys.max()
+            boxes[i] = torch.tensor([x1, y1, x2, y2], device=mask.device, dtype=torch.float32)
+        return boxes
+    
+    @staticmethod
+    def _jitter_boxes_outward(
+        boxes: torch.Tensor,
+        h: int,
+        w: int,
+        amount: float,
+        mode: str = "box",  # box / image / pixel
+        outward_only: bool = True,
+    ) -> torch.Tensor:
+        """
+        Jitter boxes to simulate coarse human boxes.
+        - outward_only=True: never shrink vs original (always expand or keep).
+        - amount meaning:
+          - mode=box: fraction of box width/height
+          - mode=image: fraction of image width/height
+          - mode=pixel: absolute pixels
+        """
+        jittered = boxes.clone()
+        mode = (mode or "box").lower()
+        amount = float(amount)
+        amount = max(0.0, amount)
+        for i in range(jittered.shape[0]):
+            x1, y1, x2, y2 = jittered[i]
+            if x2 <= x1 or y2 <= y1:
+                continue
+            bw = (x2 - x1).clamp(min=1.0)
+            bh = (y2 - y1).clamp(min=1.0)
+            if mode == "box":
+                dx = bw * amount
+                dy = bh * amount
+            elif mode == "image":
+                dx = float(w) * amount
+                dy = float(h) * amount
+                dx = torch.tensor(dx, device=boxes.device, dtype=torch.float32)
+                dy = torch.tensor(dy, device=boxes.device, dtype=torch.float32)
+            elif mode == "pixel":
+                dx = torch.tensor(amount, device=boxes.device, dtype=torch.float32)
+                dy = torch.tensor(amount, device=boxes.device, dtype=torch.float32)
+            else:
+                # fallback to box
+                dx = bw * amount
+                dy = bh * amount
+            
+            # sample non-negative deltas (mostly outward expansion)
+            # use uniform [0, dx] / [0, dy]
+            ex1 = torch.rand(1, device=boxes.device) * dx
+            ey1 = torch.rand(1, device=boxes.device) * dy
+            ex2 = torch.rand(1, device=boxes.device) * dx
+            ey2 = torch.rand(1, device=boxes.device) * dy
+            
+            if outward_only:
+                # outward: x1 decreases, y1 decreases, x2 increases, y2 increases
+                x1n = x1 - ex1
+                y1n = y1 - ey1
+                x2n = x2 + ex2
+                y2n = y2 + ey2
+            else:
+                # allow inward with small probability by random sign
+                s1 = torch.where(torch.rand(1, device=boxes.device) < 0.9, -1.0, 1.0)  # x1: outward is -1
+                t1 = torch.where(torch.rand(1, device=boxes.device) < 0.9, -1.0, 1.0)  # y1
+                s2 = torch.where(torch.rand(1, device=boxes.device) < 0.9, 1.0, -1.0)   # x2: outward is +1
+                t2 = torch.where(torch.rand(1, device=boxes.device) < 0.9, 1.0, -1.0)   # y2
+                x1n = x1 + s1 * ex1
+                y1n = y1 + t1 * ey1
+                x2n = x2 + s2 * ex2
+                y2n = y2 + t2 * ey2
+            
+            x1n = torch.clamp(x1n, 0, w - 1)
+            y1n = torch.clamp(y1n, 0, h - 1)
+            x2n = torch.clamp(x2n, 0, w - 1)
+            y2n = torch.clamp(y2n, 0, h - 1)
+            # ensure valid ordering
+            jittered[i] = torch.stack(
+                [torch.min(x1n, x2n), torch.min(y1n, y2n), torch.max(x1n, x2n), torch.max(y1n, y2n)]
+            ).squeeze()
+        return jittered
+    
+    @staticmethod
+    def _structure_loss_per_sample(logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        """
+        Per-sample StructureLoss (same as optim/losses/structure_loss.py) without final mean.
+        Returns tensor of shape (B,).
+        """
+        if logits.dim() == 3:
+            logits = logits.unsqueeze(1)
+        if target.dim() == 3:
+            target = target.unsqueeze(1)
+        weit = 1 + 5 * torch.abs(F.avg_pool2d(target, kernel_size=31, stride=1, padding=15) - target)
+        wbce = F.binary_cross_entropy_with_logits(logits, target, reduction="none")
+        wbce = (weit * wbce).sum(dim=(2, 3)) / weit.sum(dim=(2, 3)).clamp(min=1e-6)
+        probs = torch.sigmoid(logits)
+        inter = ((probs * target) * weit).sum(dim=(2, 3))
+        union = ((probs + target) * weit).sum(dim=(2, 3))
+        wiou = 1 - (inter + 1) / (union - inter + 1)
+        return (wbce + wiou).view(-1)
+    
+    @staticmethod
+    def _weak_box_losses(
+        logits: torch.Tensor,  # (B,1,H,W) or (B,H,W)
+        boxes: torch.Tensor,   # (B,4) x1,y1,x2,y2 in pixel coords
+        outside_weight: float = 1.0,
+        entropy_weight: float = 0.05,
+        tv_weight: float = 0.0,
+    ) -> torch.Tensor:
+        """
+        Box-only weak supervision loss:
+        - outside-box should be background (0)
+        - inside-box entropy minimization (push confident predictions without assuming full positive)
+        - optional smoothness (TV) inside box
+        Returns scalar loss.
+        """
+        if logits.dim() == 3:
+            logits = logits.unsqueeze(1)
+        b, _, h, w = logits.shape
+        device = logits.device
+        outside_weight = float(outside_weight)
+        entropy_weight = float(entropy_weight)
+        tv_weight = float(tv_weight)
+        
+        total = logits.new_tensor(0.0)
+        count = 0
+        for i in range(b):
+            x1, y1, x2, y2 = boxes[i]
+            if x2 <= x1 or y2 <= y1:
+                continue
+            # integer pixel bounds (inclusive)
+            x1i = int(torch.clamp(x1.round(), 0, w - 1).item())
+            y1i = int(torch.clamp(y1.round(), 0, h - 1).item())
+            x2i = int(torch.clamp(x2.round(), 0, w - 1).item())
+            y2i = int(torch.clamp(y2.round(), 0, h - 1).item())
+            if x2i <= x1i or y2i <= y1i:
+                continue
+            
+            logit = logits[i : i + 1]  # (1,1,H,W)
+            outside_mask = torch.ones((1, 1, h, w), device=device, dtype=logit.dtype)
+            outside_mask[:, :, y1i : y2i + 1, x1i : x2i + 1] = 0.0
+            inside_mask = 1.0 - outside_mask
+            
+            # Outside-box background constraint
+            if outside_weight > 0:
+                zeros = torch.zeros_like(logit)
+                bce = F.binary_cross_entropy_with_logits(logit, zeros, reduction="none")
+                outside_loss = (bce * outside_mask).sum() / outside_mask.sum().clamp(min=1.0)
+            else:
+                outside_loss = logit.new_tensor(0.0)
+            
+            # Inside-box entropy minimization
+            if entropy_weight > 0:
+                p = torch.sigmoid(logit).clamp(min=1e-6, max=1 - 1e-6)
+                ent = -(p * torch.log(p) + (1 - p) * torch.log(1 - p))
+                ent_loss = (ent * inside_mask).sum() / inside_mask.sum().clamp(min=1.0)
+            else:
+                ent_loss = logit.new_tensor(0.0)
+            
+            # Total variation smoothness inside the box
+            if tv_weight > 0:
+                p = torch.sigmoid(logit)
+                dy = torch.abs(p[:, :, 1:, :] - p[:, :, :-1, :])
+                dx = torch.abs(p[:, :, :, 1:] - p[:, :, :, :-1])
+                # match shapes with masks
+                inside_y = inside_mask[:, :, 1:, :]
+                inside_x = inside_mask[:, :, :, 1:]
+                tv = (dy * inside_y).sum() / inside_y.sum().clamp(min=1.0) + (dx * inside_x).sum() / inside_x.sum().clamp(min=1.0)
+            else:
+                tv = logit.new_tensor(0.0)
+            
+            total = total + outside_weight * outside_loss + entropy_weight * ent_loss + tv_weight * tv
+            count += 1
+        
+        if count == 0:
+            return logits.new_tensor(0.0)
+        return total / float(count)
 
     def _compute_loss(self, output: Dict, label: torch.Tensor, **kwargs):
         loss = 0
@@ -84,6 +304,27 @@ class SemanticSegmentationLitModule(LitModule):
         batch: Dict,
     ):
         label = batch[self.model.label_key]
+        
+        # ---- Semi/weak supervision config (optional) ----
+        cfg = self.train_box_prompt_cfg or {}
+        semi_labeled_fraction = float(cfg.get("semi_labeled_fraction", 1.0))
+        semi_labeled_seed = int(cfg.get("semi_labeled_seed", 0))
+        weak_box_jitter_mode = str(cfg.get("weak_box_jitter_mode", "box"))
+        weak_box_jitter_amount = float(cfg.get("weak_box_jitter_amount", cfg.get("noise_frac", 0.12)))
+        weak_box_outward_only = bool(cfg.get("weak_box_outward_only", True))
+        weak_outside_w = float(cfg.get("weak_loss_outside_weight", 1.0))
+        weak_entropy_w = float(cfg.get("weak_loss_entropy_weight", 0.05))
+        weak_tv_w = float(cfg.get("weak_loss_tv_weight", 0.0))
+        
+        # Determine which samples are "labeled" (for simulation) using stable hashing on image paths.
+        image_paths = batch.get(self.model.image_path_key, [])
+        if isinstance(image_paths, str):
+            image_paths = [image_paths]
+        labeled_mask = None
+        if self.training and semi_labeled_fraction < 1.0:
+            labeled_mask = self._get_labeled_mask_from_paths(
+                image_paths=image_paths, labeled_fraction=semi_labeled_fraction, seed=semi_labeled_seed
+            )
 
         # -------- Train-time box prompt injection (configurable) --------
         # 控制项：self.train_box_prompt_cfg = {
@@ -93,7 +334,6 @@ class SemanticSegmentationLitModule(LitModule):
         # }
         # mode=predict: 使用 self.train_bbox_predictor 预测框作为 box prompt
         if self.training:
-            cfg = self.train_box_prompt_cfg or {}
             mode = cfg.get("mode", "off")
             box_mode = None
             if mode != "off":
@@ -117,21 +357,6 @@ class SemanticSegmentationLitModule(LitModule):
                     box_mode = "predict"
                 else:
                     box_mode = mode
-
-            def _compute_gt_boxes(mask: torch.Tensor) -> torch.Tensor:
-                """mask: (B,H,W) or (B,1,H,W) int/long -> boxes (B,4) in pixel coords."""
-                if mask.dim() == 4 and mask.shape[1] == 1:
-                    mask = mask[:, 0, :, :]
-                b, h, w = mask.shape
-                boxes = torch.zeros((b, 4), device=mask.device, dtype=torch.float32)
-                for i in range(b):
-                    ys, xs = torch.nonzero(mask[i] > 0, as_tuple=True)
-                    if xs.numel() == 0:
-                        continue
-                    x1, x2 = xs.min(), xs.max()
-                    y1, y2 = ys.min(), ys.max()
-                    boxes[i] = torch.tensor([x1, y1, x2, y2], device=mask.device, dtype=torch.float32)
-                return boxes
 
             def _jitter_boxes(boxes: torch.Tensor, h: int, w: int, frac: float = 0.12) -> torch.Tensor:
                 """Uniform jitter relative to box size."""
@@ -215,8 +440,27 @@ class SemanticSegmentationLitModule(LitModule):
                 
                 return boxes
 
+            # If semi/weak enabled: for "unlabeled" samples, force weak coarse boxes generated from GT bbox with outward-biased jitter.
+            if labeled_mask is not None and hasattr(self.model, "box_key"):
+                gt_boxes_all = self._compute_boxes_from_mask(label)
+                h, w = label.shape[-2], label.shape[-1]
+                weak_boxes = self._jitter_boxes_outward(
+                    gt_boxes_all,
+                    h=h,
+                    w=w,
+                    amount=weak_box_jitter_amount,
+                    mode=weak_box_jitter_mode,
+                    outward_only=weak_box_outward_only,
+                )
+                # apply only to unlabeled samples
+                if (~labeled_mask).any():
+                    boxes_for_batch = gt_boxes_all.clone()
+                    boxes_for_batch[~labeled_mask] = weak_boxes[~labeled_mask]
+                    if not (boxes_for_batch.sum(dim=1) == 0).all():
+                        batch[self.model.box_key] = boxes_for_batch.unsqueeze(1)  # (B,1,4)
+
             if box_mode in ["gt", "noisy"]:
-                gt_boxes = _compute_gt_boxes(label)
+                gt_boxes = self._compute_boxes_from_mask(label)
                 h, w = label.shape[-2], label.shape[-1]
                 if box_mode == "noisy":
                     gt_boxes = _jitter_boxes(gt_boxes, h=h, w=w, frac=noise_frac)
@@ -233,18 +477,60 @@ class SemanticSegmentationLitModule(LitModule):
                         batch[self.model.box_key] = pred_boxes.unsqueeze(1)  # (B,1,4)
         # prepare_targets
         output = run_model(self.model, batch)
-        if isinstance(self.loss_func, Mask2FormerLoss):
-            loss = self._compute_loss(
-                output=output,
-                label=label,
-                mask_labels=batch[self.model.mask_label_key],
-                class_labels=batch[self.model.class_label_key],
-            )
+        
+        # ---- Loss: fully-supervised OR semi/weak mixed ----
+        if self.training and labeled_mask is not None:
+            # Only supported for binary segmentation with StructureLoss-like supervision.
+            if isinstance(self.loss_func, Mask2FormerLoss):
+                raise NotImplementedError("semi_labeled_fraction < 1.0 not supported for Mask2FormerLoss yet.")
+            # pick logits for current model prefix (binary logits)
+            logits = output[self.model.prefix][LOGITS]
+            if logits.dim() == 3:
+                logits = logits.unsqueeze(1)
+            if label.dim() == 3:
+                label_ = label.unsqueeze(1)
+            else:
+                label_ = label
+            
+            per_sample_sup = self._structure_loss_per_sample(logits, label_)
+            sup_count = labeled_mask.sum().clamp(min=1)
+            sup_loss = (per_sample_sup * labeled_mask.float()).sum() / sup_count.float()
+            
+            # weak loss on unlabeled samples (requires boxes)
+            weak_loss = logits.new_tensor(0.0)
+            if hasattr(self.model, "box_key") and self.model.box_key in batch and (~labeled_mask).any():
+                boxes_b1 = batch[self.model.box_key]  # (B,1,4)
+                boxes = boxes_b1[:, 0, :]
+                logits_u = logits[~labeled_mask]
+                boxes_u = boxes[~labeled_mask]
+                weak_loss = self._weak_box_losses(
+                    logits=logits_u,
+                    boxes=boxes_u,
+                    outside_weight=weak_outside_w,
+                    entropy_weight=weak_entropy_w,
+                    tv_weight=weak_tv_w,
+                )
+            
+            # Keep any MoE loss from output dict
+            moe_loss = output[self.model.prefix].get(MOE_LOSS, 0.0)
+            loss = sup_loss + weak_loss + moe_loss
+            # lightweight logging
+            self.log("train_sup_loss", sup_loss, on_step=True, on_epoch=True)
+            self.log("train_weak_loss", weak_loss, on_step=True, on_epoch=True)
+            self.log("train_labeled_frac", labeled_mask.float().mean(), on_step=True, on_epoch=True)
         else:
-            loss = self._compute_loss(
-                output=output,
-                label=label,
-            )
+            if isinstance(self.loss_func, Mask2FormerLoss):
+                loss = self._compute_loss(
+                    output=output,
+                    label=label,
+                    mask_labels=batch[self.model.mask_label_key],
+                    class_labels=batch[self.model.class_label_key],
+                )
+            else:
+                loss = self._compute_loss(
+                    output=output,
+                    label=label,
+                )
 
         return output, loss
 
@@ -311,10 +597,16 @@ class SemanticSegmentationLitModule(LitModule):
         Average loss of the mini-batch data
         """
         # Check if GSPO should be used
+        # Note: semi/weak supervision mixes labeled+unlabeled samples and uses custom loss;
+        # current GSPO path assumes full GT masks for the whole batch.
+        cfg = getattr(self, "train_box_prompt_cfg", {}) or {}
+        semi_labeled_fraction = float(cfg.get("semi_labeled_fraction", 1.0))
         use_gspo = (
             self.gspo_trainer is not None and 
             self.gspo_trainer.is_gspo_active(self.current_epoch)
         )
+        if semi_labeled_fraction < 1.0:
+            use_gspo = False
         
         if use_gspo:
             # GSPO-enhanced training

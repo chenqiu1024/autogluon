@@ -82,6 +82,20 @@ class SemanticSegmentationLearner(BaseLearner):
             "p_gt": 0.0,
             "p_noisy": 0.0,
             "noise_frac": 0.12,
+            # Semi/weak-supervision simulation (optional)
+            # NOTE: We avoid adding extra columns to dataframe because semantic segmentation learner
+            # expects exactly one image column (+ label column) when column_types is not provided.
+            # Instead, we deterministically assign "labeled" samples via stable hashing of image_path.
+            "semi_labeled_fraction": 1.0,       # 1.0 => fully-supervised; e.g. 0.1 => only 10% uses GT mask loss
+            "semi_labeled_seed": 0,
+            # Weak box generation from GT (simulating human coarse boxes)
+            "weak_box_jitter_mode": "box",      # box / image / pixel
+            "weak_box_jitter_amount": 0.12,     # meaning depends on mode
+            "weak_box_outward_only": True,      # mostly expand outward; True => never shrink vs GT bbox
+            # Weak loss weights (box-only supervision)
+            "weak_loss_outside_weight": 1.0,    # enforce outside-box background
+            "weak_loss_entropy_weight": 0.05,   # entropy minimization inside box
+            "weak_loss_tv_weight": 0.0,         # optional smoothness (total variation) inside box
         }
         # BBoxPromptPredictor instance for "predict" mode (set via external config)
         self._train_bbox_predictor = None
