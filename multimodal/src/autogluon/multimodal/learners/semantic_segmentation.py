@@ -896,6 +896,7 @@ class SemanticSegmentationLearner(BaseLearner):
         # Get GSPO-LoRA on Attention parameters (if available) - NEW
         gspo_lora_attention_enabled = getattr(sam_cfg, "gspo_lora_attention_enabled", False) if sam_cfg else False
         gspo_lora_attention_momentum = getattr(sam_cfg, "gspo_lora_attention_momentum", 0.9) if sam_cfg else 0.9
+        allow_semisup = getattr(gspo_cfg, "allow_semisup", False) if gspo_cfg else False
 
         try:
             return GSPOConvLoRATrainer(
@@ -916,6 +917,7 @@ class SemanticSegmentationLearner(BaseLearner):
                 # GSPO-LoRA on Attention extension (NEW)
                 gspo_lora_attention_enabled=gspo_lora_attention_enabled,
                 gspo_lora_attention_momentum=gspo_lora_attention_momentum,
+                allow_semisup=allow_semisup,
             )
         except Exception as e:
             logger.warning("Failed to instantiate GSPOConvLoRATrainer: %s; GSPO will be skipped.", e)

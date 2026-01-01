@@ -110,6 +110,8 @@ if __name__ == "__main__":
                         help="Momentum for LoRA quality history updates (default: 0.9)")
     parser.add_argument("--gspo_lora_attention_scale_adaptation", action="store_true",
                         help="Enable adaptive scaling based on quality for LoRA")
+    parser.add_argument("--gspo_allow_semisup", action="store_true",
+                        help="Allow GSPO on labeled subset when semi_labeled_fraction<1.0 (unlabeled uses weak loss).")
     
     # TTA (Test-Time Augmentation) parameters
     parser.add_argument("--tta_enable", action="store_true", help="Enable Test-Time Augmentation for evaluation")
@@ -258,6 +260,7 @@ if __name__ == "__main__":
             "optim.gspo.w_boundary": args.w_boundary,
             "optim.gspo.w_smooth": args.w_smooth,
             "optim.gspo.w_thin": args.w_thin,
+            "optim.gspo.allow_semisup": bool(args.gspo_allow_semisup),
         })
 
     # Adapter configuration

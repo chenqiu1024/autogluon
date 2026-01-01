@@ -258,6 +258,120 @@ class SemanticSegmentationLitModule(LitModule):
             return logits.new_tensor(0.0)
         return total / float(count)
 
+    def _predict_boxes_from_images(self, image_paths: list, target_h: int, target_w: int) -> torch.Tensor:
+        """
+        Wrapper around train_bbox_predictor to predict boxes in pixel coords and scale to target size.
+        """
+        import numpy as np
+        from PIL import Image
+        if self.train_bbox_predictor is None:
+            raise ValueError("train_bbox_predictor is required for mode='predict'")
+        b = len(image_paths)
+        boxes = torch.zeros((b, 4), device=self.device, dtype=torch.float32)
+        for i, img_path in enumerate(image_paths):
+            if not img_path:
+                continue
+            try:
+                bbox_px = self.train_bbox_predictor.predict(img_path)
+                if bbox_px is None:
+                    continue
+                with Image.open(img_path) as img:
+                    orig_w, orig_h = img.size
+                scale_x = target_w / orig_w
+                scale_y = target_h / orig_h
+                x1 = bbox_px[0] * scale_x
+                y1 = bbox_px[1] * scale_y
+                x2 = bbox_px[2] * scale_x
+                y2 = bbox_px[3] * scale_y
+                x1 = max(0, min(x1, target_w - 1))
+                y1 = max(0, min(y1, target_h - 1))
+                x2 = max(0, min(x2, target_w - 1))
+                y2 = max(0, min(y2, target_h - 1))
+                x1, x2 = min(x1, x2), max(x1, x2)
+                y1, y2 = min(y1, y2), max(y1, y2)
+                boxes[i] = torch.tensor([x1, y1, x2, y2], device=self.device, dtype=torch.float32)
+            except Exception as e:
+                logger.warning(f"Failed to predict bbox for {img_path}: {e}")
+                continue
+        return boxes
+
+    def _apply_train_box_prompts(self, batch: Dict, label: torch.Tensor) -> None:
+        """
+        In-place box prompt injection for training (gt/noisy/mix/predict) and for semi/weak supervision.
+        This is factored out so GSPO/standard paths can share the same augmentation.
+        """
+        cfg = self.train_box_prompt_cfg or {}
+        mode = cfg.get("mode", "off")
+        if mode == "off" and "semi_labeled_fraction" not in cfg:
+            return
+
+        box_mode = None
+        if mode != "off":
+            p_no = max(float(cfg.get("p_no", 0.0)), 0.0)
+            p_gt = max(float(cfg.get("p_gt", 0.0)), 0.0)
+            p_noisy = max(float(cfg.get("p_noisy", 0.0)), 0.0)
+            noise_frac = float(cfg.get("noise_frac", 0.12))
+
+            if mode == "mix":
+                total = p_no + p_gt + p_noisy
+                if total > 0:
+                    p_no, p_gt, p_noisy = [x / total for x in (p_no, p_gt, p_noisy)]
+                r = torch.rand(1).item()
+                if r < p_no:
+                    box_mode = "off"
+                elif r < p_no + p_gt:
+                    box_mode = "gt"
+                else:
+                    box_mode = "noisy"
+            elif mode == "predict":
+                box_mode = "predict"
+            else:
+                box_mode = mode
+        else:
+            noise_frac = float(cfg.get("noise_frac", 0.12))
+
+        def _jitter_boxes(boxes: torch.Tensor, h: int, w: int, frac: float = 0.12) -> torch.Tensor:
+            """Uniform jitter relative to box size."""
+            jittered = boxes.clone()
+            for i in range(jittered.shape[0]):
+                x1, y1, x2, y2 = jittered[i]
+                if x2 <= x1 or y2 <= y1:
+                    continue
+                bw = (x2 - x1).clamp(min=1.0)
+                bh = (y2 - y1).clamp(min=1.0)
+                dx = bw * frac
+                dy = bh * frac
+                rx1 = (torch.rand(1, device=boxes.device) * 2 - 1) * dx
+                ry1 = (torch.rand(1, device=boxes.device) * 2 - 1) * dy
+                rx2 = (torch.rand(1, device=boxes.device) * 2 - 1) * dx
+                ry2 = (torch.rand(1, device=boxes.device) * 2 - 1) * dy
+                x1n = torch.clamp(x1 + rx1, 0, w - 1)
+                y1n = torch.clamp(y1 + ry1, 0, h - 1)
+                x2n = torch.clamp(x2 + rx2, 0, w - 1)
+                y2n = torch.clamp(y2 + ry2, 0, h - 1)
+                jittered[i] = torch.stack(
+                    [torch.min(x1n, x2n), torch.min(y1n, y2n), torch.max(x1n, x2n), torch.max(y1n, y2n)]
+                ).squeeze()
+            return jittered
+
+        if box_mode in ["gt", "noisy"]:
+            gt_boxes = self._compute_boxes_from_mask(label)
+            h, w = label.shape[-2], label.shape[-1]
+            if box_mode == "noisy":
+                gt_boxes = _jitter_boxes(gt_boxes, h=h, w=w, frac=noise_frac)
+            if not (gt_boxes.sum(dim=1) == 0).all():
+                batch[self.model.box_key] = gt_boxes.unsqueeze(1)  # (B,1,4)
+        elif box_mode == "predict":
+            image_path_key = self.model.image_path_key
+            image_paths = batch.get(image_path_key, [])
+            if image_paths:
+                h, w = label.shape[-2], label.shape[-1]
+                pred_boxes = self._predict_boxes_from_images(
+                    image_paths=image_paths, target_h=h, target_w=w
+                )
+                if not (pred_boxes.sum(dim=1) == 0).all():
+                    batch[self.model.box_key] = pred_boxes.unsqueeze(1)  # (B,1,4)
+
     def _compute_loss(self, output: Dict, label: torch.Tensor, **kwargs):
         loss = 0
         for _, per_output in output.items():
@@ -597,19 +711,74 @@ class SemanticSegmentationLitModule(LitModule):
         Average loss of the mini-batch data
         """
         # Check if GSPO should be used
-        # Note: semi/weak supervision mixes labeled+unlabeled samples and uses custom loss;
-        # current GSPO path assumes full GT masks for the whole batch.
         cfg = getattr(self, "train_box_prompt_cfg", {}) or {}
         semi_labeled_fraction = float(cfg.get("semi_labeled_fraction", 1.0))
         use_gspo = (
             self.gspo_trainer is not None and 
             self.gspo_trainer.is_gspo_active(self.current_epoch)
         )
-        if semi_labeled_fraction < 1.0:
-            use_gspo = False
+        allow_semisup_gspo = bool(getattr(self.gspo_trainer, "allow_semisup", False)) if self.gspo_trainer else False
         
-        if use_gspo:
-            # GSPO-enhanced training
+        if use_gspo and allow_semisup_gspo and semi_labeled_fraction < 1.0:
+            # Semi-supervised with GSPO on labeled subset, weak loss on unlabeled subset.
+            label = batch[self.model.label_key]
+            # Apply box prompts (gt/noisy/predict + weak jitter boxes already handled inside)
+            if self.training:
+                self._apply_train_box_prompts(batch, label)
+            image_paths = batch.get(self.model.image_path_key, [])
+            if isinstance(image_paths, str):
+                image_paths = [image_paths]
+            labeled_mask = self._get_labeled_mask_from_paths(
+                image_paths=image_paths, labeled_fraction=semi_labeled_fraction, seed=int(cfg.get("semi_labeled_seed", 0))
+            )
+            has_labeled = bool(labeled_mask.any())
+            has_unlabeled = bool((~labeled_mask).any())
+            loss = torch.tensor(0.0, device=self.device)
+            selected_experts = None
+
+            def _subset_batch(b, mask_bool: torch.Tensor):
+                new = {}
+                for k, v in b.items():
+                    if torch.is_tensor(v) and v.shape[0] == mask_bool.shape[0]:
+                        new[k] = v[mask_bool]
+                    elif isinstance(v, list) and len(v) == mask_bool.shape[0]:
+                        new[k] = [v[i] for i in range(len(v)) if mask_bool[i].item()]
+                    else:
+                        new[k] = v
+                return new
+
+            # Weak loss on unlabeled subset
+            if has_unlabeled and hasattr(self.model, "box_key") and self.model.box_key in batch:
+                batch_u = _subset_batch(batch, ~labeled_mask)
+                label_u = batch_u[self.model.label_key]
+                output_u = run_model(self.model, batch_u)
+                logits_u = output_u[self.model.prefix][LOGITS]
+                if logits_u.dim() == 3:
+                    logits_u = logits_u.unsqueeze(1)
+                boxes_u = batch_u[self.model.box_key][:, 0, :]
+                weak_loss = self._weak_box_losses(
+                    logits=logits_u,
+                    boxes=boxes_u,
+                    outside_weight=float(cfg.get("weak_loss_outside_weight", 1.0)),
+                    entropy_weight=float(cfg.get("weak_loss_entropy_weight", 0.05)),
+                    tv_weight=float(cfg.get("weak_loss_tv_weight", 0.0)),
+                )
+                moe_loss_u = output_u[self.model.prefix].get(MOE_LOSS, 0.0)
+                loss = loss + weak_loss + moe_loss_u
+                self.log("train_weak_loss", weak_loss, on_step=True, on_epoch=True)
+
+            # GSPO on labeled subset
+            if has_labeled:
+                batch_l = _subset_batch(batch, labeled_mask)
+                gspo_loss, metrics, selected_experts = self._gspo_training_step(batch_l)
+                loss = loss + gspo_loss
+                for key, value in metrics.items():
+                    self.log(f"train_{key}", value, on_step=True, on_epoch=True)
+
+            self.log("train_labeled_frac", labeled_mask.float().mean(), on_step=True, on_epoch=True)
+
+        elif use_gspo:
+            # GSPO-enhanced training (full GT)
             loss, metrics, selected_experts = self._gspo_training_step(batch)
             
             # Log GSPO-specific metrics

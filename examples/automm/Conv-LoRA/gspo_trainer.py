@@ -63,6 +63,7 @@ class GSPOConvLoRATrainer:
         # GSPO-LoRA on Attention extension parameters (NEW)
         gspo_lora_attention_enabled: bool = False,
         gspo_lora_attention_momentum: float = 0.9,
+        allow_semisup: bool = False,
     ):
         self.predictor = predictor
         self.group_size = group_size
@@ -84,6 +85,7 @@ class GSPOConvLoRATrainer:
         # GSPO-LoRA on Attention extension (NEW)
         self.gspo_lora_attention_enabled = gspo_lora_attention_enabled
         self.gspo_lora_attention_momentum = gspo_lora_attention_momentum
+        self.allow_semisup = allow_semisup
         
         # Statistics tracking
         self.expert_performance_log = defaultdict(list)
