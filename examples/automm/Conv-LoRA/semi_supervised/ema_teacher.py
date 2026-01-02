@@ -158,10 +158,13 @@ class EMATeacher(nn.Module):
         
         return pred_mask
     
-    def load_state_dict(self, state_dict, strict=True):
+    def load_state_dict(self, state_dict, strict: bool = True):
         """加载 teacher 模型权重"""
         return self.teacher_model.load_state_dict(state_dict, strict=strict)
     
-    def state_dict(self):
-        """返回 teacher 模型权重"""
-        return self.teacher_model.state_dict()
+    def state_dict(self, destination=None, prefix: str = "", keep_vars: bool = False):
+        """
+        返回 teacher 模型权重
+        兼容 PyTorch / Lightning 的 state_dict 接口（允许传入 destination/prefix/keep_vars）
+        """
+        return self.teacher_model.state_dict(destination=destination, prefix=prefix, keep_vars=keep_vars)
