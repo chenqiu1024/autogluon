@@ -76,6 +76,7 @@ optim:
     w_boundary: 0.3
     w_smooth: 0.1
     w_thin: 0.05
+    allow_semisup: False  # Allow GSPO on labeled subset when semi-supervised
     # GSPO-Adapter extension parameters
     adapter_enabled: False  # Enable GSPO quality feedback for Encoder Adapters
     adapter_momentum: 0.9   # Momentum for adapter quality history updates

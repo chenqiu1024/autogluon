@@ -1,5 +1,5 @@
 # SAM框架的半弱监督方向
-_Exported on 1/1/2026 at 14:10:20 PST from Cursor (2.2.44)_
+_Exported on 1/1/2026 at 18:55:45 PST from Cursor (2.2.44)_
 
 ---
 
@@ -9619,5 +9619,146 @@ python examples/automm/Conv-LoRA/run_semantic_segmentation.py \
   --weak_loss_outside_weight 1.0 --weak_loss_entropy_weight 0.05 --weak_loss_tv_weight 0.0 \
   --gspo_enable --gspo_allow_semisup \
   --train_box_prompt_mode off --max_epochs 1 --quick_test 4
+```
+
+---
+
+**User**
+
+执行`nohup python run_semantic_segmentation.py \
+  --task isic2017 --num_gpus 1 --per_gpu_batch_size 1 --batch_size 1 \
+  --adapter_enable --rank 3 --expert_num 4 \
+  --semi_labeled_fraction 0.1 --semi_labeled_seed 123 \
+  --weak_box_outward_only --weak_box_jitter_mode box --weak_box_jitter_amount 0.2 \
+  --weak_loss_outside_weight 1.0 --weak_loss_entropy_weight 0.05 --weak_loss_tv_weight 0.0 \
+  --gspo_enable --gspo_allow_semisup \
+  --train_box_prompt_mode off --max_epochs 1 --quick_test 4 \
+  --output_dir outputs/semisup_gspo_gpt-260101 \
+> outputs/semisup_gspo_gpt-260101.log 2>&1 &`报错，看日志文件examples/automm/Conv-LoRA/outputs/semisup_gspo_gpt-260101.log的最后部分
+
+---
+
+**Cursor**
+
+```yaml
+optim:
+  optim_type: "adamw"
+  lr: 1.0e-4
+  weight_decay: 0.001
+  lr_choice: "layerwise_decay"
+  lr_decay: 0.9
+  lr_schedule: "cosine_decay"
+  max_epochs: 20
+  max_steps: -1
+  warmup_steps: 0.1
+  end_lr: 0
+  lr_mult: 1 # multiply lr for downstream heads
+  patience: 10
+  val_check_interval: 0.5 # Check validation score a fraction of epoch if float and every n steps if integer with n < total step in epoch.
+  check_val_every_n_epoch: 1 # Check validation score every n epochs.
+  skip_final_val: False # Flag to skip the last validation
+  gradient_clip_val: 1
+  gradient_clip_algorithm: "norm"
+  track_grad_norm: -1 # Whether to check gradient norm. We can set it to 2 to check for gradient norm.
+  log_every_n_steps: 10
+  label_smoothing: 0
+  top_k: 3
+  top_k_average_method:
+    "greedy_soup" # We support averaging method described in https://arxiv.org/pdf/2203.05482.pdf.
+    # Currently support "uniform_soup", "greedy_soup", and "best".
+  peft: null # Can be 'bit_fit' (only finetune bias), 'norm_fit' (finetune the normalization terms + bias terms), lora (LoRA Adaptations only), lora_bias (LoRA Adaptation + bit_fit), lora_norm (LoRA Adaptation + norm_fit), or null
+  lora:
+    module_filter: null # Specify which module (if any) to adapt(e.g. ".*EncDecAttention|.*DenseReluDense"). Default consider all modules in a model (i.e. empty filter).
+    filter: # Specify which layer in a module to adapt. Default fine-tune only query and value attention weights, recommended in https://arxiv.org/abs/2106.09685
+      - "query"
+      - "value"
+      - "^q$" # The filter can also be a regex. We will use re.match(filter, name) to determine if LoRA should be applied.
+      - "^v$"
+      - "^k$"
+      - "^o$"
+    r: 8
+    alpha: 8
+    conv_lora_expert_num: 8 # default setting for Conv-LoRA
+    gspo_enabled: False # Enable GSPO (Group Sequence Policy Optimization) enhancements
+    gspo_group_size: 3 # Number of experts to select in GSPO mode (TopK)
+    gspo_quality_momentum: 0.9 # Momentum coefficient for expert quality history updates
+    gspo_warmup_epochs: 5 # Number of epochs before enabling full GSPO training
+    gspo_contrastive_weight: 0.1 # Weight for contrastive loss in GSPO training
+  loss_func:
+    "auto" # The replaced loss for regression. Can only support loss function in torch.nn.
+    # example
+    # "BCEWithLogitsLoss" or "nn.BCEWithLogitsloss"
+  focal_loss:
+    alpha: null
+    gamma: 2.0
+    reduction: "mean"
+  mask2former_loss:
+    loss_cross_entropy_weight: 10.0
+    loss_mask_weight: 5.0
+    loss_dice_weight: 5.0
+  extra_trainable_params: []
+  cross_modal_align: null
+  cross_modal_align_weight: 0
+  automatic_optimization: True
+  lemda:
+    turn_on: False
+    arch_type: "mlp_vae"
+    z_dim: 8
+    num_layers: 6
+    kld_weight: 0.1
+    mse_weight: 0.1
+    adv_weight: 1.0e-4
+    consist_weight: 0.01
+    consist_threshold: 0.5
+    lr: 1.0e-4
+    optim_type: "adamw"
+    weight_decay: 1.0e-5
+  gspo:
+    lambda_smooth: 0.1
+    lambda_boundary: 0.3
+    w_boundary: 0.3
+    w_smooth: 0.1
+    w_thin: 0.05
+    allow_semisup: False  # Allow GSPO on labeled subset when semi-supervised
+    # GSPO-Adapter extension parameters
+    adapter_enabled: False  # Enable GSPO quality feedback for Encoder Adapters
+    adapter_momentum: 0.9   # Momentum for adapter quality history updates
+    adapter_scale_adaptation: False  # Enable adaptive scale based on quality (Phase 2)
+
+```
+
+问题原因：`optim.gspo.allow_semisup` 没在默认配置里注册，Omegaconf 校验报 KeyError。
+
+已修复：
+- 在 `multimodal/src/autogluon/multimodal/configs/optim/default.yaml` 增加 `allow_semisup: False`（GSPO 配置块）。
+- 其它代码保持不变。
+
+接下来请重新运行（示例，同你之前的命令即可）：
+```
+nohup python run_semantic_segmentation.py \
+  --task isic2017 --num_gpus 1 --per_gpu_batch_size 1 --batch_size 1 \
+  --adapter_enable --rank 3 --expert_num 4 \
+  --semi_labeled_fraction 0.1 --semi_labeled_seed 123 \
+  --weak_box_outward_only --weak_box_jitter_mode box --weak_box_jitter_amount 0.2 \
+  --weak_loss_outside_weight 1.0 --weak_loss_entropy_weight 0.05 --weak_loss_tv_weight 0.0 \
+  --gspo_enable --gspo_allow_semisup \
+  --train_box_prompt_mode off --max_epochs 1 --quick_test 4 \
+  --output_dir outputs/semisup_gspo_gpt-260101 \
+> outputs/semisup_gspo_gpt-260101.log 2>&1 &
+```
+
+如再有报错，把新日志尾部发给我即可。
+
+```plaintext
+nohup python run_semantic_segmentation.py \
+  --task isic2017 --num_gpus 1 --per_gpu_batch_size 1 --batch_size 1 \
+  --adapter_enable --rank 3 --expert_num 4 \
+  --semi_labeled_fraction 0.1 --semi_labeled_seed 123 \
+  --weak_box_outward_only --weak_box_jitter_mode box --weak_box_jitter_amount 0.2 \
+  --weak_loss_outside_weight 1.0 --weak_loss_entropy_weight 0.05 --weak_loss_tv_weight 0.0 \
+  --gspo_enable --gspo_allow_semisup \
+  --train_box_prompt_mode off --max_epochs 1 --quick_test 4 \
+  --output_dir outputs/semisup_gspo_gpt-260101 \
+> outputs/semisup_gspo_gpt-260101.log 2>&1 &
 ```
 
