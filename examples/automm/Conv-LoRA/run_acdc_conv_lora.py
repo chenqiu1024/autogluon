@@ -39,6 +39,13 @@ def main():
     parser.add_argument("--gspo_warmup_epochs", type=int, default=5)
     parser.add_argument("--gspo_contrastive_weight", type=float, default=0.1)
     parser.add_argument("--gspo_quality_momentum", type=float, default=0.9)
+    # GSPO-Adapter 扩展
+    parser.add_argument("--gspo_adapter_enable", action="store_true",
+                        help="启用 GSPO 对 Encoder Adapter 的质量反馈")
+    parser.add_argument("--gspo_adapter_momentum", type=float, default=0.9,
+                        help="GSPO Adapter 质量历史的动量项")
+    parser.add_argument("--gspo_adapter_scale_adaptation", action="store_true",
+                        help="启用基于质量历史的自适应缩放")
     # Adapter
     parser.add_argument("--adapter_enable", action="store_true")
     parser.add_argument("--adapter_dim", type=int, default=64)
@@ -78,8 +85,6 @@ def main():
         "optim.lr": lr,
         "env.per_gpu_batch_size": args.per_gpu_batch_size,
         "env.batch_size": args.batch_size,
-        # ACDC 有 4 个类别（0 背景 + 3 前景）
-        "model.num_classes": 4,
     }
 
     if args.gspo_enable:
@@ -96,6 +101,28 @@ def main():
             "model.sam.adapter_enabled": True,
             "model.sam.adapter_dim": args.adapter_dim,
         })
+        # GSPO-Adapter 扩展
+        if args.gspo_adapter_enable:
+            if not args.gspo_enable:
+                print("Warning: --gspo_adapter_enable requires --gspo_enable. Enabling GSPO automatically.")
+                args.gspo_enable = True
+                hyperparameters.update({
+                    "optim.lora.gspo_enabled": True,
+                    "optim.lora.gspo_group_size": args.gspo_group_size,
+                    "optim.lora.gspo_quality_momentum": args.gspo_quality_momentum,
+                    "optim.lora.gspo_warmup_epochs": args.gspo_warmup_epochs,
+                    "optim.lora.gspo_contrastive_weight": args.gspo_contrastive_weight,
+                })
+            hyperparameters.update({
+                "optim.gspo.adapter_enabled": True,
+                "optim.gspo.adapter_momentum": args.gspo_adapter_momentum,
+            })
+            if args.gspo_adapter_scale_adaptation:
+                hyperparameters.update({
+                    "optim.gspo.adapter_scale_adaptation": True,
+                    "model.sam.adapter_gspo_enabled": True,
+                    "model.sam.adapter_gspo_scale_adaptation": True,
+                })
 
     if args.eval_only:
         if not args.ckpt_path:
