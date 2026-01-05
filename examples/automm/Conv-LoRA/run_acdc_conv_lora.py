@@ -20,6 +20,34 @@ def expand_path(df: pd.DataFrame, dataset_dir: str):
     return df
 
 
+def visualize_samples(predictor: MultiModalPredictor, df: pd.DataFrame, vis_dir: str, max_samples: int = 8):
+    """
+    仅保存前 max_samples 个验证样本的预测掩码，避免磁盘爆炸。
+    会覆盖同名文件，文件数量固定。
+    """
+    os.makedirs(vis_dir, exist_ok=True)
+    subset = df.head(max_samples).copy()
+    try:
+        preds = predictor.predict(subset)
+    except Exception as e:
+        print(f"[VIS] predictor.predict failed: {e}")
+        return
+    if "semantic_mask" not in preds.columns:
+        print("[VIS] semantic_mask not found in predictions; skip visualization.")
+        return
+    for i, row in subset.iterrows():
+        mask = preds.loc[i, "semantic_mask"]
+        if mask is None:
+            continue
+        # 保存 mask 为 PNG
+        from PIL import Image
+        mask_arr = np.array(mask, dtype=np.uint8)
+        img_name = os.path.splitext(os.path.basename(row["image"]))[0]
+        out_path = os.path.join(vis_dir, f"{img_name}_pred.png")
+        Image.fromarray(mask_arr).save(out_path)
+    print(f"[VIS] Saved up to {len(subset)} predicted masks to {vis_dir}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="ACDC semantic segmentation with Conv-LoRA + GSPO + Adapter")
     parser.add_argument("--dataset_dir", type=str, default="datasets/acdc_conv_lora/acdc_conv_lora",
@@ -49,6 +77,11 @@ def main():
     # Adapter
     parser.add_argument("--adapter_enable", action="store_true")
     parser.add_argument("--adapter_dim", type=int, default=64)
+    # 可视化配置
+    parser.add_argument("--vis_samples", type=int, default=8,
+                        help="训练结束后从验证集可视化的样本数（固定覆盖，不额外增长）")
+    parser.add_argument("--vis_output_dir", type=str, default="outputs/acdc_vis",
+                        help="可视化输出目录")
     # Quick / Debug
     parser.add_argument("--debug", action="store_true", help="仅处理少量样本以快速验证")
     parser.add_argument("--quick_test", type=int, default=None, help="仅处理前 N 个测试样本")
@@ -69,9 +102,10 @@ def main():
     if args.quick_test is not None:
         test_df = test_df.head(args.quick_test)
 
-    # 默认训练设置（针对 ACDC 多类别分割）
+    # 默认训练设置（ACDC 多类别分割：0 背景 + 3 前景）
     validation_metric = "dice"
-    loss = "structure_loss"
+    # 结构损失在多类时收敛较慢，改为 dice_ce_loss（Dice+CE 混合，更稳）
+    loss = "dice_ce_loss"
     max_epoch = 50
     lr = 1e-4
 
@@ -138,11 +172,16 @@ def main():
         )
         predictor.fit(train_data=train_df, tuning_data=val_df, seed=args.seed)
 
+    predictor._learner.problem_type = "semantic_segmentation"
+    predictor._learner._problem_type = "semantic_segmentation"
     # 评估（IoU + Dice）
     res = predictor.evaluate(test_df, metrics=["iou", "dice"])
     print(f"Test results on ACDC: {res}")
     with open(os.path.join(args.output_dir, "metrics_acdc.txt"), "a") as f:
         f.write(f"{res}\n")
+
+    # 可视化一小部分验证样本的预测（覆盖写，数量固定）
+    visualize_samples(predictor, val_df, args.vis_output_dir, max_samples=args.vis_samples)
 
 
 if __name__ == "__main__":
