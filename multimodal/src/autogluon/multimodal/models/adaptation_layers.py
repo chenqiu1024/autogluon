@@ -1029,11 +1029,15 @@ class MoEGate(nn.Module):
         
         if self.noisy_gating and self.training:
             raw_noise_stddev = feats_S @ self.w_noise
-            noise_stddev = self.softplus(raw_noise_stddev) + noise_epsilon
+            # guard: avoid tiny stddev leading to inf/nan after division
+            noise_stddev = self.softplus(raw_noise_stddev) + max(noise_epsilon, 1e-4)
             noisy_logits = clean_logits + (torch.randn_like(clean_logits) * noise_stddev)
             logits = noisy_logits
         else:
             logits = clean_logits
+
+        # numerical guard on logits to prevent NaN/Inf cascading to gates
+        logits = torch.nan_to_num(logits, nan=0.0, posinf=50.0, neginf=-50.0)
 
         top_logits, top_indices = logits.topk(min(self.k + 1, self.M), dim=1)
         top_k_logits = top_logits[:, : self.k]
@@ -1041,6 +1045,16 @@ class MoEGate(nn.Module):
         top_k_gates = self.softmax(top_k_logits)
         zeros = torch.zeros_like(logits, requires_grad=True).float()
         gates = zeros.scatter(1, top_k_indices, top_k_gates).to(logits.dtype)
+
+        # fallback: if某些样本所有 gate 为0（由于极端数值），退化为均匀或 argmax 分配
+        row_sum = gates.sum(dim=1, keepdim=True)
+        all_zero_mask = (row_sum == 0)
+        if all_zero_mask.any():
+            # use clean_logits argmax for those rows
+            fallback_idx = clean_logits.argmax(dim=1, keepdim=True)
+            fallback_gate = torch.zeros_like(gates)
+            fallback_gate.scatter_(1, fallback_idx, 1.0)
+            gates = torch.where(all_zero_mask, fallback_gate, gates)
 
         if self.noisy_gating and self.k < self.M and self.training:
             load = (self._prob_in_top_k(clean_logits, noisy_logits, noise_stddev, top_logits)).sum(0)
@@ -1107,8 +1121,14 @@ class MoEGate(nn.Module):
         threshold_if_out = torch.unsqueeze(torch.gather(top_values_flat, 0, threshold_positions_if_out), 1)
         # is each value currently in the top k.
         normal = Normal(self.mean, self.std)
-        prob_if_in = normal.cdf((clean_values - threshold_if_in) / noise_stddev)
-        prob_if_out = normal.cdf((clean_values - threshold_if_out) / noise_stddev)
+        # numerical guard: avoid division by tiny std / propagation of NaN/Inf
+        safe_std = torch.clamp(noise_stddev, min=1e-6)
+        z_in = (clean_values - threshold_if_in) / safe_std
+        z_out = (clean_values - threshold_if_out) / safe_std
+        z_in = torch.nan_to_num(z_in, nan=0.0, posinf=10.0, neginf=-10.0)
+        z_out = torch.nan_to_num(z_out, nan=0.0, posinf=10.0, neginf=-10.0)
+        prob_if_in = normal.cdf(z_in)
+        prob_if_out = normal.cdf(z_out)
         prob = torch.where(is_in, prob_if_in, prob_if_out)
         return prob
     
@@ -1212,6 +1232,8 @@ class SparseDispatcher(object):
 
     def __init__(self, num_experts, gates):
         """Create a SparseDispatcher."""
+        # Numerical guard: replace NaN/Inf gates with 0 to avoid inconsistent counts
+        gates = torch.nan_to_num(gates, nan=0.0, posinf=0.0, neginf=0.0)
         self._gates = gates
         self._num_experts = num_experts
         # sort experts
