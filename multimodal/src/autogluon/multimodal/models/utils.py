@@ -672,6 +672,61 @@ def apply_sigmoid(output: Dict):
     return output
 
 
+def apply_sigmoid_and_semantic_mask(output: Dict):
+    """
+    Apply sigmoid to logits and also store in SEMANTIC_MASK for semantic segmentation.
+    Handles both binary (single channel) and multi-class cases.
+
+    Parameters
+    ----------
+    output
+        The model output dict.
+
+    Returns
+    -------
+    The output with sigmoid-transformed logits and SEMANTIC_MASK.
+    """
+    for k, v in output.items():
+        logits = v[LOGITS].float()
+        # Apply sigmoid
+        sigmoid_logits = torch.sigmoid(logits)
+        output[k][LOGITS] = sigmoid_logits
+        
+        # For multi-class segmentation (num_classes > 1), also set SEMANTIC_MASK
+        # This is needed for evaluation when _output_shape > 1
+        # The logits shape is [B, C, H, W] where C is the number of classes
+        if logits.dim() == 4 and logits.shape[1] > 1:
+            # Multi-class: use softmax for SEMANTIC_MASK (proper probability distribution)
+            output[k][SEMANTIC_MASK] = F.softmax(logits, dim=1)
+        else:
+            # Binary: SEMANTIC_MASK is same as sigmoid output
+            output[k][SEMANTIC_MASK] = sigmoid_logits
+    return output
+
+
+def apply_softmax_semantic_mask(output: Dict):
+    """
+    Apply softmax to logits and store in SEMANTIC_MASK for multi-class segmentation.
+    Used with DiceCELoss and other multi-class losses.
+
+    Parameters
+    ----------
+    output
+        The model output dict.
+
+    Returns
+    -------
+    The output with softmax-transformed logits stored in both LOGITS and SEMANTIC_MASK.
+    """
+    for k, v in output.items():
+        logits = v[LOGITS].float()
+        # Apply softmax along class dimension for multi-class segmentation
+        softmax_logits = F.softmax(logits, dim=1)
+        output[k][LOGITS] = softmax_logits
+        output[k][SEMANTIC_MASK] = softmax_logits
+    return output
+
+
 def apply_multi_class_semantic_seg_postprocess(output: Dict):
     """
     Apply the semantic postprocessing to logits.
@@ -738,6 +793,8 @@ def get_model_postprocess_fn(problem_type: str, loss_func: _Loss):
     -------
     The postprocessing function.
     """
+    from ..optim.losses import DiceCELoss  # Import here to avoid circular import
+    
     postprocess_func = None
     if problem_type == REGRESSION:
         if isinstance(loss_func, nn.BCEWithLogitsLoss):
@@ -745,8 +802,13 @@ def get_model_postprocess_fn(problem_type: str, loss_func: _Loss):
     elif problem_type == SEMANTIC_SEGMENTATION:
         if isinstance(loss_func, Mask2FormerLoss):
             postprocess_func = apply_multi_class_semantic_seg_postprocess
+        elif isinstance(loss_func, DiceCELoss):
+            # Multi-class segmentation with Dice+CE loss
+            postprocess_func = apply_softmax_semantic_mask
         else:
-            postprocess_func = apply_sigmoid
+            # For other semantic segmentation losses (BCEWithLogitsLoss, StructureLoss, etc.),
+            # use apply_sigmoid_and_semantic_mask which handles both binary and multi-class cases
+            postprocess_func = apply_sigmoid_and_semantic_mask
 
     return postprocess_func
 
