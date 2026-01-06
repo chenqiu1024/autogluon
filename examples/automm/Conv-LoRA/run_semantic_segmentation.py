@@ -51,7 +51,7 @@ if __name__ == "__main__":
         "--task",
         type=str,
         default="leaf_disease_segmentation",
-        choices=["polyp", "leaf_disease_segmentation", "camo_sem_seg", "isic2017", "road_segmentation", "SBU-shadow"],
+        choices=["polyp", "leaf_disease_segmentation", "camo_sem_seg", "isic2017", "isic2018", "road_segmentation", "SBU-shadow"],
     )
     parser.add_argument("--seed", type=int, default=42686693)
     parser.add_argument("--rank", type=int, default=3)
@@ -461,7 +461,7 @@ if __name__ == "__main__":
     # evaluation
     metric_file = os.path.join(args.output_dir, "metrics.txt")
     f = open(metric_file, "a")
-    if dataset_name in ["isic2017", "SBU-shadow", "road_segmentation", "leaf_disease_segmentation"]:
+    if dataset_name in ["isic2017", "isic2018", "SBU-shadow", "road_segmentation", "leaf_disease_segmentation"]:
         test_df = expand_path(pd.read_csv(os.path.join(dataset_dir, f"test.csv")), dataset_dir)
         
         # Apply quick test / debug mode (方案 1: 快速验证模式)
