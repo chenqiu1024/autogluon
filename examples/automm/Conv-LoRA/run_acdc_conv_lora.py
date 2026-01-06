@@ -172,8 +172,6 @@ def main():
         )
         predictor.fit(train_data=train_df, tuning_data=val_df, seed=args.seed)
 
-    predictor._learner.problem_type = "semantic_segmentation"
-    predictor._learner._problem_type = "semantic_segmentation"
     # 评估（IoU + Dice）
     res = predictor.evaluate(test_df, metrics=["iou", "dice"])
     print(f"Test results on ACDC: {res}")
