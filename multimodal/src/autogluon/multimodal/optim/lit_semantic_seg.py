@@ -387,9 +387,31 @@ class SemanticSegmentationLitModule(LitModule):
                 for v in dict_loss.values():
                     loss += v
             else:
+                logits = per_output[LOGITS]
+                
+                # Handle SAM multi-class output format: combine mask and class predictions
+                # SAM multi-class outputs: LOGITS [B, num_mask_tokens, H, W] + CLASS_LOGITS [B, num_mask_tokens, num_classes+1]
+                # When num_mask_tokens == num_classes, we can use LOGITS directly as per-class masks
+                # Otherwise, we need to combine mask and class predictions
+                if CLASS_LOGITS in per_output:
+                    mask_logits = logits  # [B, num_mask_tokens, H, W]
+                    class_logits = per_output[CLASS_LOGITS]  # [B, num_mask_tokens, num_classes+1]
+                    
+                    # Apply semantic inference to combine mask and class predictions
+                    # This follows Mask2Former's approach: semantic_mask = einsum(softmax(class), sigmoid(mask))
+                    mask_cls = F.softmax(class_logits, dim=-1)[..., :-1]  # [B, num_mask_tokens, num_classes]
+                    mask_pred = torch.sigmoid(mask_logits)  # [B, num_mask_tokens, H, W]
+                    
+                    # Combine: for each pixel, sum over mask tokens weighted by class probability
+                    # semantic_mask[b, c, h, w] = sum_q(mask_cls[b, q, c] * mask_pred[b, q, h, w])
+                    logits = torch.einsum("bqc,bqhw->bchw", mask_cls, mask_pred)
+                    
+                    # Convert probabilities back to logits for CrossEntropyLoss (add small epsilon to avoid log(0))
+                    logits = torch.log(logits.clamp(min=1e-7))
+                
                 loss += (
                     self.loss_func(
-                        input=per_output[LOGITS],
+                        input=logits,
                         target=label,
                     )
                     * weight

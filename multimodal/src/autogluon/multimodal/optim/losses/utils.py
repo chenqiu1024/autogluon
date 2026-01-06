@@ -21,6 +21,7 @@ from ...constants import (
     SEMANTIC_SEGMENTATION,
 )
 from .bce_loss import BBCEWithLogitLoss
+from .dice_ce_loss import DiceCELoss
 from .focal_loss import FocalLoss
 from .lemda_loss import LemdaLoss
 from .softmax_losses import MultiNegativesSoftmaxLoss, SoftTargetCrossEntropy
@@ -85,6 +86,10 @@ def get_loss_func(
             loss_func = StructureLoss()
         elif "balanced_bce" in loss_func_name.lower():
             loss_func = BBCEWithLogitLoss()
+        elif "dice_ce_loss" in loss_func_name.lower():
+            # Multi-class segmentation with Dice + Cross-Entropy loss
+            num_classes = kwargs.get("num_classes", 4)
+            loss_func = DiceCELoss(num_classes=num_classes)
         elif "mask2former_loss" in loss_func_name.lower():
             weight_dict = {
                 "loss_cross_entropy": config.mask2former_loss.loss_cross_entropy_weight,
