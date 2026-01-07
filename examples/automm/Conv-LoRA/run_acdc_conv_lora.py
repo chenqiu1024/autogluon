@@ -105,6 +105,9 @@ def main():
     parser.add_argument("--loss", type=str, default="mask2former_loss",
                         choices=["dice_ce_loss", "mask2former_loss"],
                         help="Loss function: mask2former_loss (recommended for SAM multi-class) or dice_ce_loss")
+    # Number of mask tokens (critical for Mask2Former-style multi-class segmentation)
+    parser.add_argument("--num_mask_tokens", type=int, default=10,
+                        help="Number of mask tokens/queries (should be >= num_classes for Mask2Former, recommended 10+)")
     # Quick / Debug
     parser.add_argument("--debug", action="store_true", help="仅处理少量样本以快速验证")
     parser.add_argument("--quick_test", type=int, default=None, help="仅处理前 N 个测试样本")
@@ -132,6 +135,7 @@ def main():
     print(f"\n{'='*60}")
     print(f"Loss function: {args.loss}")
     print(f"Max epochs: {args.max_epochs}, Patience: {args.patience}")
+    print(f"Num mask tokens: {args.num_mask_tokens} (critical for Mask2Former multi-class)")
     print(f"{'='*60}\n")
 
     hyperparameters = {
@@ -145,6 +149,8 @@ def main():
         "optim.lr": lr,
         "env.per_gpu_batch_size": args.per_gpu_batch_size,
         "env.batch_size": args.batch_size,
+        # Critical for Mask2Former-style multi-class segmentation: need enough mask tokens
+        "model.sam.num_mask_tokens": args.num_mask_tokens,
     }
 
     if args.gspo_enable:

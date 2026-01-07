@@ -1,5 +1,5 @@
 # ACDC 数据集文件路径不匹配
-_Exported on 1/6/2026 at 20:45:42 PST from Cursor (2.2.44)_
+_Exported on 1/6/2026 at 23:45:48 PST from Cursor (2.2.44)_
 
 ---
 
@@ -26411,6 +26411,37 @@ python3 run_acdc_conv_lora.py \
   ...
 ```
 
+```python
+# 在 parser.add_argument 部分添加:
+parser.add_argument("--max_epochs", type=int, default=50, help="Maximum training epochs")
+parser.add_argument("--patience", type=int, default=10, help="Early stopping patience (set large to disable)")
+```
+
+```python
+# 将 max_epoch = 50 替换为:
+max_epoch = args.max_epochs
+
+# 在 hyperparameters 中添加:
+hyperparameters = {
+    # ... existing params ...
+    "optim.max_epochs": max_epoch,
+    "optim.patience": args.patience,  # 添加这行
+    # ...
+}
+```
+
+```python
+"optim.patience": 100,  # 设置很大的值，基本禁用早停
+```
+
+```shellscript
+python3 run_acdc_conv_lora.py \
+  --dataset_dir datasets/acdc_conv_lora/acdc_conv_lora \
+  --max_epochs 100 \
+  --patience 50 \
+  ...
+```
+
 ---
 
 **User**
@@ -27406,4 +27437,4611 @@ nohup python3 run_acdc_conv_lora.py \
   --vis_output_dir outputs/acdc_vis_mask2former \
 > outputs/acdc_mask2former.log 2>&1 &
 ```
+
+---
+
+**User**
+
+autogluon/examples/automm/Conv-LoRA/outputs/acdc_gspo_adapter_phase1-260105.log最后报的错误是什么原因？你现在已经解决了吗？看起来是在触发早停之后，在即将做推理时产生了错误，你要确认推理时的模型代码是否与训练时的一致，避免再到了最后推理时才发现错误
+
+---
+
+**Cursor**
+
+找到了！错误是 **`KeyError: 'semantic_mask'`**，发生在评估阶段。
+
+**问题原因**：
+- 训练时 `_compute_loss` 中添加了 SAM 多类输出的转换逻辑
+- 但**推理时**的后处理函数 `get_model_postprocess_fn` 没有正确处理这种情况
+- 模型输出只有 `logits` 和 `class_logits`，没有生成 `semantic_mask`
+
+让我检查并修复后处理逻辑：
+
+找到问题了！`apply_softmax_semantic_mask` 函数假设 logits 是 `[B, C, H, W]` 格式，但 SAM 多类模式输出的是 `[B, 1, H, W]` + `CLASS_LOGITS`。
+
+需要修改它来检测并处理 SAM 的多类输出格式。让我修复：
+
+```python
+import functools
+import logging
+import re
+import warnings
+from typing import Dict, List, Optional, Tuple
+
+import timm
+import torch
+import torch._dynamo
+import torch.nn.functional as F
+from omegaconf import DictConfig, OmegaConf
+from timm.data.constants import (
+    IMAGENET_DEFAULT_MEAN,
+    IMAGENET_DEFAULT_STD,
+    IMAGENET_INCEPTION_MEAN,
+    IMAGENET_INCEPTION_STD,
+)
+from torch import nn
+from torch.nn.modules.loss import _Loss
+from transformers import AutoConfig, AutoModel, AutoTokenizer, BertTokenizer, CLIPTokenizer, ElectraTokenizer
+from transformers.models.mask2former.modeling_mask2former import Mask2FormerLoss
+
+from ..constants import (
+    ALL_MODALITIES,
+    CATEGORICAL,
+    CATEGORICAL_MLP,
+    CLASS_LOGITS,
+    CLIP,
+    CLIP_IMAGE_MEAN,
+    CLIP_IMAGE_STD,
+    DOCUMENT,
+    DOCUMENT_TRANSFORMER,
+    FT_TRANSFORMER,
+    FUSION_MLP,
+    FUSION_NER,
+    FUSION_TRANSFORMER,
+    HF_TEXT,
+    IMAGE,
+    LOGITS,
+    META_TRANSFORMER,
+    MMDET_IMAGE,
+    MMOCR_TEXT_DET,
+    MMOCR_TEXT_RECOG,
+    NER_TEXT,
+    NUMERICAL,
+    NUMERICAL_MLP,
+    OCR,
+    PEFT_ADDITIVE_STRATEGIES,
+    REGRESSION,
+    SAM,
+    SEMANTIC_MASK,
+    SEMANTIC_SEGMENTATION,
+    SEMANTIC_SEGMENTATION_IMG,
+    T_FEW,
+    TEXT,
+    TEXT_NER,
+    TIMM_IMAGE,
+)
+from .adaptation_layers import ConvLoRALinear, IA3Linear, IA3LoRALinear, LoRALinear
+
+logger = logging.getLogger(__name__)
+
+
+ALL_TOKENIZERS = {
+    "bert": BertTokenizer,
+    "clip": CLIPTokenizer,
+    "electra": ElectraTokenizer,
+    "hf_auto": AutoTokenizer,
+}
+
+
+class DummyLayer(nn.Module):
+    """
+    DummyLayer to ensure that the gradient checkpointing will assign output layer as require_grad=True.
+    Reference: https://discuss.pytorch.org/t/checkpoint-with-no-grad-requiring-inputs-problem/19117/9
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.dummy_bias = torch.ones(1, dtype=torch.float32, requires_grad=True)
+
+    def forward(self, x):
+        return x + self.dummy_bias.to(x) - self.dummy_bias.to(x)
+
+
+def init_weights(module: nn.Module):
+    """
+    Initialize one module. It uses xavier_norm to initialize nn.Embedding
+    and xavier_uniform to initialize nn.Linear's weight.
+
+    Parameters
+    ----------
+    module
+        A Pytorch nn.Module.
+    """
+    if isinstance(module, nn.Embedding):
+        nn.init.xavier_normal_(module.weight)
+    elif isinstance(module, nn.Linear):
+        nn.init.xavier_uniform_(module.weight)
+        if module.bias is not None:
+            nn.init.zeros_(module.bias)
+    elif isinstance(module, nn.LayerNorm):
+        module.bias.data.zero_()
+        module.weight.data.fill_(1.0)
+
+
+def assign_encoder_layer_ids(
+    encoder_names: List[List[str]],
+):
+    """
+    Assign ids to encoder layers. The encoder may contain several blocks e.g., block1 and block2.
+    This function iterates through all the layers of each block from the input end towards the output end.
+    It increases 1 on the layer id when the detected digit in a layer name changes.
+
+    Parameters
+    ----------
+    encoder_names
+        Encoder layer names.
+
+    Returns
+    -------
+    name_to_id
+        The encoder layer-to-id mapping.
+    encoder_layer_num
+        The encoder layer number.
+    """
+    name_to_id = {}
+    cur_id = 0
+    for i, group_names in enumerate(encoder_names):
+        last_inferred_id = -1
+        for n in group_names:
+            detect_id = False
+            n_splits = n.split(".")
+
+            for split in n_splits:
+                # the first digit encountered is used to infer layer id
+                if split.isdigit():
+                    inferred_id = int(split)
+                    # increase at most 1 one time
+                    if inferred_id != last_inferred_id:
+                        cur_id += 1  # layer.0 -> layer_id 1
+                        last_inferred_id = inferred_id
+
+                    name_to_id[n] = cur_id
+                    detect_id = True
+                    break
+
+            if detect_id is False:
+                raise ValueError(f"parameter name: {n} not has no id inside")
+
+    if len(name_to_id) > 0:
+        encoder_layer_num = max(name_to_id.values())
+    else:
+        encoder_layer_num = 0
+    return name_to_id, encoder_layer_num
+
+
+def assign_non_encoder_layer_ids(
+    non_encoder_names: List[str],
+    layer_id: int,
+):
+    """
+    Assign the provided id to non-encoder layers.
+
+    Parameters
+    ----------
+    non_encoder_names
+        Names layers not belonging to an encoder.
+    layer_id
+        provided id.
+
+    Returns
+    -------
+    A dictionary mapping the layer names (keys) to their ids (values).
+    """
+    name_to_id = {}
+    for n in non_encoder_names:
+        name_to_id[n] = layer_id
+    return name_to_id
+
+
+def split_encoder_non_encoder(names: List[str], post_encoder_patterns: Tuple[str, ...]):
+    """
+    Group layer names into two types: encoder and non-encoder.
+    A layer belongs to encoder if its name contains at least one digit.
+    It uses this rule since a model's encoder in Pytorch's implementation
+    is generally wrapped by nn.Sequential() or nn.ModuleList(),
+    which produce digits in layer names.
+
+    Parameters
+    ----------
+    names
+        Model layer names.
+    Returns
+    -------
+    encoder_names
+        A list of encoder layer names.
+    non_encoder_names
+        A list of non-encoder layer names.
+    """
+    encoder_names = []
+    non_encoder_names = []
+    for n in names:
+        is_encoder = False
+        if any(p in n for p in post_encoder_patterns):
+            non_encoder_names.append(n)
+            continue
+        for i in n.split("."):
+            if i.isdigit():
+                encoder_names.append(n)
+                is_encoder = True
+                break
+        if not is_encoder:
+            non_encoder_names.append(n)
+
+    return encoder_names, non_encoder_names
+
+
+def group_param_names(
+    names: List[str],
+    pre_encoder_patterns: Tuple[str, ...],
+    post_encoder_patterns: Tuple[str, ...],
+    model_prefix: Optional[str] = None,
+):
+    """
+    Group layer names into three types: pre-encoder, encoder, and post-encoder.
+    If "model_prefix" is provided, the selected layer names must start with it.
+    In this case, the left names will be returned for the next-time processing.
+    This function first extracts the first-level children modules' names and
+    classify them into encoder and non-encoder layers. Note that an encoder may
+    consist of several manually named children modules, e.g., block1 and block2.
+    The non-encoder layers are further subdivided into pre-encoder and post-encoder.
+
+    Parameters
+    ----------
+    names
+        Model layer names
+    pre_encoder_patterns
+        Patterns to identify a layer as a pre-encoder layer. If a layer name contains one pattern,
+        the layer will be grouped into pre-encoder layers.
+    post_encoder_patterns
+        Patterns to identify a layer as a post-encoder layer. If a layer name contains one pattern,
+        the layer will be grouped into post-encoder layers.
+    model_prefix
+        A prefix to filter layer names. Only layer names starting with it will be selected.
+    Returns
+    -------
+    left_names
+        The layer names left for the next-time processing.
+    encoder_names_grouped
+        Encoder layer names.
+    pre_encoder_names
+        Names of layers before the encoder.
+    post_encoder_names
+        Names of layers after the encoder.
+    """
+    # two set of patterns can't have intersections
+    assert all(pre_p not in post_encoder_patterns for pre_p in pre_encoder_patterns)
+
+    left_names = []
+    # in case model_prefix is provided, e.g., the clip model with image and text branches
+    selected_names = []
+    for n in names:
+        if model_prefix is not None and not n.startswith(model_prefix):
+            left_names.append(n)
+        else:
+            selected_names.append(n)
+
+    # split blocks at the first level
+    children_prefix = []
+    for n in selected_names:
+        if model_prefix is not None:
+            child_name = n[len(model_prefix) + 1 :].split(".")[0]
+            child_prefix = f"{model_prefix}.{child_name}"
+        else:
+            child_prefix = n.split(".")[0]
+        if child_prefix not in children_prefix:
+            children_prefix.append(child_prefix)
+
+    encoder_names_grouped = []
+    non_encoder_names = []
+    for child_prefix in children_prefix:
+        per_names_group = [n for n in selected_names if n.startswith(child_prefix)]
+        per_encoder_names, per_non_encoder_names = split_encoder_non_encoder(per_names_group, post_encoder_patterns)
+        encoder_names_grouped.append(per_encoder_names)
+        non_encoder_names.extend(per_non_encoder_names)
+
+    pre_encoder_names = []
+    post_encoder_names = []
+    for n in non_encoder_names:
+        if any(p in n for p in pre_encoder_patterns):
+            pre_encoder_names.append(n)
+        elif any(p in n for p in post_encoder_patterns):
+            post_encoder_names.append(n)
+        else:
+            raise ValueError(f"parameter name: {n} belong to neither pre or post encoder names")
+
+    # only process left names in next iteration
+    return left_names, encoder_names_grouped, pre_encoder_names, post_encoder_names
+
+
+def reverse_layer_ids(
+    encoder_name_to_id: dict,
+    pre_enocder_name_to_id: dict,
+    post_enocder_name_to_id: dict,
+):
+    """
+    The layer ids need to increase when going from the output end to the input end.
+    We need to reverse the ids which were originally assigned in a decreasing order.
+
+    Parameters
+    ----------
+    encoder_name_to_id
+        The layer-to-id mapping of encoder layers.
+    pre_enocder_name_to_id
+        The layer-to-id mapping of pre-encoder layers.
+    post_enocder_name_to_id
+        The layer-to-id mapping of post-encoder layers.
+
+    Returns
+    -------
+    The layer-to-id mapping of all layers with layer ids reversed.
+    """
+    name_to_id = {**pre_enocder_name_to_id, **encoder_name_to_id, **post_enocder_name_to_id}
+    if len(name_to_id) > 0:
+        layer_num = max(name_to_id.values())
+        # if no post encoder layers, the minimum layer id should be 1
+        if len(post_enocder_name_to_id) == 0:
+            layer_num += 1
+    for n, layer_id in name_to_id.items():
+        name_to_id[n] = layer_num - layer_id
+
+    return name_to_id
+
+
+def assign_layer_ids(
+    names: List[str],
+    pre_encoder_patterns: Tuple[str, ...],
+    post_encoder_patterns: Tuple[str, ...],
+    model_pre: Optional[str] = None,
+):
+    """
+    Assign ids to all layers. It splits a model into three parts: pre-encoder, encoder, and post-encoder.
+    Encoder is generally a stack of multiple similar layers, such as transformer layers. Since encoder is
+    generally wrapped by nn.Sequential() or nn.ModuleList(), its inside layer names contain digits.
+    It sets 0 as the ids of all post-encoder layers and a maximum id (layer_num) for the all the pre-encoder
+    layers. The encoder layers have decreasing ids from the input to the output ends.
+
+    Parameters
+    ----------
+    names
+        model layer names.
+    pre_encoder_patterns
+        Patterns to identify a layer as a pre-encoder layer. If a layer name contains one pattern,
+        the layer will be grouped into pre-encoder layers.
+    post_encoder_patterns
+        Patterns to identify a layer as a post-encoder layer. If a layer name contains one pattern,
+        the layer will be grouped into post-encoder layers.
+    model_pre
+        The layer names' prefix. Only the layer names with this prefix will be assigned ids. The left
+        layer names will be returned.
+
+    Returns
+    -------
+    name_to_id
+        A dictionary mapping the layer names (keys) to their ids (values).
+    left_names
+        The layer names not starting with the "model_pre".
+    """
+    try:
+        left_names, encoder_names, pre_encoder_names, post_encoder_names = group_param_names(
+            names=names,
+            pre_encoder_patterns=pre_encoder_patterns,
+            post_encoder_patterns=post_encoder_patterns,
+            model_prefix=model_pre,
+        )
+        # add a constraint
+        if len(encoder_names) == 0 and len(pre_encoder_names) != 0:
+            raise ValueError(f"encoder_names is empty, but pre_encoder_names has values: {pre_encoder_names}")
+
+        encoder_name_to_id, encoder_layer_num = assign_encoder_layer_ids(
+            encoder_names=encoder_names,
+        )
+
+        pre_encoder_name_to_id = assign_non_encoder_layer_ids(non_encoder_names=pre_encoder_names, layer_id=0)
+
+        post_encoder_name_to_id = assign_non_encoder_layer_ids(
+            non_encoder_names=post_encoder_names, layer_id=encoder_layer_num + 1
+        )
+
+        name_to_id = reverse_layer_ids(
+            encoder_name_to_id=encoder_name_to_id,
+            pre_enocder_name_to_id=pre_encoder_name_to_id,
+            post_enocder_name_to_id=post_encoder_name_to_id,
+        )
+    except Exception as e:
+        logger.debug(
+            f"When calling assign_layer_ids(), it catches exception: {e}. All the layers will use the same layer_id."
+        )
+        name_to_id = dict()
+        left_names = names
+
+    return name_to_id, left_names
+
+
+def get_column_features(
+    batch: Dict[str, torch.Tensor],
+    column_name_prefix: str,
+    features: torch.Tensor,
+    valid_lengths: torch.Tensor,
+    cls_feature: Optional[torch.Tensor] = None,
+):
+    """
+    Index the features of one column defined by `column_name_prefix`.
+    This function can be used to index both image and text features.
+    The features have shape (b, n, d), where n can be the image number or
+    text token number. One column corresponds to a subset of
+    the n images or text tokens. One column name can only appear once in the return.
+
+    Parameters
+    ----------
+    batch
+        The batch input containing the feature column information, i.e., indexes.
+    column_name_prefix
+        The column name prefix of one modality (image or text).
+    features
+        The features of columns whose names starts with column_name_prefix.
+    valid_lengths
+        The valid image number or text token number of each sample in a batch.
+    cls_feature
+        The cls feature containing information from all feature columns.
+
+    Returns
+    -------
+    The column features with masks. If the column has no valid features, its
+    mask is 0.
+    """
+    column_features = {}
+    feature_masks = {}
+
+    cut_idx = len(column_name_prefix) + 1
+    if cls_feature is not None:
+        all_column_names = []
+        # create a zero mask to do logical_or with each column's mask
+        joint_mask = torch.zeros(features.shape[0]).to(features)  # (b,)
+    for key in batch:
+        if key.startswith(column_name_prefix):
+            per_col_features = []
+            per_col_masks = torch.zeros(features.shape[0]).to(features)  # (b,)
+            assert batch[key].ndim == 2 and batch[key].shape[1] == 2
+            for i, per_sample_col_idx in enumerate(batch[key]):
+                start_idx = per_sample_col_idx[0]
+                end_idx = per_sample_col_idx[1]
+                if start_idx < end_idx:
+                    assert end_idx <= valid_lengths[i]
+                    per_col_features.append(features[i, start_idx:end_idx].mean(dim=0))
+                    per_col_masks[i] = 1
+                else:  # the column has no valid image/text.
+                    per_col_features.append(torch.zeros_like(features[0, 0]))
+                    per_col_masks[i] = 0
+            column_name = key[cut_idx:]
+            column_features[column_name] = torch.stack(per_col_features, dim=0)  # (b, num_features)
+            feature_masks[column_name] = per_col_masks  # (b,)
+            if cls_feature is not None:
+                all_column_names.append(column_name)
+                joint_mask = torch.logical_or(joint_mask, per_col_masks)
+
+    # all the columns of one model's input share the model's cls feature
+    if (
+        cls_feature is not None and len(all_column_names) > 0
+    ):  # some models', e.g, timm_image, output doesn't have the cls feature.
+        # remove the individual column features since these column features not independent
+        for column_name in all_column_names:
+            column_features.pop(column_name)
+            feature_masks.pop(column_name)
+
+        joint_column_name = "_".join(all_column_names)
+        column_features[joint_column_name] = cls_feature
+        feature_masks[joint_column_name] = joint_mask.to(features)
+
+    # print(f"column_features: {column_features}")
+    return column_features, feature_masks
+
+
+def create_adaptation(peft: str, layer: nn.Module, lora_r: int, lora_alpha: int, **kwargs):
+    """
+    Creates a model adaptation module (IA3, LoRA, IA3_LoRA) given a linear layer.
+
+    Parameters
+    ----------
+    peft
+        Name of the adaptation module.
+    layer
+       The layer the adaptation module should be applied to.
+    lora_r
+        The rank r of the low-rank decomposition.
+    lora_alpha
+        The scaling factor. Can be set to same value as r in
+        most cases, as initialization is scaled already.
+    filter
+        Apply loRA only to linear layers filtered by name (e.g. "query.").
+        If None, loRA is applied to all linear Layers in module.
+    module_filter
+        Apply loRA only to modules filtered by name (e.g. ".*EncDecAttention|.*DenseReluDense")
+        If None, loRA is considered for all modules
+
+    Returns
+    -------
+    Model with injected LoRA modules.
+    """
+    if "ia3_lora" in peft:
+        return IA3LoRALinear(
+            layer.in_features, layer.out_features, r=lora_r, lora_alpha=lora_alpha, merge_weights=False
+        )
+    elif "conv_lora" in peft:
+        return ConvLoRALinear(
+            layer.in_features,
+            layer.out_features,
+            r=lora_r,
+            lora_alpha=lora_alpha,
+            merge_weights=False,
+            conv_lora_expert_num=kwargs["conv_lora_expert_num"],
+        )
+    elif "ia3" in peft:
+        return IA3Linear(layer.in_features, layer.out_features, merge_weights=False)
+    elif "lora" in peft:
+        return LoRALinear(layer.in_features, layer.out_features, r=lora_r, lora_alpha=lora_alpha, merge_weights=False)
+    elif peft is not None:
+        raise NotImplementedError(
+            f"The efficient finetuning strategy '{peft}'"
+            f" is not supported. We only support"
+            f" {', '.join(PEFT_ADDITIVE_STRATEGIES)}."
+        )
+
+
+def inject_adaptation_to_linear_layer(
+    model: nn.Module,
+    peft: str,
+    lora_r: int = None,
+    lora_alpha: int = None,
+    filter: Optional[List[str]] = None,
+    module_filter: Optional[List[str]] = None,
+    extra_trainable_params: Optional[List[str]] = None,
+    **kwargs,
+) -> nn.Module:
+    """
+    Injects trainable adatio Low-Rank decomposition matrices (LoRA) into linear
+    layers of a PyTorch model. Used for efficient fine-tuning of large
+    pre-trained models.
+
+    Parameters
+    ----------
+    model
+        A PyTorch model.
+    peft
+        Efficient finetuning method that should be applied.
+    lora_r
+        The rank r of the low-rank decomposition.
+    lora_alpha
+        The scaling factor. Can be set to same value as r in
+        most cases, as initialization is scaled already.
+    filter
+        Apply loRA only to linear layers filtered by name (e.g. "query.").
+        If None, loRA is applied to all linear Layers in module.
+    module_filter
+        Apply loRA only to modules filtered by name (e.g. ".*EncDecAttention|.*DenseReluDense")
+        If None, loRA is considered for all modules
+    extra_trainable_params
+        Not to apply loRA to modules filtered by name, and these modules are not frozen during training (e.g. "mask_decoder").
+        If None, all the modules except for those applied loRA are frozen.
+    Returns
+    -------
+    Model with injected LoRA modules.
+    """
+    # Paper alignment (Conv-LoRA, Sec. 3.3):
+    # Typical usage sets module_filter to attention modules in the vision encoder (e.g., ".*vision_encoder.*attn")
+    # and filter to projection names (e.g., ["q", "v"]). For "conv_lora", we create ConvLoRALinear instead of LoRA.
+    for m_name, module in dict(model.named_modules()).items():
+        if extra_trainable_params and any(re.match(filter_layer, m_name) for filter_layer in extra_trainable_params):
+            continue
+        if hasattr(model, "frozen_layers") and any(
+            re.search(filter_layer, m_name) for filter_layer in model.frozen_layers
+        ):
+            continue
+        if not module_filter or any(re.match(filter_module, m_name) for filter_module in module_filter):
+            for c_name, layer in dict(module.named_children()).items():
+                if not filter or any(re.match(filter_layer, c_name) for filter_layer in filter):
+                    assert isinstance(
+                        layer, nn.Linear
+                    ), f"LoRA can only be applied to torch.nn.Linear, but {layer} is {type(layer)}."
+                    adaptation_layer = create_adaptation(peft, layer, lora_r, lora_alpha, **kwargs)
+                    adaptation_layer.weight = layer.weight
+                    adaptation_layer.bias = layer.bias
+                    setattr(module, c_name, adaptation_layer)
+
+    return model  # return model to enable method chaining
+
+
+def get_model_head(model: nn.Module):
+    """
+    Return the model's head. Different models may have different head names.
+
+    Parameters
+    ----------
+    model
+        A Pytorch model.
+
+    Returns
+    -------
+    The model's head.
+    """
+    if hasattr(model, "head"):
+        head = model.head  # move the head outside
+    elif hasattr(model, "last_linear"):
+        head = model.last_linear
+    elif hasattr(model, "fc"):
+        head = model.fc
+    elif hasattr(model, "classifier"):
+        head = model.classifier
+    else:
+        raise ValueError(f"Model {type(model)} doesn't have head. Need to check its implementation.")
+
+    return head.fc if hasattr(head, "fc") else head
+
+
+def get_hf_config_and_model(
+    checkpoint_name: str, pretrained: Optional[bool] = True, low_cpu_mem_usage: Optional[bool] = False
+):
+    """
+    Get a Huggingface config and model based on a checkpoint name.
+
+    Parameters
+    ----------
+    checkpoint_name
+        A model checkpoint name or a local path that saves a custom checkpoint.
+    pretrained
+         Whether using the pretrained weights. If pretrained=True, download the pretrained model.
+    low_cpu_mem_usage
+        Whether to turn on the optimization of reducing the peak CPU memory usage when loading the pretrained model.
+
+    Returns
+    -------
+    A Huggingface config and model.
+    """
+    config = AutoConfig.from_pretrained(checkpoint_name)    # nosec B615
+
+    if pretrained:
+        model = AutoModel.from_pretrained(checkpoint_name, low_cpu_mem_usage=low_cpu_mem_usage) # nosec B615
+    else:
+        model = AutoModel.from_config(config)
+    # Explicitly set the model to train mode after loading as by default it is in eval mode
+    # See issue #4965
+    model.train()
+    return config, model
+
+
+def apply_sigmoid(output: Dict):
+    """
+    Apply the sigmoid to logits.
+
+    Parameters
+    ----------
+    output
+        The model output dict.
+
+    Returns
+    -------
+    The output with logits transformed by sigmoid.
+    """
+    for k, v in output.items():
+        output[k][LOGITS] = torch.sigmoid(v[LOGITS].float())
+    return output
+
+
+def apply_sigmoid_and_semantic_mask(output: Dict):
+    """
+    Apply sigmoid to logits and also store in SEMANTIC_MASK for semantic segmentation.
+    Handles both binary (single channel) and multi-class cases.
+
+    Parameters
+    ----------
+    output
+        The model output dict.
+
+    Returns
+    -------
+    The output with sigmoid-transformed logits and SEMANTIC_MASK.
+    """
+    for k, v in output.items():
+        logits = v[LOGITS].float()
+        # Apply sigmoid
+        sigmoid_logits = torch.sigmoid(logits)
+        output[k][LOGITS] = sigmoid_logits
+        
+        # For multi-class segmentation (num_classes > 1), also set SEMANTIC_MASK
+        # This is needed for evaluation when _output_shape > 1
+        # The logits shape is [B, C, H, W] where C is the number of classes
+        if logits.dim() == 4 and logits.shape[1] > 1:
+            # Multi-class: use softmax for SEMANTIC_MASK (proper probability distribution)
+            output[k][SEMANTIC_MASK] = F.softmax(logits, dim=1)
+        else:
+            # Binary: SEMANTIC_MASK is same as sigmoid output
+            output[k][SEMANTIC_MASK] = sigmoid_logits
+    return output
+
+
+def apply_softmax_semantic_mask(output: Dict):
+    """
+    Apply softmax to logits and store in SEMANTIC_MASK for multi-class segmentation.
+    Used with DiceCELoss and other multi-class losses.
+    
+    Handles two cases:
+    1. Standard multi-class: logits shape [B, C, H, W] - apply softmax directly
+    2. SAM multi-class: logits [B, num_queries, H, W] + CLASS_LOGITS [B, num_queries, num_classes+1]
+       - use semantic_inference to combine mask and class predictions
+
+    Parameters
+    ----------
+    output
+        The model output dict.
+
+    Returns
+    -------
+    The output with softmax-transformed logits stored in both LOGITS and SEMANTIC_MASK.
+    """
+    def semantic_inference(mask_cls, mask_pred):
+        """Combine mask and class predictions following Mask2Former approach."""
+        mask_cls = F.softmax(mask_cls, dim=-1)[..., :-1]  # Remove "no object" class
+        mask_pred = mask_pred.sigmoid()
+        semseg = torch.einsum("qc,qhw->chw", mask_cls, mask_pred)
+        return semseg
+    
+    for k, v in output.items():
+        logits = v[LOGITS].float()
+        
+        # Check if this is SAM multi-class output (has CLASS_LOGITS)
+        if CLASS_LOGITS in v:
+            # SAM multi-class: combine mask and class predictions
+            pred_classes = v[CLASS_LOGITS]  # [B, num_queries, num_classes+1]
+            pred_masks = logits  # [B, num_queries, H, W]
+            semantic_masks = []
+            for mask_cls_result, mask_pred_result in zip(pred_classes, pred_masks):
+                per_sample_semantic_masks = semantic_inference(mask_cls_result, mask_pred_result)
+                semantic_masks.append(per_sample_semantic_masks)
+            semantic_masks = torch.stack(semantic_masks, dim=0)
+            output[k][SEMANTIC_MASK] = semantic_masks
+        else:
+            # Standard multi-class: apply softmax directly
+            softmax_logits = F.softmax(logits, dim=1)
+            output[k][LOGITS] = softmax_logits
+            output[k][SEMANTIC_MASK] = softmax_logits
+    return output
+
+
+def apply_multi_class_semantic_seg_postprocess(output: Dict):
+    """
+    Apply the semantic postprocessing to logits.
+
+    Parameters
+    ----------
+    output
+        The model output dict.
+
+    Returns
+    -------
+    The output with post-proceesed semantic masks.
+    """
+
+    def semantic_inference(mask_cls, mask_pred):
+        """
+        Post-processing mask prediction for multi-class semantic segmentation inference based on https://github.com/facebookresearch/Mask2Former/blob/main/mask2former/maskformer_model.py
+
+        Args:
+            mask_cls (`torch.Tensor`):
+                Class logits. A tensor of shape `(num_queries, num_classes + 1)` (include the "no object" category).
+
+            mask_pred (`torch.Tensor`):
+                Mask logits. A tensor of shape `(num_queries, height, width)`.
+
+        Returns:
+            semseg (`torch.Tensor`): The processed mask prediction. A tensor of shape `(num_classes, height, width)`.
+
+        References:
+        [1] https://arxiv.org/abs/2107.06278
+        [2] https://arxiv.org/abs/2112.01527
+        """
+        mask_cls = F.softmax(mask_cls, dim=-1)[..., :-1]
+        mask_pred = mask_pred.sigmoid()
+        semseg = torch.einsum("qc,qhw->chw", mask_cls, mask_pred)
+        return semseg
+
+    for k, v in output.items():
+        pred_classes = output[k][CLASS_LOGITS]
+        pred_masks = output[k][LOGITS]
+        semantic_masks = []
+        for mask_cls_result, mask_pred_result in zip(
+            pred_classes, pred_masks
+        ):  # bs, num_q, num_class and bs, num_q, h, w
+            per_sample_semantic_masks = semantic_inference(mask_cls_result, mask_pred_result)  # num_class, h, w
+            semantic_masks.append(per_sample_semantic_masks)
+        semantic_masks = torch.stack(semantic_masks, dim=0)
+        output[k][SEMANTIC_MASK] = semantic_masks
+    return output
+
+
+def get_model_postprocess_fn(problem_type: str, loss_func: _Loss):
+    """
+    Get the postprocessing function for the model outputs.
+
+    Parameters
+    ----------
+    problem_type
+        The problem type, e.g., classification or regression.
+    loss_func
+        The loss function used in training.
+
+    Returns
+    -------
+    The postprocessing function.
+    """
+    from ..optim.losses import DiceCELoss  # Import here to avoid circular import
+    
+    postprocess_func = None
+    if problem_type == REGRESSION:
+        if isinstance(loss_func, nn.BCEWithLogitsLoss):
+            postprocess_func = apply_sigmoid
+    elif problem_type == SEMANTIC_SEGMENTATION:
+        if isinstance(loss_func, Mask2FormerLoss):
+            postprocess_func = apply_multi_class_semantic_seg_postprocess
+        elif isinstance(loss_func, DiceCELoss):
+            # Multi-class segmentation with Dice+CE loss
+            postprocess_func = apply_softmax_semantic_mask
+        else:
+            # For other semantic segmentation losses (BCEWithLogitsLoss, StructureLoss, etc.),
+            # use apply_sigmoid_and_semantic_mask which handles both binary and multi-class cases
+            postprocess_func = apply_sigmoid_and_semantic_mask
+
+    return postprocess_func
+
+
+def get_mmocr_config_and_model(checkpoint_name: str):
+    """
+    Get an MMOCR config and model based on a checkpoint name.
+
+    Parameters
+    ----------
+    checkpoint_name
+        A model checkpoint name.
+
+    Returns
+    -------
+    An MMOCR config and model.
+    """
+    from ..utils import check_if_packages_installed
+
+    check_if_packages_installed(package_names=["mmcv"])
+    try:
+        import mmocr
+        from mmocr.models import build_detector
+    except ImportError:
+        mmocr = None
+    from mim.commands.download import download
+
+    checkpoints = download(package="mmocr", configs=[checkpoint_name], dest_root=".")
+
+    # read config files
+    check_if_packages_installed(problem_type=OCR)
+    config_file = checkpoint_name + ".py"
+    if isinstance(config_file, str):
+        config = mmcv.Config.fromfile(config_file)
+
+    # build model and load pretrained weights
+    checkpoint = checkpoints[0]
+    model = build_detector(config.model, test_cfg=config.get("test_cfg"))
+    if checkpoint is not None:
+        checkpoint = load_checkpoint(model, checkpoint, map_location="cpu")
+    return config, model
+
+
+def lookup_mmdet_config(key, config):
+    if key in config:
+        return config[key]
+    for subconfig in config.values():
+        if isinstance(subconfig, dict):
+            result = lookup_mmdet_config(key, subconfig)
+            if result is not None:
+                return result
+        elif isinstance(subconfig, list):
+            for subsubconfig in subconfig:
+                if isinstance(subsubconfig, dict):
+                    result = lookup_mmdet_config(key, subsubconfig)
+                    if result is not None:
+                        return result
+    return None
+
+
+def update_mmdet_config(key, value, config):
+    for k, subconfig in config.items():
+        if key == k:
+            config[k] = value
+        elif isinstance(subconfig, dict):
+            update_mmdet_config(key, value, subconfig)
+        elif isinstance(subconfig, list):
+            for subsubconfig in subconfig:
+                if isinstance(subsubconfig, dict):
+                    update_mmdet_config(key, value, subsubconfig)
+
+
+def run_model(model: nn.Module, batch: dict, trt_model: Optional[nn.Module] = None):
+    from ..utils.onnx import OnnxModule
+    from .document_transformer import DocumentTransformer
+    from .fusion.fusion_mlp import MultimodalFusionMLP
+    from .hf_text import HFAutoModelForTextPrediction
+    from .t_few import TFewModel
+    from .timm_image import TimmAutoModelForImagePrediction
+
+    supported_models = (
+        TimmAutoModelForImagePrediction,
+        HFAutoModelForTextPrediction,
+        MultimodalFusionMLP,
+        TFewModel,
+        OnnxModule,
+    )
+    pure_model = model
+    if isinstance(model, torch._dynamo.eval_frame.OptimizedModule):
+        pure_model = model._orig_mod
+    if isinstance(model, nn.DataParallel):
+        pure_model = model.module
+    if isinstance(pure_model, OnnxModule):
+        for k in batch:
+            # HACK input data types in ONNX
+            if batch[k].dtype == torch.int32:
+                batch[k] = batch[k].to(torch.int64)
+    # DocumentTransformer inherited from HFAutoModelForTextPrediction
+    if (not isinstance(pure_model, DocumentTransformer)) and isinstance(pure_model, supported_models):
+        input_vec = [batch[k] for k in pure_model.input_keys]
+        column_names, column_values = [], []
+        for k in batch.keys():
+            has_image_column_prefix = isinstance(pure_model, TimmAutoModelForImagePrediction) and k.startswith(
+                pure_model.image_column_prefix
+            )
+            has_text_column_prefix = isinstance(pure_model, HFAutoModelForTextPrediction) and k.startswith(
+                pure_model.text_column_prefix
+            )
+            if has_image_column_prefix or has_text_column_prefix:
+                column_names.append(k)
+                column_values.append(batch[k])
+        if column_names != [] and column_values != []:
+            input_vec.append(column_names)
+            input_vec.append(column_values)
+        if isinstance(pure_model, OnnxModule):
+            # OnnxModule doesn't support multi-gpu yet
+            output_vec = pure_model(*tuple(input_vec))
+        else:
+            output_vec = model(*tuple(input_vec))
+
+        output = pure_model.get_output_dict(*output_vec)
+    else:
+        output = model(batch)
+    return output
+
+
+def freeze_model_layers(model, frozen_layers):
+    """
+    Freeze model layers with pattern in frozen_layers.
+
+    Parameters
+    ----------
+    model
+        The pytorch model.
+    frozen_layers
+        A list of substrings of frozen layers' names.
+
+        e.g. if frozen_layers = ["backbone", "neck"],
+            all layers including "backbone" or "neck" in the name will be frozen.
+    """
+
+    if not frozen_layers:
+        return
+
+    is_frozen_layer = lambda n: any(bb in n for bb in frozen_layers)
+
+    for n, p in model.named_parameters():
+        if is_frozen_layer(n):
+            p.requires_grad = False
+
+
+def get_pretrained_tokenizer(
+    tokenizer_name: str,
+    checkpoint_name: str,
+    use_fast: Optional[bool] = True,
+    add_prefix_space: Optional[bool] = None,
+):
+    """
+    Load the tokenizer for a pre-trained huggingface checkpoint.
+
+    Parameters
+    ----------
+    tokenizer_name
+        The tokenizer type, e.g., "bert", "clip", "electra", and "hf_auto".
+    checkpoint_name
+        Name of a pre-trained checkpoint.
+    use_fast
+        Use a fast Rust-based tokenizer if it is supported for a given model.
+        If a fast tokenizer is not available for a given model, a normal Python-based tokenizer is returned instead.
+        See: https://huggingface.co/docs/transformers/model_doc/auto#transformers.AutoTokenizer.from_pretrained.use_fast
+
+    Returns
+    -------
+    A tokenizer instance.
+    """
+    try:
+        tokenizer_class = ALL_TOKENIZERS[tokenizer_name]
+        if add_prefix_space is None:
+            return tokenizer_class.from_pretrained(checkpoint_name, use_fast=use_fast)
+        else:
+            return tokenizer_class.from_pretrained(
+                checkpoint_name, use_fast=use_fast, add_prefix_space=add_prefix_space
+            )
+    except TypeError as e:
+        try:
+            tokenizer = BertTokenizer.from_pretrained(checkpoint_name)  # nosec B615
+            warnings.warn(
+                f"Current checkpoint {checkpoint_name} does not support AutoTokenizer. "
+                "Switch to BertTokenizer instead.",
+                UserWarning,
+            )
+            return tokenizer
+        except:
+            raise e
+
+
+def extract_value_from_config(
+    config: Dict,
+    keys: Tuple[str, ...],
+):
+    """
+    Traverse a config dictionary to get some hyper-parameter's value.
+
+    Parameters
+    ----------
+    config
+        A config dictionary.
+    keys
+        The possible names of a hyper-parameter.
+
+    Returns
+    -------
+    The hyper-parameter value.
+    """
+    result = []
+    for k, v in config.items():
+        if k in keys:
+            result.append(v)
+        elif isinstance(v, dict):
+            result += extract_value_from_config(v, keys)
+        else:
+            pass
+
+    return result
+
+
+def extract_image_hparams_from_config(model_name: str, config):
+    """
+    Extract some default hyper-parameters, e.g., image size, mean, and std,
+    from a pre-trained (timm or huggingface) checkpoint.
+
+    Parameters
+    ----------
+    model_name
+        Name of model.
+    config
+        Config of a pre-trained checkpoint.
+
+    Returns
+    -------
+    image_size
+        Image width/height.
+    mean
+        Image normalization mean.
+    std
+        Image normalizaiton std.
+    """
+    if model_name.lower().startswith((TIMM_IMAGE, META_TRANSFORMER)):
+        image_size = config["input_size"][-1]
+        image_mean = config["mean"]
+        image_std = config["std"]
+    elif model_name.lower().startswith((CLIP, DOCUMENT_TRANSFORMER)):
+        extracted = extract_value_from_config(
+            config=config.to_diff_dict(),
+            keys=("image_size",),
+        )
+        if len(extracted) == 0:
+            image_size = None
+        elif len(extracted) >= 1:
+            image_size = extracted[0]
+            if isinstance(image_size, tuple):
+                image_size = image_size[-1]
+        else:
+            raise ValueError(f" more than one image_size values are detected: {extracted}")
+        image_mean = None
+        image_std = None
+    else:
+        raise ValueError(f"Unknown image processor prefix: {model_name}")
+    return image_size, image_mean, image_std
+
+
+def image_mean_std(norm_type: str):
+    """
+    Get image normalization mean and std by its name.
+
+    Parameters
+    ----------
+    norm_type
+        Name of image normalization.
+
+    Returns
+    -------
+    Normalization mean and std.
+    """
+    if norm_type == "inception":
+        return IMAGENET_INCEPTION_MEAN, IMAGENET_INCEPTION_STD
+    elif norm_type == "imagenet":
+        return IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
+    elif norm_type == "clip":
+        return CLIP_IMAGE_MEAN, CLIP_IMAGE_STD
+    else:
+        raise ValueError(f"unknown image normalization: {norm_type}")
+
+
+def get_image_size_mean_std(
+    model_name: str,
+    config,
+    provided_size: int,
+    provided_norm_type: str,
+    support_variable_input_size: Optional[bool] = False,
+):
+    image_size, image_mean, image_std = extract_image_hparams_from_config(
+        model_name=model_name,
+        config=config,
+    )
+    if support_variable_input_size and provided_size is not None:
+        # We have detected that the model supports using an image size that is
+        # different from the pretrained model, e.g., ConvNets with global pooling
+        if provided_size < image_size:
+            logger.warning(
+                f"The provided image size={provided_size} is smaller than the default size "
+                f"of the pretrained backbone, which is {image_size}. "
+                f"Detailed configuration of the backbone is in {config}. "
+                f"You may like to double check your configuration."
+            )
+        image_size = provided_size
+    elif provided_size is not None and provided_size != image_size:
+        logger.warning(
+            f"The model does not support using an image size that is different from the default size. "
+            f"Provided image size={provided_size}. Default size={image_size}. "
+            f"Detailed model configuration={config}. We have ignored the provided image size."
+        )
+
+    if image_size is None:
+        if provided_size is not None:
+            image_size = provided_size
+            logger.debug(f"using provided image size: {image_size}.")
+        else:
+            raise ValueError("image size is missing.")
+    else:
+        logger.debug(f"using detected image size: {image_size}")
+
+    if image_mean is None or image_std is None:
+        if provided_norm_type is not None:
+            image_mean, image_std = image_mean_std(provided_norm_type)
+            logger.debug(f"using provided normalization: {provided_norm_type}.")
+        else:
+            raise ValueError("image normalization mean and std are missing.")
+    else:
+        logger.debug(f"using detected image normalization: {image_mean} and {image_std}.")
+
+    return image_size, image_mean, image_std
+
+
+def get_text_segment_num(config, provided_segment_num: int, checkpoint_name: str):
+    extracted = extract_value_from_config(config=config.to_diff_dict(), keys=("type_vocab_size",))
+    if len(extracted) == 0:
+        default_segment_num = 1
+    elif len(extracted) == 1:
+        default_segment_num = extracted[0]
+    else:
+        raise ValueError(f" more than one type_vocab_size values are detected: {extracted}")
+
+    if default_segment_num <= 0:
+        default_segment_num = 1
+
+    if provided_segment_num < default_segment_num:
+        warnings.warn(
+            f"provided text_segment_num: {provided_segment_num} "
+            f"is smaller than {checkpoint_name}'s default: {default_segment_num}"
+        )
+    text_segment_num = min(provided_segment_num, default_segment_num)
+    assert text_segment_num >= 1
+    logger.debug(f"text segment num: {text_segment_num}")
+
+    return text_segment_num
+
+
+def get_text_token_max_len(provided_max_len, config, tokenizer, checkpoint_name):
+    """
+    Compute the allowable max length of token sequences.
+
+    Parameters
+    ----------
+    provided_max_len
+        The provided max length.
+    config
+        Model config.
+    tokenizer
+        Text tokenizer.
+    checkpoint_name
+        Name of checkpoint.
+
+    Returns
+    -------
+    Token sequence max length.
+    """
+    if hasattr(config, "relative_attention") and config.relative_attention:
+        default_max_len = tokenizer.model_max_length
+    elif hasattr(config, "position_embedding_type") and "relative" in config.position_embedding_type:
+        default_max_len = tokenizer.model_max_length
+    elif hasattr(config, "max_position_embeddings"):
+        default_max_len = config.max_position_embeddings
+    else:
+        default_max_len = tokenizer.model_max_length
+
+    if provided_max_len is None or provided_max_len <= 0:
+        max_len = default_max_len
+    else:
+        if provided_max_len < default_max_len:
+            if default_max_len < 10**6:  # Larger than this value usually means infinite.
+                warnings.warn(
+                    f"provided max length: {provided_max_len} "
+                    f"is smaller than {checkpoint_name}'s default: {default_max_len}"
+                )
+        max_len = min(provided_max_len, default_max_len)
+
+    logger.debug(f"text max length: {max_len}")
+
+    return max_len
+
+
+def replace_missing_images_with_learnable(
+    images: torch.Tensor,
+    image_masks,
+    learnable_image: nn.Parameter,
+):
+    b, n, c, h, w = images.shape
+    assert learnable_image.shape == (c, h, w)
+    for i in range(b):
+        for j in range(n):
+            if not image_masks[i][j]:  # False means a missing image
+                images[i][j] = learnable_image
+
+    return images
+
+
+def select_model(
+    config: DictConfig,
+    df_preprocessor,
+    strict: Optional[bool] = True,
+):
+    """
+    Filter model config through the detected modalities in the training data.
+    If MultiModalFeaturePreprocessor can't detect some modality,
+    this function will remove the models that use this modality. This function is to
+    maximize the user flexibility in defining the config.
+    For example, if one uses the default, including hf_text and timm_image, as the model config template
+    but the training data don't have images, this function will filter out timm_image.
+
+    Parameters
+    ----------
+    config
+        A DictConfig object. The model config should be accessible by "config.model"
+    df_preprocessor
+        A MultiModalFeaturePreprocessor object, which has called .fit() on the training data.
+        Column names of the same modality are grouped into one list. If a modality's list is empty,
+        it means the training data don't have this modality.
+    strict
+        If False, allow retaining one model when partial modalities are available for that model.
+
+    Returns
+    -------
+    Config with some unused models removed.
+    """
+    data_status = {}
+    for per_modality in ALL_MODALITIES:
+        data_status[per_modality] = False
+    if len(df_preprocessor.image_feature_names) > 0:
+        data_status[IMAGE] = True
+    if len(df_preprocessor.text_feature_names) > 0:
+        data_status[TEXT] = True
+    if len(df_preprocessor.categorical_feature_names) > 0:
+        data_status[CATEGORICAL] = True
+    if len(df_preprocessor.numerical_feature_names) > 0:
+        data_status[NUMERICAL] = True
+    if len(df_preprocessor.ner_feature_names) > 0:
+        data_status[TEXT_NER] = True
+    if len(df_preprocessor.document_feature_names) > 0:
+        data_status[DOCUMENT] = True
+    if len(df_preprocessor.semantic_segmentation_feature_names) > 0:
+        data_status[SEMANTIC_SEGMENTATION_IMG] = True
+
+    names = config.model.names
+    if isinstance(names, str):
+        names = [names]
+    selected_model_names = []
+    fusion_model_name = []
+    for model_name in names:
+        model_config = getattr(config.model, model_name)
+        strict = getattr(model_config, "requires_all_dtypes", strict)
+        if not model_config.data_types:
+            fusion_model_name.append(model_name)
+            continue
+        model_data_status = [data_status[d_type] for d_type in model_config.data_types]
+        if all(model_data_status):
+            selected_model_names.append(model_name)
+        else:
+            if any(model_data_status) and not strict:
+                selected_model_names.append(model_name)
+                # update data types to be consistent with detected
+                model_config.data_types = [d_type for d_type in model_config.data_types if data_status[d_type]]
+            else:
+                delattr(config.model, model_name)
+
+    if len(selected_model_names) == 0:
+        raise ValueError("No model is available for this dataset.")
+    # only allow no more than 1 fusion model
+    if len(fusion_model_name) > 1:
+        raise ValueError(f"More than one fusion models `{fusion_model_name}` are detected, but only one is allowed.")
+
+    if len(selected_model_names) > 1:
+        assert len(fusion_model_name) == 1
+        selected_model_names.extend(fusion_model_name)
+    elif len(fusion_model_name) == 1 and hasattr(config.model, fusion_model_name[0]):
+        delattr(config.model, fusion_model_name[0])
+
+    config.model.names = selected_model_names
+    logger.debug(f"selected models: {selected_model_names}")
+    for model_name in selected_model_names:
+        logger.debug(f"model dtypes: {getattr(config.model, model_name).data_types}")
+
+    # clean up unused model configs
+    model_keys = list(config.model.keys())
+    for model_name in model_keys:
+        if model_name not in selected_model_names + ["names"]:
+            delattr(config.model, model_name)
+
+    return config
+
+
+def create_model(
+    model_name: str,
+    model_config: DictConfig,
+    num_classes: Optional[int] = 0,
+    classes: Optional[list] = None,
+    num_numerical_columns: Optional[int] = None,
+    num_categories: Optional[Dict] = None,
+    numerical_fill_values: Optional[Dict] = None,
+    pretrained: Optional[bool] = True,
+    is_matching: Optional[bool] = False,
+):
+    """
+    Create a single model.
+
+    Parameters
+    ----------
+    model_name
+        Name of the model.
+    model_config
+        Config of the model.
+    num_classes
+        The class number for a classification task. It should be 1 for a regression task.
+    classes
+        All classes in this dataset.
+    num_numerical_columns
+        The number of numerical columns in the training dataframe.
+    num_categories
+        The category number for each categorical column in the training dataframe.
+    numerical_fill_values
+        If numerical values are null, fill them with these.
+    pretrained
+        Whether using the pretrained timm models. If pretrained=True, download the pretrained model.
+    is_matching
+        Whether the model is used for semantic matching.
+
+    Returns
+    -------
+    A model.
+    """
+    if model_name.lower().startswith(CLIP):
+        from .clip import CLIPForImageText
+
+        model = CLIPForImageText(
+            prefix=model_name,
+            checkpoint_name=model_config.checkpoint_name,
+            num_classes=num_classes,
+            pretrained=pretrained,
+            tokenizer_name=model_config.tokenizer_name,
+            has_image=IMAGE in model_config.data_types,
+            has_text=TEXT in model_config.data_types,
+            image_size=model_config.image_size,
+            image_norm=model_config.image_norm,
+            image_chan_num=model_config.image_chan_num,
+            use_learnable_image=model_config.use_learnable_image,
+            max_text_len=model_config.max_text_len,
+            text_segment_num=model_config.text_segment_num,
+            is_matching=is_matching,
+        )
+    elif model_name.lower().startswith(TIMM_IMAGE):
+        from .timm_image import TimmAutoModelForImagePrediction
+
+        model = TimmAutoModelForImagePrediction(
+            prefix=model_name,
+            checkpoint_name=model_config.checkpoint_name,
+            num_classes=num_classes,
+            mix_choice=model_config.mix_choice,
+            pretrained=pretrained,
+            image_size=model_config.image_size,
+            image_norm=model_config.image_norm,
+            image_chan_num=model_config.image_chan_num,
+            use_learnable_image=model_config.use_learnable_image,
+        )
+    elif model_name.lower().startswith(HF_TEXT):
+        from .hf_text import HFAutoModelForTextPrediction
+
+        model = HFAutoModelForTextPrediction(
+            prefix=model_name,
+            checkpoint_name=model_config.checkpoint_name,
+            num_classes=num_classes,
+            pooling_mode=model_config.pooling_mode,
+            gradient_checkpointing=model_config.gradient_checkpointing,
+            low_cpu_mem_usage=model_config.low_cpu_mem_usage,
+            pretrained=pretrained,
+            tokenizer_name=model_config.tokenizer_name,
+            max_text_len=model_config.max_text_len,
+            text_segment_num=model_config.text_segment_num,
+            use_fast=model_config.use_fast,
+        )
+    elif model_name.lower().startswith(T_FEW):
+        from .t_few import TFewModel
+
+        model = TFewModel(
+            prefix=model_name,
+            checkpoint_name=model_config.checkpoint_name,
+            length_norm=model_config.length_norm,  # Normalizes length to adjust for length bias in target template
+            unlikely_loss=model_config.unlikely_loss,  # Adds loss term that lowers probability of incorrect outputs
+            mc_loss=model_config.mc_loss,  # Adds multiple choice cross entropy loss
+            num_classes=num_classes,
+            gradient_checkpointing=model_config.gradient_checkpointing,
+            low_cpu_mem_usage=model_config.low_cpu_mem_usage,
+            pretrained=pretrained,
+            tokenizer_name=model_config.tokenizer_name,
+            max_text_len=model_config.max_text_len,
+            text_segment_num=model_config.text_segment_num,
+        )
+    elif model_name.lower().startswith(NUMERICAL_MLP):
+        from .numerical_mlp import NumericalMLP
+
+        model = NumericalMLP(
+            prefix=model_name,
+            in_features=num_numerical_columns,
+            hidden_features=model_config.hidden_size,
+            out_features=model_config.hidden_size,
+            num_layers=model_config.num_layers,
+            activation=model_config.activation,
+            dropout=model_config.dropout,
+            normalization=model_config.normalization,
+            token_dim=model_config.token_dim,
+            embedding_arch=model_config.embedding_arch,
+            num_classes=num_classes,
+            numerical_fill_values=numerical_fill_values,
+        )
+    elif model_name.lower().startswith(CATEGORICAL_MLP):
+        from .categorical_mlp import CategoricalMLP
+
+        model = CategoricalMLP(
+            prefix=model_name,
+            num_categories=num_categories,
+            out_features=model_config.hidden_size,
+            num_layers=model_config.num_layers,
+            activation=model_config.activation,
+            dropout=model_config.dropout,
+            normalization=model_config.normalization,
+            num_classes=num_classes,
+        )
+    elif model_name.lower().startswith(DOCUMENT_TRANSFORMER):
+        from .document_transformer import DocumentTransformer
+
+        model = DocumentTransformer(
+            prefix=model_name,
+            checkpoint_name=model_config.checkpoint_name,
+            num_classes=num_classes,
+            pooling_mode=model_config.pooling_mode,
+            gradient_checkpointing=model_config.gradient_checkpointing,
+            low_cpu_mem_usage=model_config.low_cpu_mem_usage,
+            pretrained=pretrained,
+            tokenizer_name=model_config.tokenizer_name,
+            image_size=model_config.image_size,
+            image_norm=model_config.image_norm,
+        )
+    elif model_name.lower().startswith(MMDET_IMAGE):
+        from .mmdet_image import MMDetAutoModelForObjectDetection
+
+        model = MMDetAutoModelForObjectDetection(
+            prefix=model_name,
+            checkpoint_name=model_config.checkpoint_name,
+            config_file=model_config.config_file,
+            classes=classes,
+            pretrained=pretrained,
+            output_bbox_format=model_config.output_bbox_format,
+            frozen_layers=model_config.frozen_layers,
+        )
+    elif model_name.lower().startswith(MMOCR_TEXT_DET):
+        from .mmocr_text_detection import MMOCRAutoModelForTextDetection
+
+        model = MMOCRAutoModelForTextDetection(
+            prefix=model_name,
+            checkpoint_name=model_config.checkpoint_name,
+        )
+    elif model_name.lower().startswith(MMOCR_TEXT_RECOG):
+        from .mmocr_text_recognition import MMOCRAutoModelForTextRecognition
+
+        model = MMOCRAutoModelForTextRecognition(
+            prefix=model_name,
+            checkpoint_name=model_config.checkpoint_name,
+        )
+    elif model_name.lower().startswith(NER_TEXT):
+        from .ner_text import HFAutoModelForNER
+
+        model = HFAutoModelForNER(
+            prefix=model_name,
+            checkpoint_name=model_config.checkpoint_name,
+            num_classes=num_classes,
+            gradient_checkpointing=model_config.gradient_checkpointing,
+            low_cpu_mem_usage=model_config.low_cpu_mem_usage,
+            pretrained=pretrained,
+            tokenizer_name=model_config.tokenizer_name,
+        )
+    elif model_name.lower().startswith(FUSION_MLP):
+        from .fusion import MultimodalFusionMLP
+
+        model = functools.partial(
+            MultimodalFusionMLP,
+            prefix=model_name,
+            hidden_features=model_config.hidden_sizes,
+            num_classes=num_classes,
+            adapt_in_features=model_config.adapt_in_features,
+            activation=model_config.activation,
+            dropout=model_config.dropout,
+            normalization=model_config.normalization,
+            aux_loss_weight=model_config.aux_loss_weight,
+        )
+    elif model_name.lower().startswith(FUSION_NER):
+        from .fusion import MultimodalFusionNER
+
+        model = functools.partial(
+            MultimodalFusionNER,
+            prefix=model_name,
+            hidden_features=model_config.hidden_sizes,
+            num_classes=num_classes,
+            adapt_in_features=model_config.adapt_in_features,
+            activation=model_config.activation,
+            dropout_prob=model_config.drop_rate,
+            normalization=model_config.normalization,
+            loss_weight=model_config.weight if hasattr(model_config, "weight") else None,
+        )
+    elif model_name.lower().startswith(FUSION_TRANSFORMER):
+        from .fusion import MultimodalFusionTransformer
+
+        model = functools.partial(
+            MultimodalFusionTransformer,
+            prefix=model_name,
+            hidden_features=model_config.hidden_size,
+            num_classes=num_classes,
+            num_blocks=model_config.num_blocks,
+            attention_num_heads=model_config.attention_num_heads,
+            ffn_hidden_size=model_config.ffn_hidden_size,
+            attention_dropout=model_config.attention_dropout,
+            residual_dropout=model_config.residual_dropout,
+            ffn_dropout=model_config.ffn_dropout,
+            attention_normalization=model_config.normalization,
+            ffn_normalization=model_config.normalization,
+            head_normalization=model_config.normalization,
+            ffn_activation=model_config.ffn_activation,
+            head_activation=model_config.head_activation,
+            adapt_in_features=model_config.adapt_in_features,
+            aux_loss_weight=model_config.aux_loss_weight,
+            additive_attention=model_config.additive_attention,
+            share_qv_weights=model_config.share_qv_weights,
+        )
+    elif model_name.lower().startswith(FT_TRANSFORMER):
+        from .ft_transformer import FT_Transformer
+
+        model = FT_Transformer(
+            prefix=model_name,
+            num_numerical_columns=num_numerical_columns,
+            num_categories=num_categories,
+            numerical_fill_values=numerical_fill_values,
+            embedding_arch=model_config.embedding_arch,
+            token_dim=model_config.token_dim,
+            hidden_size=model_config.hidden_size,
+            hidden_features=model_config.hidden_size,
+            num_classes=num_classes,
+            num_blocks=model_config.num_blocks,
+            attention_num_heads=model_config.attention_num_heads,
+            attention_dropout=model_config.attention_dropout,
+            attention_normalization=model_config.normalization,
+            ffn_hidden_size=model_config.ffn_hidden_size,
+            ffn_dropout=model_config.ffn_dropout,
+            ffn_normalization=model_config.normalization,
+            ffn_activation=model_config.ffn_activation,
+            residual_dropout=model_config.residual_dropout,
+            head_normalization=model_config.normalization,
+            head_activation=model_config.head_activation,
+            additive_attention=model_config.additive_attention,
+            share_qv_weights=model_config.share_qv_weights,
+            pooling_mode=model_config.pooling_mode,
+            checkpoint_name=model_config.checkpoint_name,
+            pretrained=pretrained,
+        )
+    elif model_name.lower().startswith(SAM):
+        from .sam import SAMForSemanticSegmentation
+
+        model = SAMForSemanticSegmentation(
+            prefix=model_name,
+            checkpoint_name=model_config.checkpoint_name,
+            num_classes=num_classes,
+            pretrained=pretrained,
+            frozen_layers=model_config.frozen_layers,
+            num_mask_tokens=model_config.num_mask_tokens,
+            image_norm=model_config.image_norm,
+        )
+    elif model_name.lower().startswith(META_TRANSFORMER):
+        from .meta_transformer import MetaTransformer
+
+        model = MetaTransformer(
+            prefix=model_name,
+            checkpoint_path=model_config.checkpoint_path,
+            num_classes=num_classes,
+            model_version=model_config.model_version,
+            has_image=IMAGE in model_config.data_types,
+            has_text=TEXT in model_config.data_types,
+            num_numerical_columns=num_numerical_columns,
+            num_categories=num_categories,
+            numerical_fill_values=numerical_fill_values,
+            image_size=model_config.image_size,
+            image_norm=model_config.image_norm,
+            image_chan_num=model_config.image_chan_num,
+            use_learnable_image=model_config.use_learnable_image,
+            max_text_len=model_config.max_text_len,
+            text_segment_num=model_config.text_segment_num,
+        )
+    else:
+        raise ValueError(f"unknown model name: {model_name}")
+
+    return model
+
+
+def create_fusion_model(
+    config: DictConfig,
+    num_classes: Optional[int] = None,
+    classes: Optional[list] = None,
+    num_numerical_columns: Optional[int] = None,
+    num_categories: Optional[Dict] = None,
+    numerical_fill_values: Optional[Dict] = None,
+    pretrained: Optional[bool] = True,
+):
+    """
+    Create models. It supports the auto models of huggingface text and timm image.
+    Multimodal models, e.g., CLIP, should be added case-by-case since their configs and usages
+    may be different. It uses MLP for the numerical features, categorical features, and late-fusion.
+
+    Parameters
+    ----------
+    config
+        A DictConfig object. The model config should be accessible by "config.model".
+    num_classes
+        The class number for a classification task. It should be 1 for a regression task.
+    classes
+        All classes in this dataset.
+    num_numerical_columns
+        The number of numerical columns in the training dataframe.
+    num_categories
+        The category number for each categorical column in the training dataframe.
+    numerical_fill_values
+        If numerical values are null, fill them with these.
+    pretrained
+        Whether using the pretrained timm models. If pretrained=True, download the pretrained model.
+
+    Returns
+    -------
+    A Pytorch model.
+    """
+    names = config.model.names
+    if isinstance(names, str):
+        names = [names]
+    # make sure no duplicate model names
+    assert len(names) == len(set(names))
+    logger.debug(f"output_shape: {num_classes}")
+    names = sorted(names)
+    config.model.names = names
+    single_models = []
+    fusion_model = None
+
+    for model_name in names:
+        model_config = getattr(config.model, model_name)
+        model = create_model(
+            model_name=model_name,
+            model_config=model_config,
+            num_classes=num_classes,
+            classes=classes,
+            num_numerical_columns=num_numerical_columns,
+            num_categories=num_categories,
+            numerical_fill_values=numerical_fill_values,
+            pretrained=pretrained,
+        )
+
+        if isinstance(model, functools.partial):  # fusion model
+            if fusion_model is None:
+                fusion_model = model
+            else:
+                raise ValueError(
+                    f"More than one fusion models are detected in {names}. Only one fusion model is allowed."
+                )
+        else:  # single model
+            if config.optim.peft is not None:
+                model = apply_peft_adaptation(model, config)
+            single_models.append(model)
+
+    if len(single_models) > 1:
+        # must have one fusion model if there are multiple independent models
+        model = fusion_model(models=single_models)
+    elif len(single_models) == 1:
+        model = single_models[0]
+    else:
+        raise ValueError(f"No available models for {names}")
+
+    # build augmenter for multimodal data augmentation
+    if config.optim.lemda.turn_on:
+        from .fusion import MultimodalFusionMLP
+
+        assert isinstance(model, MultimodalFusionMLP)
+        from .augmenter import Augmenter
+
+        augmenter = Augmenter(
+            arch_type=config.optim.lemda.arch_type,
+            input_dim=model.augmenter_in_features,
+            z_dim=config.optim.lemda.z_dim,
+            num_layers=config.optim.lemda.num_layers,
+            adv_weight=config.optim.lemda.adv_weight,
+        )
+        model.augmenter = augmenter
+
+    return model
+
+
+def apply_peft_adaptation(model: nn.Module, config: DictConfig) -> nn.Module:
+    """
+    Apply an adaptation to the model for efficient fine-tuning.
+
+    Parameters
+    ----------
+    model
+        A PyTorch model.
+    config:
+        A DictConfig object. The optimization config should be accessible by "config.optimization".
+    """
+    if config.optim.peft in PEFT_ADDITIVE_STRATEGIES:
+        model = inject_adaptation_to_linear_layer(
+            model=model,
+            peft=config.optim.peft,
+            lora_r=config.optim.lora.r,
+            lora_alpha=config.optim.lora.alpha,
+            module_filter=config.optim.lora.module_filter,
+            filter=config.optim.lora.filter,
+            extra_trainable_params=config.optim.extra_trainable_params,
+            conv_lora_expert_num=config.optim.lora.conv_lora_expert_num,
+        )
+        model.name_to_id = model.get_layer_ids()  # Need to update name to id dictionary.
+
+    return model
+
+
+def modify_duplicate_model_names(
+    learner,
+    postfix: str,
+    blacklist: List[str],
+):
+    """
+    Modify a learner's model names if they exist in a blacklist.
+
+    Parameters
+    ----------
+    learner
+        A BaseLearner object.
+    postfix
+        The postfix used to change the duplicate names.
+    blacklist
+        A list of names. The provided learner can't use model names in the list.
+
+    Returns
+    -------
+    The learner guaranteed has no duplicate model names with the blacklist names.
+    """
+    model_names = []
+    for n in learner._config.model.names:
+        if n in blacklist:
+            new_name = f"{n}_{postfix}"
+            assert new_name not in blacklist
+            assert new_name not in learner._config.model.names
+            # modify model prefix
+            if n == learner._model.prefix:
+                learner._model.prefix = new_name
+            else:
+                assert isinstance(learner._model.model, nn.ModuleList)
+                for per_model in learner._model.model:
+                    if n == per_model.prefix:
+                        per_model.prefix = new_name
+                        break
+            # modify data processor prefix
+            for per_modality_processors in learner._data_processors.values():
+                for per_processor in per_modality_processors:
+                    if n == per_processor.prefix:
+                        per_processor.prefix = new_name
+            # modify model config keys
+            setattr(learner._config.model, new_name, getattr(learner._config.model, n))
+            delattr(learner._config.model, n)
+
+            model_names.append(new_name)
+        else:
+            model_names.append(n)
+
+    learner._config.model.names = model_names
+
+    return learner
+
+
+def list_timm_models(pretrained=True):
+    return timm.list_models(pretrained=pretrained)
+
+
+def is_lazy_weight_tensor(p: torch.Tensor) -> bool:
+    from torch.nn.parameter import UninitializedParameter
+
+    if isinstance(p, UninitializedParameter):
+        warnings.warn(
+            "A layer with UninitializedParameter was found. "
+            "Thus, the total number of parameters detected may be inaccurate."
+        )
+        return True
+    return False
+
+```
+
+让我也检查 `apply_sigmoid_and_semantic_mask` 是否能正确处理 SAM 多类输出：
+
+```python
+import functools
+import logging
+import re
+import warnings
+from typing import Dict, List, Optional, Tuple
+
+import timm
+import torch
+import torch._dynamo
+import torch.nn.functional as F
+from omegaconf import DictConfig, OmegaConf
+from timm.data.constants import (
+    IMAGENET_DEFAULT_MEAN,
+    IMAGENET_DEFAULT_STD,
+    IMAGENET_INCEPTION_MEAN,
+    IMAGENET_INCEPTION_STD,
+)
+from torch import nn
+from torch.nn.modules.loss import _Loss
+from transformers import AutoConfig, AutoModel, AutoTokenizer, BertTokenizer, CLIPTokenizer, ElectraTokenizer
+from transformers.models.mask2former.modeling_mask2former import Mask2FormerLoss
+
+from ..constants import (
+    ALL_MODALITIES,
+    CATEGORICAL,
+    CATEGORICAL_MLP,
+    CLASS_LOGITS,
+    CLIP,
+    CLIP_IMAGE_MEAN,
+    CLIP_IMAGE_STD,
+    DOCUMENT,
+    DOCUMENT_TRANSFORMER,
+    FT_TRANSFORMER,
+    FUSION_MLP,
+    FUSION_NER,
+    FUSION_TRANSFORMER,
+    HF_TEXT,
+    IMAGE,
+    LOGITS,
+    META_TRANSFORMER,
+    MMDET_IMAGE,
+    MMOCR_TEXT_DET,
+    MMOCR_TEXT_RECOG,
+    NER_TEXT,
+    NUMERICAL,
+    NUMERICAL_MLP,
+    OCR,
+    PEFT_ADDITIVE_STRATEGIES,
+    REGRESSION,
+    SAM,
+    SEMANTIC_MASK,
+    SEMANTIC_SEGMENTATION,
+    SEMANTIC_SEGMENTATION_IMG,
+    T_FEW,
+    TEXT,
+    TEXT_NER,
+    TIMM_IMAGE,
+)
+from .adaptation_layers import ConvLoRALinear, IA3Linear, IA3LoRALinear, LoRALinear
+
+logger = logging.getLogger(__name__)
+
+
+ALL_TOKENIZERS = {
+    "bert": BertTokenizer,
+    "clip": CLIPTokenizer,
+    "electra": ElectraTokenizer,
+    "hf_auto": AutoTokenizer,
+}
+
+
+class DummyLayer(nn.Module):
+    """
+    DummyLayer to ensure that the gradient checkpointing will assign output layer as require_grad=True.
+    Reference: https://discuss.pytorch.org/t/checkpoint-with-no-grad-requiring-inputs-problem/19117/9
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.dummy_bias = torch.ones(1, dtype=torch.float32, requires_grad=True)
+
+    def forward(self, x):
+        return x + self.dummy_bias.to(x) - self.dummy_bias.to(x)
+
+
+def init_weights(module: nn.Module):
+    """
+    Initialize one module. It uses xavier_norm to initialize nn.Embedding
+    and xavier_uniform to initialize nn.Linear's weight.
+
+    Parameters
+    ----------
+    module
+        A Pytorch nn.Module.
+    """
+    if isinstance(module, nn.Embedding):
+        nn.init.xavier_normal_(module.weight)
+    elif isinstance(module, nn.Linear):
+        nn.init.xavier_uniform_(module.weight)
+        if module.bias is not None:
+            nn.init.zeros_(module.bias)
+    elif isinstance(module, nn.LayerNorm):
+        module.bias.data.zero_()
+        module.weight.data.fill_(1.0)
+
+
+def assign_encoder_layer_ids(
+    encoder_names: List[List[str]],
+):
+    """
+    Assign ids to encoder layers. The encoder may contain several blocks e.g., block1 and block2.
+    This function iterates through all the layers of each block from the input end towards the output end.
+    It increases 1 on the layer id when the detected digit in a layer name changes.
+
+    Parameters
+    ----------
+    encoder_names
+        Encoder layer names.
+
+    Returns
+    -------
+    name_to_id
+        The encoder layer-to-id mapping.
+    encoder_layer_num
+        The encoder layer number.
+    """
+    name_to_id = {}
+    cur_id = 0
+    for i, group_names in enumerate(encoder_names):
+        last_inferred_id = -1
+        for n in group_names:
+            detect_id = False
+            n_splits = n.split(".")
+
+            for split in n_splits:
+                # the first digit encountered is used to infer layer id
+                if split.isdigit():
+                    inferred_id = int(split)
+                    # increase at most 1 one time
+                    if inferred_id != last_inferred_id:
+                        cur_id += 1  # layer.0 -> layer_id 1
+                        last_inferred_id = inferred_id
+
+                    name_to_id[n] = cur_id
+                    detect_id = True
+                    break
+
+            if detect_id is False:
+                raise ValueError(f"parameter name: {n} not has no id inside")
+
+    if len(name_to_id) > 0:
+        encoder_layer_num = max(name_to_id.values())
+    else:
+        encoder_layer_num = 0
+    return name_to_id, encoder_layer_num
+
+
+def assign_non_encoder_layer_ids(
+    non_encoder_names: List[str],
+    layer_id: int,
+):
+    """
+    Assign the provided id to non-encoder layers.
+
+    Parameters
+    ----------
+    non_encoder_names
+        Names layers not belonging to an encoder.
+    layer_id
+        provided id.
+
+    Returns
+    -------
+    A dictionary mapping the layer names (keys) to their ids (values).
+    """
+    name_to_id = {}
+    for n in non_encoder_names:
+        name_to_id[n] = layer_id
+    return name_to_id
+
+
+def split_encoder_non_encoder(names: List[str], post_encoder_patterns: Tuple[str, ...]):
+    """
+    Group layer names into two types: encoder and non-encoder.
+    A layer belongs to encoder if its name contains at least one digit.
+    It uses this rule since a model's encoder in Pytorch's implementation
+    is generally wrapped by nn.Sequential() or nn.ModuleList(),
+    which produce digits in layer names.
+
+    Parameters
+    ----------
+    names
+        Model layer names.
+    Returns
+    -------
+    encoder_names
+        A list of encoder layer names.
+    non_encoder_names
+        A list of non-encoder layer names.
+    """
+    encoder_names = []
+    non_encoder_names = []
+    for n in names:
+        is_encoder = False
+        if any(p in n for p in post_encoder_patterns):
+            non_encoder_names.append(n)
+            continue
+        for i in n.split("."):
+            if i.isdigit():
+                encoder_names.append(n)
+                is_encoder = True
+                break
+        if not is_encoder:
+            non_encoder_names.append(n)
+
+    return encoder_names, non_encoder_names
+
+
+def group_param_names(
+    names: List[str],
+    pre_encoder_patterns: Tuple[str, ...],
+    post_encoder_patterns: Tuple[str, ...],
+    model_prefix: Optional[str] = None,
+):
+    """
+    Group layer names into three types: pre-encoder, encoder, and post-encoder.
+    If "model_prefix" is provided, the selected layer names must start with it.
+    In this case, the left names will be returned for the next-time processing.
+    This function first extracts the first-level children modules' names and
+    classify them into encoder and non-encoder layers. Note that an encoder may
+    consist of several manually named children modules, e.g., block1 and block2.
+    The non-encoder layers are further subdivided into pre-encoder and post-encoder.
+
+    Parameters
+    ----------
+    names
+        Model layer names
+    pre_encoder_patterns
+        Patterns to identify a layer as a pre-encoder layer. If a layer name contains one pattern,
+        the layer will be grouped into pre-encoder layers.
+    post_encoder_patterns
+        Patterns to identify a layer as a post-encoder layer. If a layer name contains one pattern,
+        the layer will be grouped into post-encoder layers.
+    model_prefix
+        A prefix to filter layer names. Only layer names starting with it will be selected.
+    Returns
+    -------
+    left_names
+        The layer names left for the next-time processing.
+    encoder_names_grouped
+        Encoder layer names.
+    pre_encoder_names
+        Names of layers before the encoder.
+    post_encoder_names
+        Names of layers after the encoder.
+    """
+    # two set of patterns can't have intersections
+    assert all(pre_p not in post_encoder_patterns for pre_p in pre_encoder_patterns)
+
+    left_names = []
+    # in case model_prefix is provided, e.g., the clip model with image and text branches
+    selected_names = []
+    for n in names:
+        if model_prefix is not None and not n.startswith(model_prefix):
+            left_names.append(n)
+        else:
+            selected_names.append(n)
+
+    # split blocks at the first level
+    children_prefix = []
+    for n in selected_names:
+        if model_prefix is not None:
+            child_name = n[len(model_prefix) + 1 :].split(".")[0]
+            child_prefix = f"{model_prefix}.{child_name}"
+        else:
+            child_prefix = n.split(".")[0]
+        if child_prefix not in children_prefix:
+            children_prefix.append(child_prefix)
+
+    encoder_names_grouped = []
+    non_encoder_names = []
+    for child_prefix in children_prefix:
+        per_names_group = [n for n in selected_names if n.startswith(child_prefix)]
+        per_encoder_names, per_non_encoder_names = split_encoder_non_encoder(per_names_group, post_encoder_patterns)
+        encoder_names_grouped.append(per_encoder_names)
+        non_encoder_names.extend(per_non_encoder_names)
+
+    pre_encoder_names = []
+    post_encoder_names = []
+    for n in non_encoder_names:
+        if any(p in n for p in pre_encoder_patterns):
+            pre_encoder_names.append(n)
+        elif any(p in n for p in post_encoder_patterns):
+            post_encoder_names.append(n)
+        else:
+            raise ValueError(f"parameter name: {n} belong to neither pre or post encoder names")
+
+    # only process left names in next iteration
+    return left_names, encoder_names_grouped, pre_encoder_names, post_encoder_names
+
+
+def reverse_layer_ids(
+    encoder_name_to_id: dict,
+    pre_enocder_name_to_id: dict,
+    post_enocder_name_to_id: dict,
+):
+    """
+    The layer ids need to increase when going from the output end to the input end.
+    We need to reverse the ids which were originally assigned in a decreasing order.
+
+    Parameters
+    ----------
+    encoder_name_to_id
+        The layer-to-id mapping of encoder layers.
+    pre_enocder_name_to_id
+        The layer-to-id mapping of pre-encoder layers.
+    post_enocder_name_to_id
+        The layer-to-id mapping of post-encoder layers.
+
+    Returns
+    -------
+    The layer-to-id mapping of all layers with layer ids reversed.
+    """
+    name_to_id = {**pre_enocder_name_to_id, **encoder_name_to_id, **post_enocder_name_to_id}
+    if len(name_to_id) > 0:
+        layer_num = max(name_to_id.values())
+        # if no post encoder layers, the minimum layer id should be 1
+        if len(post_enocder_name_to_id) == 0:
+            layer_num += 1
+    for n, layer_id in name_to_id.items():
+        name_to_id[n] = layer_num - layer_id
+
+    return name_to_id
+
+
+def assign_layer_ids(
+    names: List[str],
+    pre_encoder_patterns: Tuple[str, ...],
+    post_encoder_patterns: Tuple[str, ...],
+    model_pre: Optional[str] = None,
+):
+    """
+    Assign ids to all layers. It splits a model into three parts: pre-encoder, encoder, and post-encoder.
+    Encoder is generally a stack of multiple similar layers, such as transformer layers. Since encoder is
+    generally wrapped by nn.Sequential() or nn.ModuleList(), its inside layer names contain digits.
+    It sets 0 as the ids of all post-encoder layers and a maximum id (layer_num) for the all the pre-encoder
+    layers. The encoder layers have decreasing ids from the input to the output ends.
+
+    Parameters
+    ----------
+    names
+        model layer names.
+    pre_encoder_patterns
+        Patterns to identify a layer as a pre-encoder layer. If a layer name contains one pattern,
+        the layer will be grouped into pre-encoder layers.
+    post_encoder_patterns
+        Patterns to identify a layer as a post-encoder layer. If a layer name contains one pattern,
+        the layer will be grouped into post-encoder layers.
+    model_pre
+        The layer names' prefix. Only the layer names with this prefix will be assigned ids. The left
+        layer names will be returned.
+
+    Returns
+    -------
+    name_to_id
+        A dictionary mapping the layer names (keys) to their ids (values).
+    left_names
+        The layer names not starting with the "model_pre".
+    """
+    try:
+        left_names, encoder_names, pre_encoder_names, post_encoder_names = group_param_names(
+            names=names,
+            pre_encoder_patterns=pre_encoder_patterns,
+            post_encoder_patterns=post_encoder_patterns,
+            model_prefix=model_pre,
+        )
+        # add a constraint
+        if len(encoder_names) == 0 and len(pre_encoder_names) != 0:
+            raise ValueError(f"encoder_names is empty, but pre_encoder_names has values: {pre_encoder_names}")
+
+        encoder_name_to_id, encoder_layer_num = assign_encoder_layer_ids(
+            encoder_names=encoder_names,
+        )
+
+        pre_encoder_name_to_id = assign_non_encoder_layer_ids(non_encoder_names=pre_encoder_names, layer_id=0)
+
+        post_encoder_name_to_id = assign_non_encoder_layer_ids(
+            non_encoder_names=post_encoder_names, layer_id=encoder_layer_num + 1
+        )
+
+        name_to_id = reverse_layer_ids(
+            encoder_name_to_id=encoder_name_to_id,
+            pre_enocder_name_to_id=pre_encoder_name_to_id,
+            post_enocder_name_to_id=post_encoder_name_to_id,
+        )
+    except Exception as e:
+        logger.debug(
+            f"When calling assign_layer_ids(), it catches exception: {e}. All the layers will use the same layer_id."
+        )
+        name_to_id = dict()
+        left_names = names
+
+    return name_to_id, left_names
+
+
+def get_column_features(
+    batch: Dict[str, torch.Tensor],
+    column_name_prefix: str,
+    features: torch.Tensor,
+    valid_lengths: torch.Tensor,
+    cls_feature: Optional[torch.Tensor] = None,
+):
+    """
+    Index the features of one column defined by `column_name_prefix`.
+    This function can be used to index both image and text features.
+    The features have shape (b, n, d), where n can be the image number or
+    text token number. One column corresponds to a subset of
+    the n images or text tokens. One column name can only appear once in the return.
+
+    Parameters
+    ----------
+    batch
+        The batch input containing the feature column information, i.e., indexes.
+    column_name_prefix
+        The column name prefix of one modality (image or text).
+    features
+        The features of columns whose names starts with column_name_prefix.
+    valid_lengths
+        The valid image number or text token number of each sample in a batch.
+    cls_feature
+        The cls feature containing information from all feature columns.
+
+    Returns
+    -------
+    The column features with masks. If the column has no valid features, its
+    mask is 0.
+    """
+    column_features = {}
+    feature_masks = {}
+
+    cut_idx = len(column_name_prefix) + 1
+    if cls_feature is not None:
+        all_column_names = []
+        # create a zero mask to do logical_or with each column's mask
+        joint_mask = torch.zeros(features.shape[0]).to(features)  # (b,)
+    for key in batch:
+        if key.startswith(column_name_prefix):
+            per_col_features = []
+            per_col_masks = torch.zeros(features.shape[0]).to(features)  # (b,)
+            assert batch[key].ndim == 2 and batch[key].shape[1] == 2
+            for i, per_sample_col_idx in enumerate(batch[key]):
+                start_idx = per_sample_col_idx[0]
+                end_idx = per_sample_col_idx[1]
+                if start_idx < end_idx:
+                    assert end_idx <= valid_lengths[i]
+                    per_col_features.append(features[i, start_idx:end_idx].mean(dim=0))
+                    per_col_masks[i] = 1
+                else:  # the column has no valid image/text.
+                    per_col_features.append(torch.zeros_like(features[0, 0]))
+                    per_col_masks[i] = 0
+            column_name = key[cut_idx:]
+            column_features[column_name] = torch.stack(per_col_features, dim=0)  # (b, num_features)
+            feature_masks[column_name] = per_col_masks  # (b,)
+            if cls_feature is not None:
+                all_column_names.append(column_name)
+                joint_mask = torch.logical_or(joint_mask, per_col_masks)
+
+    # all the columns of one model's input share the model's cls feature
+    if (
+        cls_feature is not None and len(all_column_names) > 0
+    ):  # some models', e.g, timm_image, output doesn't have the cls feature.
+        # remove the individual column features since these column features not independent
+        for column_name in all_column_names:
+            column_features.pop(column_name)
+            feature_masks.pop(column_name)
+
+        joint_column_name = "_".join(all_column_names)
+        column_features[joint_column_name] = cls_feature
+        feature_masks[joint_column_name] = joint_mask.to(features)
+
+    # print(f"column_features: {column_features}")
+    return column_features, feature_masks
+
+
+def create_adaptation(peft: str, layer: nn.Module, lora_r: int, lora_alpha: int, **kwargs):
+    """
+    Creates a model adaptation module (IA3, LoRA, IA3_LoRA) given a linear layer.
+
+    Parameters
+    ----------
+    peft
+        Name of the adaptation module.
+    layer
+       The layer the adaptation module should be applied to.
+    lora_r
+        The rank r of the low-rank decomposition.
+    lora_alpha
+        The scaling factor. Can be set to same value as r in
+        most cases, as initialization is scaled already.
+    filter
+        Apply loRA only to linear layers filtered by name (e.g. "query.").
+        If None, loRA is applied to all linear Layers in module.
+    module_filter
+        Apply loRA only to modules filtered by name (e.g. ".*EncDecAttention|.*DenseReluDense")
+        If None, loRA is considered for all modules
+
+    Returns
+    -------
+    Model with injected LoRA modules.
+    """
+    if "ia3_lora" in peft:
+        return IA3LoRALinear(
+            layer.in_features, layer.out_features, r=lora_r, lora_alpha=lora_alpha, merge_weights=False
+        )
+    elif "conv_lora" in peft:
+        return ConvLoRALinear(
+            layer.in_features,
+            layer.out_features,
+            r=lora_r,
+            lora_alpha=lora_alpha,
+            merge_weights=False,
+            conv_lora_expert_num=kwargs["conv_lora_expert_num"],
+        )
+    elif "ia3" in peft:
+        return IA3Linear(layer.in_features, layer.out_features, merge_weights=False)
+    elif "lora" in peft:
+        return LoRALinear(layer.in_features, layer.out_features, r=lora_r, lora_alpha=lora_alpha, merge_weights=False)
+    elif peft is not None:
+        raise NotImplementedError(
+            f"The efficient finetuning strategy '{peft}'"
+            f" is not supported. We only support"
+            f" {', '.join(PEFT_ADDITIVE_STRATEGIES)}."
+        )
+
+
+def inject_adaptation_to_linear_layer(
+    model: nn.Module,
+    peft: str,
+    lora_r: int = None,
+    lora_alpha: int = None,
+    filter: Optional[List[str]] = None,
+    module_filter: Optional[List[str]] = None,
+    extra_trainable_params: Optional[List[str]] = None,
+    **kwargs,
+) -> nn.Module:
+    """
+    Injects trainable adatio Low-Rank decomposition matrices (LoRA) into linear
+    layers of a PyTorch model. Used for efficient fine-tuning of large
+    pre-trained models.
+
+    Parameters
+    ----------
+    model
+        A PyTorch model.
+    peft
+        Efficient finetuning method that should be applied.
+    lora_r
+        The rank r of the low-rank decomposition.
+    lora_alpha
+        The scaling factor. Can be set to same value as r in
+        most cases, as initialization is scaled already.
+    filter
+        Apply loRA only to linear layers filtered by name (e.g. "query.").
+        If None, loRA is applied to all linear Layers in module.
+    module_filter
+        Apply loRA only to modules filtered by name (e.g. ".*EncDecAttention|.*DenseReluDense")
+        If None, loRA is considered for all modules
+    extra_trainable_params
+        Not to apply loRA to modules filtered by name, and these modules are not frozen during training (e.g. "mask_decoder").
+        If None, all the modules except for those applied loRA are frozen.
+    Returns
+    -------
+    Model with injected LoRA modules.
+    """
+    # Paper alignment (Conv-LoRA, Sec. 3.3):
+    # Typical usage sets module_filter to attention modules in the vision encoder (e.g., ".*vision_encoder.*attn")
+    # and filter to projection names (e.g., ["q", "v"]). For "conv_lora", we create ConvLoRALinear instead of LoRA.
+    for m_name, module in dict(model.named_modules()).items():
+        if extra_trainable_params and any(re.match(filter_layer, m_name) for filter_layer in extra_trainable_params):
+            continue
+        if hasattr(model, "frozen_layers") and any(
+            re.search(filter_layer, m_name) for filter_layer in model.frozen_layers
+        ):
+            continue
+        if not module_filter or any(re.match(filter_module, m_name) for filter_module in module_filter):
+            for c_name, layer in dict(module.named_children()).items():
+                if not filter or any(re.match(filter_layer, c_name) for filter_layer in filter):
+                    assert isinstance(
+                        layer, nn.Linear
+                    ), f"LoRA can only be applied to torch.nn.Linear, but {layer} is {type(layer)}."
+                    adaptation_layer = create_adaptation(peft, layer, lora_r, lora_alpha, **kwargs)
+                    adaptation_layer.weight = layer.weight
+                    adaptation_layer.bias = layer.bias
+                    setattr(module, c_name, adaptation_layer)
+
+    return model  # return model to enable method chaining
+
+
+def get_model_head(model: nn.Module):
+    """
+    Return the model's head. Different models may have different head names.
+
+    Parameters
+    ----------
+    model
+        A Pytorch model.
+
+    Returns
+    -------
+    The model's head.
+    """
+    if hasattr(model, "head"):
+        head = model.head  # move the head outside
+    elif hasattr(model, "last_linear"):
+        head = model.last_linear
+    elif hasattr(model, "fc"):
+        head = model.fc
+    elif hasattr(model, "classifier"):
+        head = model.classifier
+    else:
+        raise ValueError(f"Model {type(model)} doesn't have head. Need to check its implementation.")
+
+    return head.fc if hasattr(head, "fc") else head
+
+
+def get_hf_config_and_model(
+    checkpoint_name: str, pretrained: Optional[bool] = True, low_cpu_mem_usage: Optional[bool] = False
+):
+    """
+    Get a Huggingface config and model based on a checkpoint name.
+
+    Parameters
+    ----------
+    checkpoint_name
+        A model checkpoint name or a local path that saves a custom checkpoint.
+    pretrained
+         Whether using the pretrained weights. If pretrained=True, download the pretrained model.
+    low_cpu_mem_usage
+        Whether to turn on the optimization of reducing the peak CPU memory usage when loading the pretrained model.
+
+    Returns
+    -------
+    A Huggingface config and model.
+    """
+    config = AutoConfig.from_pretrained(checkpoint_name)    # nosec B615
+
+    if pretrained:
+        model = AutoModel.from_pretrained(checkpoint_name, low_cpu_mem_usage=low_cpu_mem_usage) # nosec B615
+    else:
+        model = AutoModel.from_config(config)
+    # Explicitly set the model to train mode after loading as by default it is in eval mode
+    # See issue #4965
+    model.train()
+    return config, model
+
+
+def apply_sigmoid(output: Dict):
+    """
+    Apply the sigmoid to logits.
+
+    Parameters
+    ----------
+    output
+        The model output dict.
+
+    Returns
+    -------
+    The output with logits transformed by sigmoid.
+    """
+    for k, v in output.items():
+        output[k][LOGITS] = torch.sigmoid(v[LOGITS].float())
+    return output
+
+
+def apply_sigmoid_and_semantic_mask(output: Dict):
+    """
+    Apply sigmoid to logits and also store in SEMANTIC_MASK for semantic segmentation.
+    Handles both binary (single channel), multi-class cases, and SAM multi-class output.
+
+    Parameters
+    ----------
+    output
+        The model output dict.
+
+    Returns
+    -------
+    The output with sigmoid-transformed logits and SEMANTIC_MASK.
+    """
+    def semantic_inference(mask_cls, mask_pred):
+        """Combine mask and class predictions following Mask2Former approach."""
+        mask_cls = F.softmax(mask_cls, dim=-1)[..., :-1]  # Remove "no object" class
+        mask_pred = mask_pred.sigmoid()
+        semseg = torch.einsum("qc,qhw->chw", mask_cls, mask_pred)
+        return semseg
+    
+    for k, v in output.items():
+        logits = v[LOGITS].float()
+        
+        # Check if this is SAM multi-class output (has CLASS_LOGITS)
+        if CLASS_LOGITS in v:
+            # SAM multi-class: combine mask and class predictions
+            pred_classes = v[CLASS_LOGITS]  # [B, num_queries, num_classes+1]
+            pred_masks = logits  # [B, num_queries, H, W]
+            semantic_masks = []
+            for mask_cls_result, mask_pred_result in zip(pred_classes, pred_masks):
+                per_sample_semantic_masks = semantic_inference(mask_cls_result, mask_pred_result)
+                semantic_masks.append(per_sample_semantic_masks)
+            semantic_masks = torch.stack(semantic_masks, dim=0)
+            output[k][SEMANTIC_MASK] = semantic_masks
+            # Also apply sigmoid to logits for consistency
+            output[k][LOGITS] = torch.sigmoid(logits)
+        else:
+            # Standard output format
+            sigmoid_logits = torch.sigmoid(logits)
+            output[k][LOGITS] = sigmoid_logits
+            
+            # For multi-class segmentation (num_classes > 1), also set SEMANTIC_MASK
+            if logits.dim() == 4 and logits.shape[1] > 1:
+                # Multi-class: use softmax for SEMANTIC_MASK (proper probability distribution)
+                output[k][SEMANTIC_MASK] = F.softmax(logits, dim=1)
+            else:
+                # Binary: SEMANTIC_MASK is same as sigmoid output
+                output[k][SEMANTIC_MASK] = sigmoid_logits
+    return output
+
+
+def apply_softmax_semantic_mask(output: Dict):
+    """
+    Apply softmax to logits and store in SEMANTIC_MASK for multi-class segmentation.
+    Used with DiceCELoss and other multi-class losses.
+    
+    Handles two cases:
+    1. Standard multi-class: logits shape [B, C, H, W] - apply softmax directly
+    2. SAM multi-class: logits [B, num_queries, H, W] + CLASS_LOGITS [B, num_queries, num_classes+1]
+       - use semantic_inference to combine mask and class predictions
+
+    Parameters
+    ----------
+    output
+        The model output dict.
+
+    Returns
+    -------
+    The output with softmax-transformed logits stored in both LOGITS and SEMANTIC_MASK.
+    """
+    def semantic_inference(mask_cls, mask_pred):
+        """Combine mask and class predictions following Mask2Former approach."""
+        mask_cls = F.softmax(mask_cls, dim=-1)[..., :-1]  # Remove "no object" class
+        mask_pred = mask_pred.sigmoid()
+        semseg = torch.einsum("qc,qhw->chw", mask_cls, mask_pred)
+        return semseg
+    
+    for k, v in output.items():
+        logits = v[LOGITS].float()
+        
+        # Check if this is SAM multi-class output (has CLASS_LOGITS)
+        if CLASS_LOGITS in v:
+            # SAM multi-class: combine mask and class predictions
+            pred_classes = v[CLASS_LOGITS]  # [B, num_queries, num_classes+1]
+            pred_masks = logits  # [B, num_queries, H, W]
+            semantic_masks = []
+            for mask_cls_result, mask_pred_result in zip(pred_classes, pred_masks):
+                per_sample_semantic_masks = semantic_inference(mask_cls_result, mask_pred_result)
+                semantic_masks.append(per_sample_semantic_masks)
+            semantic_masks = torch.stack(semantic_masks, dim=0)
+            output[k][SEMANTIC_MASK] = semantic_masks
+        else:
+            # Standard multi-class: apply softmax directly
+            softmax_logits = F.softmax(logits, dim=1)
+            output[k][LOGITS] = softmax_logits
+            output[k][SEMANTIC_MASK] = softmax_logits
+    return output
+
+
+def apply_multi_class_semantic_seg_postprocess(output: Dict):
+    """
+    Apply the semantic postprocessing to logits.
+
+    Parameters
+    ----------
+    output
+        The model output dict.
+
+    Returns
+    -------
+    The output with post-proceesed semantic masks.
+    """
+
+    def semantic_inference(mask_cls, mask_pred):
+        """
+        Post-processing mask prediction for multi-class semantic segmentation inference based on https://github.com/facebookresearch/Mask2Former/blob/main/mask2former/maskformer_model.py
+
+        Args:
+            mask_cls (`torch.Tensor`):
+                Class logits. A tensor of shape `(num_queries, num_classes + 1)` (include the "no object" category).
+
+            mask_pred (`torch.Tensor`):
+                Mask logits. A tensor of shape `(num_queries, height, width)`.
+
+        Returns:
+            semseg (`torch.Tensor`): The processed mask prediction. A tensor of shape `(num_classes, height, width)`.
+
+        References:
+        [1] https://arxiv.org/abs/2107.06278
+        [2] https://arxiv.org/abs/2112.01527
+        """
+        mask_cls = F.softmax(mask_cls, dim=-1)[..., :-1]
+        mask_pred = mask_pred.sigmoid()
+        semseg = torch.einsum("qc,qhw->chw", mask_cls, mask_pred)
+        return semseg
+
+    for k, v in output.items():
+        pred_classes = output[k][CLASS_LOGITS]
+        pred_masks = output[k][LOGITS]
+        semantic_masks = []
+        for mask_cls_result, mask_pred_result in zip(
+            pred_classes, pred_masks
+        ):  # bs, num_q, num_class and bs, num_q, h, w
+            per_sample_semantic_masks = semantic_inference(mask_cls_result, mask_pred_result)  # num_class, h, w
+            semantic_masks.append(per_sample_semantic_masks)
+        semantic_masks = torch.stack(semantic_masks, dim=0)
+        output[k][SEMANTIC_MASK] = semantic_masks
+    return output
+
+
+def get_model_postprocess_fn(problem_type: str, loss_func: _Loss):
+    """
+    Get the postprocessing function for the model outputs.
+
+    Parameters
+    ----------
+    problem_type
+        The problem type, e.g., classification or regression.
+    loss_func
+        The loss function used in training.
+
+    Returns
+    -------
+    The postprocessing function.
+    """
+    from ..optim.losses import DiceCELoss  # Import here to avoid circular import
+    
+    postprocess_func = None
+    if problem_type == REGRESSION:
+        if isinstance(loss_func, nn.BCEWithLogitsLoss):
+            postprocess_func = apply_sigmoid
+    elif problem_type == SEMANTIC_SEGMENTATION:
+        if isinstance(loss_func, Mask2FormerLoss):
+            postprocess_func = apply_multi_class_semantic_seg_postprocess
+        elif isinstance(loss_func, DiceCELoss):
+            # Multi-class segmentation with Dice+CE loss
+            postprocess_func = apply_softmax_semantic_mask
+        else:
+            # For other semantic segmentation losses (BCEWithLogitsLoss, StructureLoss, etc.),
+            # use apply_sigmoid_and_semantic_mask which handles both binary and multi-class cases
+            postprocess_func = apply_sigmoid_and_semantic_mask
+
+    return postprocess_func
+
+
+def get_mmocr_config_and_model(checkpoint_name: str):
+    """
+    Get an MMOCR config and model based on a checkpoint name.
+
+    Parameters
+    ----------
+    checkpoint_name
+        A model checkpoint name.
+
+    Returns
+    -------
+    An MMOCR config and model.
+    """
+    from ..utils import check_if_packages_installed
+
+    check_if_packages_installed(package_names=["mmcv"])
+    try:
+        import mmocr
+        from mmocr.models import build_detector
+    except ImportError:
+        mmocr = None
+    from mim.commands.download import download
+
+    checkpoints = download(package="mmocr", configs=[checkpoint_name], dest_root=".")
+
+    # read config files
+    check_if_packages_installed(problem_type=OCR)
+    config_file = checkpoint_name + ".py"
+    if isinstance(config_file, str):
+        config = mmcv.Config.fromfile(config_file)
+
+    # build model and load pretrained weights
+    checkpoint = checkpoints[0]
+    model = build_detector(config.model, test_cfg=config.get("test_cfg"))
+    if checkpoint is not None:
+        checkpoint = load_checkpoint(model, checkpoint, map_location="cpu")
+    return config, model
+
+
+def lookup_mmdet_config(key, config):
+    if key in config:
+        return config[key]
+    for subconfig in config.values():
+        if isinstance(subconfig, dict):
+            result = lookup_mmdet_config(key, subconfig)
+            if result is not None:
+                return result
+        elif isinstance(subconfig, list):
+            for subsubconfig in subconfig:
+                if isinstance(subsubconfig, dict):
+                    result = lookup_mmdet_config(key, subsubconfig)
+                    if result is not None:
+                        return result
+    return None
+
+
+def update_mmdet_config(key, value, config):
+    for k, subconfig in config.items():
+        if key == k:
+            config[k] = value
+        elif isinstance(subconfig, dict):
+            update_mmdet_config(key, value, subconfig)
+        elif isinstance(subconfig, list):
+            for subsubconfig in subconfig:
+                if isinstance(subsubconfig, dict):
+                    update_mmdet_config(key, value, subsubconfig)
+
+
+def run_model(model: nn.Module, batch: dict, trt_model: Optional[nn.Module] = None):
+    from ..utils.onnx import OnnxModule
+    from .document_transformer import DocumentTransformer
+    from .fusion.fusion_mlp import MultimodalFusionMLP
+    from .hf_text import HFAutoModelForTextPrediction
+    from .t_few import TFewModel
+    from .timm_image import TimmAutoModelForImagePrediction
+
+    supported_models = (
+        TimmAutoModelForImagePrediction,
+        HFAutoModelForTextPrediction,
+        MultimodalFusionMLP,
+        TFewModel,
+        OnnxModule,
+    )
+    pure_model = model
+    if isinstance(model, torch._dynamo.eval_frame.OptimizedModule):
+        pure_model = model._orig_mod
+    if isinstance(model, nn.DataParallel):
+        pure_model = model.module
+    if isinstance(pure_model, OnnxModule):
+        for k in batch:
+            # HACK input data types in ONNX
+            if batch[k].dtype == torch.int32:
+                batch[k] = batch[k].to(torch.int64)
+    # DocumentTransformer inherited from HFAutoModelForTextPrediction
+    if (not isinstance(pure_model, DocumentTransformer)) and isinstance(pure_model, supported_models):
+        input_vec = [batch[k] for k in pure_model.input_keys]
+        column_names, column_values = [], []
+        for k in batch.keys():
+            has_image_column_prefix = isinstance(pure_model, TimmAutoModelForImagePrediction) and k.startswith(
+                pure_model.image_column_prefix
+            )
+            has_text_column_prefix = isinstance(pure_model, HFAutoModelForTextPrediction) and k.startswith(
+                pure_model.text_column_prefix
+            )
+            if has_image_column_prefix or has_text_column_prefix:
+                column_names.append(k)
+                column_values.append(batch[k])
+        if column_names != [] and column_values != []:
+            input_vec.append(column_names)
+            input_vec.append(column_values)
+        if isinstance(pure_model, OnnxModule):
+            # OnnxModule doesn't support multi-gpu yet
+            output_vec = pure_model(*tuple(input_vec))
+        else:
+            output_vec = model(*tuple(input_vec))
+
+        output = pure_model.get_output_dict(*output_vec)
+    else:
+        output = model(batch)
+    return output
+
+
+def freeze_model_layers(model, frozen_layers):
+    """
+    Freeze model layers with pattern in frozen_layers.
+
+    Parameters
+    ----------
+    model
+        The pytorch model.
+    frozen_layers
+        A list of substrings of frozen layers' names.
+
+        e.g. if frozen_layers = ["backbone", "neck"],
+            all layers including "backbone" or "neck" in the name will be frozen.
+    """
+
+    if not frozen_layers:
+        return
+
+    is_frozen_layer = lambda n: any(bb in n for bb in frozen_layers)
+
+    for n, p in model.named_parameters():
+        if is_frozen_layer(n):
+            p.requires_grad = False
+
+
+def get_pretrained_tokenizer(
+    tokenizer_name: str,
+    checkpoint_name: str,
+    use_fast: Optional[bool] = True,
+    add_prefix_space: Optional[bool] = None,
+):
+    """
+    Load the tokenizer for a pre-trained huggingface checkpoint.
+
+    Parameters
+    ----------
+    tokenizer_name
+        The tokenizer type, e.g., "bert", "clip", "electra", and "hf_auto".
+    checkpoint_name
+        Name of a pre-trained checkpoint.
+    use_fast
+        Use a fast Rust-based tokenizer if it is supported for a given model.
+        If a fast tokenizer is not available for a given model, a normal Python-based tokenizer is returned instead.
+        See: https://huggingface.co/docs/transformers/model_doc/auto#transformers.AutoTokenizer.from_pretrained.use_fast
+
+    Returns
+    -------
+    A tokenizer instance.
+    """
+    try:
+        tokenizer_class = ALL_TOKENIZERS[tokenizer_name]
+        if add_prefix_space is None:
+            return tokenizer_class.from_pretrained(checkpoint_name, use_fast=use_fast)
+        else:
+            return tokenizer_class.from_pretrained(
+                checkpoint_name, use_fast=use_fast, add_prefix_space=add_prefix_space
+            )
+    except TypeError as e:
+        try:
+            tokenizer = BertTokenizer.from_pretrained(checkpoint_name)  # nosec B615
+            warnings.warn(
+                f"Current checkpoint {checkpoint_name} does not support AutoTokenizer. "
+                "Switch to BertTokenizer instead.",
+                UserWarning,
+            )
+            return tokenizer
+        except:
+            raise e
+
+
+def extract_value_from_config(
+    config: Dict,
+    keys: Tuple[str, ...],
+):
+    """
+    Traverse a config dictionary to get some hyper-parameter's value.
+
+    Parameters
+    ----------
+    config
+        A config dictionary.
+    keys
+        The possible names of a hyper-parameter.
+
+    Returns
+    -------
+    The hyper-parameter value.
+    """
+    result = []
+    for k, v in config.items():
+        if k in keys:
+            result.append(v)
+        elif isinstance(v, dict):
+            result += extract_value_from_config(v, keys)
+        else:
+            pass
+
+    return result
+
+
+def extract_image_hparams_from_config(model_name: str, config):
+    """
+    Extract some default hyper-parameters, e.g., image size, mean, and std,
+    from a pre-trained (timm or huggingface) checkpoint.
+
+    Parameters
+    ----------
+    model_name
+        Name of model.
+    config
+        Config of a pre-trained checkpoint.
+
+    Returns
+    -------
+    image_size
+        Image width/height.
+    mean
+        Image normalization mean.
+    std
+        Image normalizaiton std.
+    """
+    if model_name.lower().startswith((TIMM_IMAGE, META_TRANSFORMER)):
+        image_size = config["input_size"][-1]
+        image_mean = config["mean"]
+        image_std = config["std"]
+    elif model_name.lower().startswith((CLIP, DOCUMENT_TRANSFORMER)):
+        extracted = extract_value_from_config(
+            config=config.to_diff_dict(),
+            keys=("image_size",),
+        )
+        if len(extracted) == 0:
+            image_size = None
+        elif len(extracted) >= 1:
+            image_size = extracted[0]
+            if isinstance(image_size, tuple):
+                image_size = image_size[-1]
+        else:
+            raise ValueError(f" more than one image_size values are detected: {extracted}")
+        image_mean = None
+        image_std = None
+    else:
+        raise ValueError(f"Unknown image processor prefix: {model_name}")
+    return image_size, image_mean, image_std
+
+
+def image_mean_std(norm_type: str):
+    """
+    Get image normalization mean and std by its name.
+
+    Parameters
+    ----------
+    norm_type
+        Name of image normalization.
+
+    Returns
+    -------
+    Normalization mean and std.
+    """
+    if norm_type == "inception":
+        return IMAGENET_INCEPTION_MEAN, IMAGENET_INCEPTION_STD
+    elif norm_type == "imagenet":
+        return IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
+    elif norm_type == "clip":
+        return CLIP_IMAGE_MEAN, CLIP_IMAGE_STD
+    else:
+        raise ValueError(f"unknown image normalization: {norm_type}")
+
+
+def get_image_size_mean_std(
+    model_name: str,
+    config,
+    provided_size: int,
+    provided_norm_type: str,
+    support_variable_input_size: Optional[bool] = False,
+):
+    image_size, image_mean, image_std = extract_image_hparams_from_config(
+        model_name=model_name,
+        config=config,
+    )
+    if support_variable_input_size and provided_size is not None:
+        # We have detected that the model supports using an image size that is
+        # different from the pretrained model, e.g., ConvNets with global pooling
+        if provided_size < image_size:
+            logger.warning(
+                f"The provided image size={provided_size} is smaller than the default size "
+                f"of the pretrained backbone, which is {image_size}. "
+                f"Detailed configuration of the backbone is in {config}. "
+                f"You may like to double check your configuration."
+            )
+        image_size = provided_size
+    elif provided_size is not None and provided_size != image_size:
+        logger.warning(
+            f"The model does not support using an image size that is different from the default size. "
+            f"Provided image size={provided_size}. Default size={image_size}. "
+            f"Detailed model configuration={config}. We have ignored the provided image size."
+        )
+
+    if image_size is None:
+        if provided_size is not None:
+            image_size = provided_size
+            logger.debug(f"using provided image size: {image_size}.")
+        else:
+            raise ValueError("image size is missing.")
+    else:
+        logger.debug(f"using detected image size: {image_size}")
+
+    if image_mean is None or image_std is None:
+        if provided_norm_type is not None:
+            image_mean, image_std = image_mean_std(provided_norm_type)
+            logger.debug(f"using provided normalization: {provided_norm_type}.")
+        else:
+            raise ValueError("image normalization mean and std are missing.")
+    else:
+        logger.debug(f"using detected image normalization: {image_mean} and {image_std}.")
+
+    return image_size, image_mean, image_std
+
+
+def get_text_segment_num(config, provided_segment_num: int, checkpoint_name: str):
+    extracted = extract_value_from_config(config=config.to_diff_dict(), keys=("type_vocab_size",))
+    if len(extracted) == 0:
+        default_segment_num = 1
+    elif len(extracted) == 1:
+        default_segment_num = extracted[0]
+    else:
+        raise ValueError(f" more than one type_vocab_size values are detected: {extracted}")
+
+    if default_segment_num <= 0:
+        default_segment_num = 1
+
+    if provided_segment_num < default_segment_num:
+        warnings.warn(
+            f"provided text_segment_num: {provided_segment_num} "
+            f"is smaller than {checkpoint_name}'s default: {default_segment_num}"
+        )
+    text_segment_num = min(provided_segment_num, default_segment_num)
+    assert text_segment_num >= 1
+    logger.debug(f"text segment num: {text_segment_num}")
+
+    return text_segment_num
+
+
+def get_text_token_max_len(provided_max_len, config, tokenizer, checkpoint_name):
+    """
+    Compute the allowable max length of token sequences.
+
+    Parameters
+    ----------
+    provided_max_len
+        The provided max length.
+    config
+        Model config.
+    tokenizer
+        Text tokenizer.
+    checkpoint_name
+        Name of checkpoint.
+
+    Returns
+    -------
+    Token sequence max length.
+    """
+    if hasattr(config, "relative_attention") and config.relative_attention:
+        default_max_len = tokenizer.model_max_length
+    elif hasattr(config, "position_embedding_type") and "relative" in config.position_embedding_type:
+        default_max_len = tokenizer.model_max_length
+    elif hasattr(config, "max_position_embeddings"):
+        default_max_len = config.max_position_embeddings
+    else:
+        default_max_len = tokenizer.model_max_length
+
+    if provided_max_len is None or provided_max_len <= 0:
+        max_len = default_max_len
+    else:
+        if provided_max_len < default_max_len:
+            if default_max_len < 10**6:  # Larger than this value usually means infinite.
+                warnings.warn(
+                    f"provided max length: {provided_max_len} "
+                    f"is smaller than {checkpoint_name}'s default: {default_max_len}"
+                )
+        max_len = min(provided_max_len, default_max_len)
+
+    logger.debug(f"text max length: {max_len}")
+
+    return max_len
+
+
+def replace_missing_images_with_learnable(
+    images: torch.Tensor,
+    image_masks,
+    learnable_image: nn.Parameter,
+):
+    b, n, c, h, w = images.shape
+    assert learnable_image.shape == (c, h, w)
+    for i in range(b):
+        for j in range(n):
+            if not image_masks[i][j]:  # False means a missing image
+                images[i][j] = learnable_image
+
+    return images
+
+
+def select_model(
+    config: DictConfig,
+    df_preprocessor,
+    strict: Optional[bool] = True,
+):
+    """
+    Filter model config through the detected modalities in the training data.
+    If MultiModalFeaturePreprocessor can't detect some modality,
+    this function will remove the models that use this modality. This function is to
+    maximize the user flexibility in defining the config.
+    For example, if one uses the default, including hf_text and timm_image, as the model config template
+    but the training data don't have images, this function will filter out timm_image.
+
+    Parameters
+    ----------
+    config
+        A DictConfig object. The model config should be accessible by "config.model"
+    df_preprocessor
+        A MultiModalFeaturePreprocessor object, which has called .fit() on the training data.
+        Column names of the same modality are grouped into one list. If a modality's list is empty,
+        it means the training data don't have this modality.
+    strict
+        If False, allow retaining one model when partial modalities are available for that model.
+
+    Returns
+    -------
+    Config with some unused models removed.
+    """
+    data_status = {}
+    for per_modality in ALL_MODALITIES:
+        data_status[per_modality] = False
+    if len(df_preprocessor.image_feature_names) > 0:
+        data_status[IMAGE] = True
+    if len(df_preprocessor.text_feature_names) > 0:
+        data_status[TEXT] = True
+    if len(df_preprocessor.categorical_feature_names) > 0:
+        data_status[CATEGORICAL] = True
+    if len(df_preprocessor.numerical_feature_names) > 0:
+        data_status[NUMERICAL] = True
+    if len(df_preprocessor.ner_feature_names) > 0:
+        data_status[TEXT_NER] = True
+    if len(df_preprocessor.document_feature_names) > 0:
+        data_status[DOCUMENT] = True
+    if len(df_preprocessor.semantic_segmentation_feature_names) > 0:
+        data_status[SEMANTIC_SEGMENTATION_IMG] = True
+
+    names = config.model.names
+    if isinstance(names, str):
+        names = [names]
+    selected_model_names = []
+    fusion_model_name = []
+    for model_name in names:
+        model_config = getattr(config.model, model_name)
+        strict = getattr(model_config, "requires_all_dtypes", strict)
+        if not model_config.data_types:
+            fusion_model_name.append(model_name)
+            continue
+        model_data_status = [data_status[d_type] for d_type in model_config.data_types]
+        if all(model_data_status):
+            selected_model_names.append(model_name)
+        else:
+            if any(model_data_status) and not strict:
+                selected_model_names.append(model_name)
+                # update data types to be consistent with detected
+                model_config.data_types = [d_type for d_type in model_config.data_types if data_status[d_type]]
+            else:
+                delattr(config.model, model_name)
+
+    if len(selected_model_names) == 0:
+        raise ValueError("No model is available for this dataset.")
+    # only allow no more than 1 fusion model
+    if len(fusion_model_name) > 1:
+        raise ValueError(f"More than one fusion models `{fusion_model_name}` are detected, but only one is allowed.")
+
+    if len(selected_model_names) > 1:
+        assert len(fusion_model_name) == 1
+        selected_model_names.extend(fusion_model_name)
+    elif len(fusion_model_name) == 1 and hasattr(config.model, fusion_model_name[0]):
+        delattr(config.model, fusion_model_name[0])
+
+    config.model.names = selected_model_names
+    logger.debug(f"selected models: {selected_model_names}")
+    for model_name in selected_model_names:
+        logger.debug(f"model dtypes: {getattr(config.model, model_name).data_types}")
+
+    # clean up unused model configs
+    model_keys = list(config.model.keys())
+    for model_name in model_keys:
+        if model_name not in selected_model_names + ["names"]:
+            delattr(config.model, model_name)
+
+    return config
+
+
+def create_model(
+    model_name: str,
+    model_config: DictConfig,
+    num_classes: Optional[int] = 0,
+    classes: Optional[list] = None,
+    num_numerical_columns: Optional[int] = None,
+    num_categories: Optional[Dict] = None,
+    numerical_fill_values: Optional[Dict] = None,
+    pretrained: Optional[bool] = True,
+    is_matching: Optional[bool] = False,
+):
+    """
+    Create a single model.
+
+    Parameters
+    ----------
+    model_name
+        Name of the model.
+    model_config
+        Config of the model.
+    num_classes
+        The class number for a classification task. It should be 1 for a regression task.
+    classes
+        All classes in this dataset.
+    num_numerical_columns
+        The number of numerical columns in the training dataframe.
+    num_categories
+        The category number for each categorical column in the training dataframe.
+    numerical_fill_values
+        If numerical values are null, fill them with these.
+    pretrained
+        Whether using the pretrained timm models. If pretrained=True, download the pretrained model.
+    is_matching
+        Whether the model is used for semantic matching.
+
+    Returns
+    -------
+    A model.
+    """
+    if model_name.lower().startswith(CLIP):
+        from .clip import CLIPForImageText
+
+        model = CLIPForImageText(
+            prefix=model_name,
+            checkpoint_name=model_config.checkpoint_name,
+            num_classes=num_classes,
+            pretrained=pretrained,
+            tokenizer_name=model_config.tokenizer_name,
+            has_image=IMAGE in model_config.data_types,
+            has_text=TEXT in model_config.data_types,
+            image_size=model_config.image_size,
+            image_norm=model_config.image_norm,
+            image_chan_num=model_config.image_chan_num,
+            use_learnable_image=model_config.use_learnable_image,
+            max_text_len=model_config.max_text_len,
+            text_segment_num=model_config.text_segment_num,
+            is_matching=is_matching,
+        )
+    elif model_name.lower().startswith(TIMM_IMAGE):
+        from .timm_image import TimmAutoModelForImagePrediction
+
+        model = TimmAutoModelForImagePrediction(
+            prefix=model_name,
+            checkpoint_name=model_config.checkpoint_name,
+            num_classes=num_classes,
+            mix_choice=model_config.mix_choice,
+            pretrained=pretrained,
+            image_size=model_config.image_size,
+            image_norm=model_config.image_norm,
+            image_chan_num=model_config.image_chan_num,
+            use_learnable_image=model_config.use_learnable_image,
+        )
+    elif model_name.lower().startswith(HF_TEXT):
+        from .hf_text import HFAutoModelForTextPrediction
+
+        model = HFAutoModelForTextPrediction(
+            prefix=model_name,
+            checkpoint_name=model_config.checkpoint_name,
+            num_classes=num_classes,
+            pooling_mode=model_config.pooling_mode,
+            gradient_checkpointing=model_config.gradient_checkpointing,
+            low_cpu_mem_usage=model_config.low_cpu_mem_usage,
+            pretrained=pretrained,
+            tokenizer_name=model_config.tokenizer_name,
+            max_text_len=model_config.max_text_len,
+            text_segment_num=model_config.text_segment_num,
+            use_fast=model_config.use_fast,
+        )
+    elif model_name.lower().startswith(T_FEW):
+        from .t_few import TFewModel
+
+        model = TFewModel(
+            prefix=model_name,
+            checkpoint_name=model_config.checkpoint_name,
+            length_norm=model_config.length_norm,  # Normalizes length to adjust for length bias in target template
+            unlikely_loss=model_config.unlikely_loss,  # Adds loss term that lowers probability of incorrect outputs
+            mc_loss=model_config.mc_loss,  # Adds multiple choice cross entropy loss
+            num_classes=num_classes,
+            gradient_checkpointing=model_config.gradient_checkpointing,
+            low_cpu_mem_usage=model_config.low_cpu_mem_usage,
+            pretrained=pretrained,
+            tokenizer_name=model_config.tokenizer_name,
+            max_text_len=model_config.max_text_len,
+            text_segment_num=model_config.text_segment_num,
+        )
+    elif model_name.lower().startswith(NUMERICAL_MLP):
+        from .numerical_mlp import NumericalMLP
+
+        model = NumericalMLP(
+            prefix=model_name,
+            in_features=num_numerical_columns,
+            hidden_features=model_config.hidden_size,
+            out_features=model_config.hidden_size,
+            num_layers=model_config.num_layers,
+            activation=model_config.activation,
+            dropout=model_config.dropout,
+            normalization=model_config.normalization,
+            token_dim=model_config.token_dim,
+            embedding_arch=model_config.embedding_arch,
+            num_classes=num_classes,
+            numerical_fill_values=numerical_fill_values,
+        )
+    elif model_name.lower().startswith(CATEGORICAL_MLP):
+        from .categorical_mlp import CategoricalMLP
+
+        model = CategoricalMLP(
+            prefix=model_name,
+            num_categories=num_categories,
+            out_features=model_config.hidden_size,
+            num_layers=model_config.num_layers,
+            activation=model_config.activation,
+            dropout=model_config.dropout,
+            normalization=model_config.normalization,
+            num_classes=num_classes,
+        )
+    elif model_name.lower().startswith(DOCUMENT_TRANSFORMER):
+        from .document_transformer import DocumentTransformer
+
+        model = DocumentTransformer(
+            prefix=model_name,
+            checkpoint_name=model_config.checkpoint_name,
+            num_classes=num_classes,
+            pooling_mode=model_config.pooling_mode,
+            gradient_checkpointing=model_config.gradient_checkpointing,
+            low_cpu_mem_usage=model_config.low_cpu_mem_usage,
+            pretrained=pretrained,
+            tokenizer_name=model_config.tokenizer_name,
+            image_size=model_config.image_size,
+            image_norm=model_config.image_norm,
+        )
+    elif model_name.lower().startswith(MMDET_IMAGE):
+        from .mmdet_image import MMDetAutoModelForObjectDetection
+
+        model = MMDetAutoModelForObjectDetection(
+            prefix=model_name,
+            checkpoint_name=model_config.checkpoint_name,
+            config_file=model_config.config_file,
+            classes=classes,
+            pretrained=pretrained,
+            output_bbox_format=model_config.output_bbox_format,
+            frozen_layers=model_config.frozen_layers,
+        )
+    elif model_name.lower().startswith(MMOCR_TEXT_DET):
+        from .mmocr_text_detection import MMOCRAutoModelForTextDetection
+
+        model = MMOCRAutoModelForTextDetection(
+            prefix=model_name,
+            checkpoint_name=model_config.checkpoint_name,
+        )
+    elif model_name.lower().startswith(MMOCR_TEXT_RECOG):
+        from .mmocr_text_recognition import MMOCRAutoModelForTextRecognition
+
+        model = MMOCRAutoModelForTextRecognition(
+            prefix=model_name,
+            checkpoint_name=model_config.checkpoint_name,
+        )
+    elif model_name.lower().startswith(NER_TEXT):
+        from .ner_text import HFAutoModelForNER
+
+        model = HFAutoModelForNER(
+            prefix=model_name,
+            checkpoint_name=model_config.checkpoint_name,
+            num_classes=num_classes,
+            gradient_checkpointing=model_config.gradient_checkpointing,
+            low_cpu_mem_usage=model_config.low_cpu_mem_usage,
+            pretrained=pretrained,
+            tokenizer_name=model_config.tokenizer_name,
+        )
+    elif model_name.lower().startswith(FUSION_MLP):
+        from .fusion import MultimodalFusionMLP
+
+        model = functools.partial(
+            MultimodalFusionMLP,
+            prefix=model_name,
+            hidden_features=model_config.hidden_sizes,
+            num_classes=num_classes,
+            adapt_in_features=model_config.adapt_in_features,
+            activation=model_config.activation,
+            dropout=model_config.dropout,
+            normalization=model_config.normalization,
+            aux_loss_weight=model_config.aux_loss_weight,
+        )
+    elif model_name.lower().startswith(FUSION_NER):
+        from .fusion import MultimodalFusionNER
+
+        model = functools.partial(
+            MultimodalFusionNER,
+            prefix=model_name,
+            hidden_features=model_config.hidden_sizes,
+            num_classes=num_classes,
+            adapt_in_features=model_config.adapt_in_features,
+            activation=model_config.activation,
+            dropout_prob=model_config.drop_rate,
+            normalization=model_config.normalization,
+            loss_weight=model_config.weight if hasattr(model_config, "weight") else None,
+        )
+    elif model_name.lower().startswith(FUSION_TRANSFORMER):
+        from .fusion import MultimodalFusionTransformer
+
+        model = functools.partial(
+            MultimodalFusionTransformer,
+            prefix=model_name,
+            hidden_features=model_config.hidden_size,
+            num_classes=num_classes,
+            num_blocks=model_config.num_blocks,
+            attention_num_heads=model_config.attention_num_heads,
+            ffn_hidden_size=model_config.ffn_hidden_size,
+            attention_dropout=model_config.attention_dropout,
+            residual_dropout=model_config.residual_dropout,
+            ffn_dropout=model_config.ffn_dropout,
+            attention_normalization=model_config.normalization,
+            ffn_normalization=model_config.normalization,
+            head_normalization=model_config.normalization,
+            ffn_activation=model_config.ffn_activation,
+            head_activation=model_config.head_activation,
+            adapt_in_features=model_config.adapt_in_features,
+            aux_loss_weight=model_config.aux_loss_weight,
+            additive_attention=model_config.additive_attention,
+            share_qv_weights=model_config.share_qv_weights,
+        )
+    elif model_name.lower().startswith(FT_TRANSFORMER):
+        from .ft_transformer import FT_Transformer
+
+        model = FT_Transformer(
+            prefix=model_name,
+            num_numerical_columns=num_numerical_columns,
+            num_categories=num_categories,
+            numerical_fill_values=numerical_fill_values,
+            embedding_arch=model_config.embedding_arch,
+            token_dim=model_config.token_dim,
+            hidden_size=model_config.hidden_size,
+            hidden_features=model_config.hidden_size,
+            num_classes=num_classes,
+            num_blocks=model_config.num_blocks,
+            attention_num_heads=model_config.attention_num_heads,
+            attention_dropout=model_config.attention_dropout,
+            attention_normalization=model_config.normalization,
+            ffn_hidden_size=model_config.ffn_hidden_size,
+            ffn_dropout=model_config.ffn_dropout,
+            ffn_normalization=model_config.normalization,
+            ffn_activation=model_config.ffn_activation,
+            residual_dropout=model_config.residual_dropout,
+            head_normalization=model_config.normalization,
+            head_activation=model_config.head_activation,
+            additive_attention=model_config.additive_attention,
+            share_qv_weights=model_config.share_qv_weights,
+            pooling_mode=model_config.pooling_mode,
+            checkpoint_name=model_config.checkpoint_name,
+            pretrained=pretrained,
+        )
+    elif model_name.lower().startswith(SAM):
+        from .sam import SAMForSemanticSegmentation
+
+        model = SAMForSemanticSegmentation(
+            prefix=model_name,
+            checkpoint_name=model_config.checkpoint_name,
+            num_classes=num_classes,
+            pretrained=pretrained,
+            frozen_layers=model_config.frozen_layers,
+            num_mask_tokens=model_config.num_mask_tokens,
+            image_norm=model_config.image_norm,
+        )
+    elif model_name.lower().startswith(META_TRANSFORMER):
+        from .meta_transformer import MetaTransformer
+
+        model = MetaTransformer(
+            prefix=model_name,
+            checkpoint_path=model_config.checkpoint_path,
+            num_classes=num_classes,
+            model_version=model_config.model_version,
+            has_image=IMAGE in model_config.data_types,
+            has_text=TEXT in model_config.data_types,
+            num_numerical_columns=num_numerical_columns,
+            num_categories=num_categories,
+            numerical_fill_values=numerical_fill_values,
+            image_size=model_config.image_size,
+            image_norm=model_config.image_norm,
+            image_chan_num=model_config.image_chan_num,
+            use_learnable_image=model_config.use_learnable_image,
+            max_text_len=model_config.max_text_len,
+            text_segment_num=model_config.text_segment_num,
+        )
+    else:
+        raise ValueError(f"unknown model name: {model_name}")
+
+    return model
+
+
+def create_fusion_model(
+    config: DictConfig,
+    num_classes: Optional[int] = None,
+    classes: Optional[list] = None,
+    num_numerical_columns: Optional[int] = None,
+    num_categories: Optional[Dict] = None,
+    numerical_fill_values: Optional[Dict] = None,
+    pretrained: Optional[bool] = True,
+):
+    """
+    Create models. It supports the auto models of huggingface text and timm image.
+    Multimodal models, e.g., CLIP, should be added case-by-case since their configs and usages
+    may be different. It uses MLP for the numerical features, categorical features, and late-fusion.
+
+    Parameters
+    ----------
+    config
+        A DictConfig object. The model config should be accessible by "config.model".
+    num_classes
+        The class number for a classification task. It should be 1 for a regression task.
+    classes
+        All classes in this dataset.
+    num_numerical_columns
+        The number of numerical columns in the training dataframe.
+    num_categories
+        The category number for each categorical column in the training dataframe.
+    numerical_fill_values
+        If numerical values are null, fill them with these.
+    pretrained
+        Whether using the pretrained timm models. If pretrained=True, download the pretrained model.
+
+    Returns
+    -------
+    A Pytorch model.
+    """
+    names = config.model.names
+    if isinstance(names, str):
+        names = [names]
+    # make sure no duplicate model names
+    assert len(names) == len(set(names))
+    logger.debug(f"output_shape: {num_classes}")
+    names = sorted(names)
+    config.model.names = names
+    single_models = []
+    fusion_model = None
+
+    for model_name in names:
+        model_config = getattr(config.model, model_name)
+        model = create_model(
+            model_name=model_name,
+            model_config=model_config,
+            num_classes=num_classes,
+            classes=classes,
+            num_numerical_columns=num_numerical_columns,
+            num_categories=num_categories,
+            numerical_fill_values=numerical_fill_values,
+            pretrained=pretrained,
+        )
+
+        if isinstance(model, functools.partial):  # fusion model
+            if fusion_model is None:
+                fusion_model = model
+            else:
+                raise ValueError(
+                    f"More than one fusion models are detected in {names}. Only one fusion model is allowed."
+                )
+        else:  # single model
+            if config.optim.peft is not None:
+                model = apply_peft_adaptation(model, config)
+            single_models.append(model)
+
+    if len(single_models) > 1:
+        # must have one fusion model if there are multiple independent models
+        model = fusion_model(models=single_models)
+    elif len(single_models) == 1:
+        model = single_models[0]
+    else:
+        raise ValueError(f"No available models for {names}")
+
+    # build augmenter for multimodal data augmentation
+    if config.optim.lemda.turn_on:
+        from .fusion import MultimodalFusionMLP
+
+        assert isinstance(model, MultimodalFusionMLP)
+        from .augmenter import Augmenter
+
+        augmenter = Augmenter(
+            arch_type=config.optim.lemda.arch_type,
+            input_dim=model.augmenter_in_features,
+            z_dim=config.optim.lemda.z_dim,
+            num_layers=config.optim.lemda.num_layers,
+            adv_weight=config.optim.lemda.adv_weight,
+        )
+        model.augmenter = augmenter
+
+    return model
+
+
+def apply_peft_adaptation(model: nn.Module, config: DictConfig) -> nn.Module:
+    """
+    Apply an adaptation to the model for efficient fine-tuning.
+
+    Parameters
+    ----------
+    model
+        A PyTorch model.
+    config:
+        A DictConfig object. The optimization config should be accessible by "config.optimization".
+    """
+    if config.optim.peft in PEFT_ADDITIVE_STRATEGIES:
+        model = inject_adaptation_to_linear_layer(
+            model=model,
+            peft=config.optim.peft,
+            lora_r=config.optim.lora.r,
+            lora_alpha=config.optim.lora.alpha,
+            module_filter=config.optim.lora.module_filter,
+            filter=config.optim.lora.filter,
+            extra_trainable_params=config.optim.extra_trainable_params,
+            conv_lora_expert_num=config.optim.lora.conv_lora_expert_num,
+        )
+        model.name_to_id = model.get_layer_ids()  # Need to update name to id dictionary.
+
+    return model
+
+
+def modify_duplicate_model_names(
+    learner,
+    postfix: str,
+    blacklist: List[str],
+):
+    """
+    Modify a learner's model names if they exist in a blacklist.
+
+    Parameters
+    ----------
+    learner
+        A BaseLearner object.
+    postfix
+        The postfix used to change the duplicate names.
+    blacklist
+        A list of names. The provided learner can't use model names in the list.
+
+    Returns
+    -------
+    The learner guaranteed has no duplicate model names with the blacklist names.
+    """
+    model_names = []
+    for n in learner._config.model.names:
+        if n in blacklist:
+            new_name = f"{n}_{postfix}"
+            assert new_name not in blacklist
+            assert new_name not in learner._config.model.names
+            # modify model prefix
+            if n == learner._model.prefix:
+                learner._model.prefix = new_name
+            else:
+                assert isinstance(learner._model.model, nn.ModuleList)
+                for per_model in learner._model.model:
+                    if n == per_model.prefix:
+                        per_model.prefix = new_name
+                        break
+            # modify data processor prefix
+            for per_modality_processors in learner._data_processors.values():
+                for per_processor in per_modality_processors:
+                    if n == per_processor.prefix:
+                        per_processor.prefix = new_name
+            # modify model config keys
+            setattr(learner._config.model, new_name, getattr(learner._config.model, n))
+            delattr(learner._config.model, n)
+
+            model_names.append(new_name)
+        else:
+            model_names.append(n)
+
+    learner._config.model.names = model_names
+
+    return learner
+
+
+def list_timm_models(pretrained=True):
+    return timm.list_models(pretrained=pretrained)
+
+
+def is_lazy_weight_tensor(p: torch.Tensor) -> bool:
+    from torch.nn.parameter import UninitializedParameter
+
+    if isinstance(p, UninitializedParameter):
+        warnings.warn(
+            "A layer with UninitializedParameter was found. "
+            "Thus, the total number of parameters detected may be inaccurate."
+        )
+        return True
+    return False
+
+```
+
+让我验证 `CLASS_LOGITS` 常量是否已经被导入：
+
+现在让我快速验证修改是否正确：
+
+修复完成！
+
+## 问题分析
+
+之前的错误 `KeyError: 'semantic_mask'` 是因为：
+1. **训练时**：`_compute_loss` 中我添加了 SAM 多类输出的转换逻辑（正确）
+2. **推理时**：`apply_softmax_semantic_mask` 和 `apply_sigmoid_and_semantic_mask` 假设 logits 已经是 `[B, C, H, W]` 格式，没有处理 SAM 的 `[B, 1, H, W]` + `CLASS_LOGITS` 格式
+
+## 修复内容
+
+更新了两个后处理函数，使其能检测并正确处理 SAM 多类输出格式：
+
+1. **`apply_softmax_semantic_mask`**（用于 DiceCELoss）
+2. **`apply_sigmoid_and_semantic_mask`**（用于其他损失函数）
+
+现在这两个函数都会：
+- 检测是否有 `CLASS_LOGITS`
+- 如果有，使用 `semantic_inference` 将 mask + class 组合成 `SEMANTIC_MASK`
+- 如果没有，按原来的逻辑处理
+
+## 验证结果
+
+```
+输入: LOGITS [2, 1, 256, 256] + CLASS_LOGITS [2, 1, 5]
+输出: SEMANTIC_MASK [2, 4, 256, 256]  ✅
+```
+
+现在训练和推理的代码逻辑一致了，不会再出现 `KeyError: 'semantic_mask'` 错误。
+
+---
+
+**新的训练命令**（使用 Mask2FormerLoss，更适合 SAM 多类分割）：
+
+```bash
+cd /root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA
+
+nohup python3 run_acdc_conv_lora.py \
+  --dataset_dir datasets/acdc_conv_lora/acdc_conv_lora \
+  --rank 3 \
+  --expert_num 8 \
+  --gspo_enable \
+  --adapter_enable \
+  --adapter_dim 64 \
+  --gspo_adapter_enable \
+  --loss mask2former_loss \
+  --max_epochs 100 \
+  --patience 30 \
+  --output_dir outputs/acdc_mask2former \
+  --vis_samples 8 \
+  --vis_output_dir outputs/acdc_vis_mask2former \
+> outputs/acdc_mask2former.log 2>&1 &
+```
+
+```plaintext
+输入: LOGITS [2, 1, 256, 256] + CLASS_LOGITS [2, 1, 5]
+输出: SEMANTIC_MASK [2, 4, 256, 256]  ✅
+```
+
+```shellscript
+cd /root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA
+
+nohup python3 run_acdc_conv_lora.py \
+  --dataset_dir datasets/acdc_conv_lora/acdc_conv_lora \
+  --rank 3 \
+  --expert_num 8 \
+  --gspo_enable \
+  --adapter_enable \
+  --adapter_dim 64 \
+  --gspo_adapter_enable \
+  --loss mask2former_loss \
+  --max_epochs 100 \
+  --patience 30 \
+  --output_dir outputs/acdc_mask2former \
+  --vis_samples 8 \
+  --vis_output_dir outputs/acdc_vis_mask2former \
+> outputs/acdc_mask2former.log 2>&1 &
+```
+
+---
+
+**User**
+
+iou和dice已经经过3个epochs还是如此之低，一定不正常。正常情况下即使只训了一两个epochs也应该有至少0.5以上的dice。请认真分析可能的原因并修正
+
+---
+
+**Cursor**
+
+让我查看完整的日志来分析训练过程中的问题：
+
+我发现问题了！ `val_dice` 在 3 个 epoch 中保持完全相同（0.24471），模型没有学习。让我检查可视化输出来分析模型预测：
+
+发现关键问题！**所有预测都是全 0**！模型完全没有产生任何有意义的分割。让我检查 ground truth 数据和模型输出：
+
+Ground truth 是正确的（0-3类），问题出在模型输出的处理上。让我调试 `semantic_inference` 函数：
+
+让我检查 `semantic_inference` 函数的实现：
+
+让我检查 SAM 模型的 `CLASS_LOGITS` 输出是如何生成的，以及可能的问题：
+
+```python
+def semantic_inference(mask_cls, mask_pred):
+    mask_cls = F.softmax(mask_cls, dim=-1)[..., :-1]  # Remove "no object" class
+    mask_pred = mask_pred.sigmoid()
+    semseg = torch.einsum("qc,qhw->chw", mask_cls, mask_pred)
+    return semseg
+```
+
+```python
+pred_classes = class_predictions[:, 0, :, :]  # 从 [:, 0, :, :] 来看
+```
+
+```python
+class_predictions = self.output_classifier_mlps(mask_tokens_out).reshape(
+    batch_size, point_batch_size, -1, self.num_classes + 1
+)  # [batch_size, point_batch_size, num_tokens, num_classes+1]
+```
+
+```python
+pred_classes = class_predictions[:, 0, :, :]  # [batch_size, num_tokens, num_classes+1]
+```
+
+```python
+for mask_cls_result, mask_pred_result in zip(pred_classes, pred_masks):
+    # mask_cls_result 是 [num_tokens, num_classes+1]
+    # mask_pred_result 是 [num_tokens, H, W]
+    per_sample_semantic_masks = semantic_inference(mask_cls_result, mask_pred_result)
+```
+
+```python
+self.model.mask_decoder.output_classifier_mlps = nn.Linear(
+    self.model.mask_decoder.hidden_size, num_classes + 1
+)
+```
+
+```yaml
+frozen_layers: ["mask_decoder.iou_prediction_head", "prompt_encoder"]
+```
+
+```python
+def semantic_inference(mask_cls, mask_pred):
+    mask_cls = F.softmax(mask_cls, dim=-1)[..., :-1]  # [num_queries, num_classes]
+    mask_pred = mask_pred.sigmoid()  # [num_queries, H, W]
+    semseg = torch.einsum("qc,qhw->chw", mask_cls, mask_pred)  # [num_classes, H, W]
+    return semseg
+```
+
+我发现了关键问题！让我验证 `num_mask_tokens` 和分类器初始化：
+
+让我查看默认 `num_mask_tokens` 配置和训练过程中的损失变化：
+
+我找到了根本原因！当分类器偏向"no-object"类时，`semantic_inference` 输出几乎全是 0。让我验证当前模型的配置：
+
+找到关键问题了！**`num_mask_tokens = 1`** 太少了！对于 4 类分割，应该至少有 4 个 mask tokens。
+
+让我修改脚本来增加 `num_mask_tokens`：
+
+```python
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+在 ACDC (来自 ABD 预处理数据) 上运行 Conv-LoRA + SAM + GSPO + Adapter 的
+训练 / 推理脚本。数据准备需先运行 prepare_acdc_conv_lora.py。
+"""
+import argparse
+import os
+
+import numpy as np
+import pandas as pd
+import torch
+from autogluon.multimodal import MultiModalPredictor
+
+
+def expand_path(df: pd.DataFrame, dataset_dir: str):
+    df = df.copy()
+    for col in ["image", "label"]:
+        df[col] = df[col].apply(lambda p: os.path.join(dataset_dir, p))
+    return df
+
+
+def visualize_samples(predictor: MultiModalPredictor, df: pd.DataFrame, vis_dir: str, max_samples: int = 8):
+    """
+    仅保存前 max_samples 个验证样本的预测掩码，避免磁盘爆炸。
+    会覆盖同名文件，文件数量固定。
+    """
+    from PIL import Image
+    os.makedirs(vis_dir, exist_ok=True)
+    subset = df.head(max_samples).copy()
+    try:
+        preds = predictor.predict(subset)
+    except Exception as e:
+        print(f"[VIS] predictor.predict failed: {e}")
+        return
+    
+    # preds 对于语义分割是一个 list of numpy arrays
+    if isinstance(preds, list):
+        for idx, (_, row) in enumerate(subset.iterrows()):
+            if idx >= len(preds):
+                break
+            mask = preds[idx]
+            if mask is None:
+                continue
+            # 保存 mask 为 PNG
+            mask_arr = np.array(mask, dtype=np.uint8)
+            if mask_arr.ndim == 3:
+                mask_arr = mask_arr.squeeze()  # 移除多余维度
+            img_name = os.path.splitext(os.path.basename(row["image"]))[0]
+            out_path = os.path.join(vis_dir, f"{img_name}_pred.png")
+            Image.fromarray(mask_arr).save(out_path)
+        print(f"[VIS] Saved up to {len(subset)} predicted masks to {vis_dir}")
+    elif hasattr(preds, 'columns') and "semantic_mask" in preds.columns:
+        for i, row in subset.iterrows():
+            mask = preds.loc[i, "semantic_mask"]
+            if mask is None:
+                continue
+            mask_arr = np.array(mask, dtype=np.uint8)
+            img_name = os.path.splitext(os.path.basename(row["image"]))[0]
+            out_path = os.path.join(vis_dir, f"{img_name}_pred.png")
+            Image.fromarray(mask_arr).save(out_path)
+        print(f"[VIS] Saved up to {len(subset)} predicted masks to {vis_dir}")
+    else:
+        print(f"[VIS] Unexpected prediction format: {type(preds)}; skip visualization.")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="ACDC semantic segmentation with Conv-LoRA + GSPO + Adapter")
+    parser.add_argument("--dataset_dir", type=str, default="datasets/acdc_conv_lora/acdc_conv_lora",
+                        help="由 prepare_acdc_conv_lora.py 生成的数据集根目录")
+    parser.add_argument("--seed", type=int, default=1337)
+    parser.add_argument("--rank", type=int, default=3)
+    parser.add_argument("--expert_num", type=int, default=8)
+    parser.add_argument("--num_gpus", type=int, default=1)
+    parser.add_argument("--output_dir", type=str, default="outputs/acdc_conv_lora")
+    parser.add_argument("--ckpt_path", type=str, default=None, help="若只做评估，指定已训练模型路径")
+    parser.add_argument("--per_gpu_batch_size", type=int, default=1)
+    parser.add_argument("--batch_size", type=int, default=4, help="有效 batch size；若大于 per_gpu_batch_size*num_gpus，则会做累积")
+    parser.add_argument("--eval_only", action="store_true", help="只做评估，不训练")
+    # GSPO
+    parser.add_argument("--gspo_enable", action="store_true")
+    parser.add_argument("--gspo_group_size", type=int, default=4)
+    parser.add_argument("--gspo_warmup_epochs", type=int, default=5)
+    parser.add_argument("--gspo_contrastive_weight", type=float, default=0.1)
+    parser.add_argument("--gspo_quality_momentum", type=float, default=0.9)
+    # GSPO-Adapter 扩展
+    parser.add_argument("--gspo_adapter_enable", action="store_true",
+                        help="启用 GSPO 对 Encoder Adapter 的质量反馈")
+    parser.add_argument("--gspo_adapter_momentum", type=float, default=0.9,
+                        help="GSPO Adapter 质量历史的动量项")
+    parser.add_argument("--gspo_adapter_scale_adaptation", action="store_true",
+                        help="启用基于质量历史的自适应缩放")
+    # Adapter
+    parser.add_argument("--adapter_enable", action="store_true")
+    parser.add_argument("--adapter_dim", type=int, default=64)
+    # 可视化配置
+    parser.add_argument("--vis_samples", type=int, default=8,
+                        help="训练结束后从验证集可视化的样本数（固定覆盖，不额外增长）")
+    parser.add_argument("--vis_output_dir", type=str, default="outputs/acdc_vis",
+                        help="可视化输出目录")
+    # Training epochs control
+    parser.add_argument("--max_epochs", type=int, default=50, help="Maximum training epochs")
+    parser.add_argument("--patience", type=int, default=10, help="Early stopping patience (set large to disable early stopping)")
+    # Loss function
+    parser.add_argument("--loss", type=str, default="mask2former_loss",
+                        choices=["dice_ce_loss", "mask2former_loss"],
+                        help="Loss function: mask2former_loss (recommended for SAM multi-class) or dice_ce_loss")
+    # Number of mask tokens (critical for Mask2Former-style multi-class segmentation)
+    parser.add_argument("--num_mask_tokens", type=int, default=10,
+                        help="Number of mask tokens/queries (should be >= num_classes for Mask2Former, recommended 10+)")
+    # Quick / Debug
+    parser.add_argument("--debug", action="store_true", help="仅处理少量样本以快速验证")
+    parser.add_argument("--quick_test", type=int, default=None, help="仅处理前 N 个测试样本")
+    args = parser.parse_args()
+
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    # 读取 CSV
+    train_df = expand_path(pd.read_csv(os.path.join(args.dataset_dir, "train.csv")), args.dataset_dir)
+    val_df = expand_path(pd.read_csv(os.path.join(args.dataset_dir, "val.csv")), args.dataset_dir)
+    test_df = expand_path(pd.read_csv(os.path.join(args.dataset_dir, "test.csv")), args.dataset_dir)
+
+    # 快速模式
+    if args.debug:
+        train_df = train_df.head(20)
+        val_df = val_df.head(10)
+        test_df = test_df.head(5)
+    if args.quick_test is not None:
+        test_df = test_df.head(args.quick_test)
+
+    # 默认训练设置（ACDC 多类别分割：0 背景 + 3 前景）
+    validation_metric = "dice"
+    lr = 1e-4
+
+    print(f"\n{'='*60}")
+    print(f"Loss function: {args.loss}")
+    print(f"Max epochs: {args.max_epochs}, Patience: {args.patience}")
+    print(f"{'='*60}\n")
+
+    hyperparameters = {
+        "optim.peft": "conv_lora",
+        "optim.lora.r": args.rank,
+        "optim.lora.conv_lora_expert_num": args.expert_num,
+        "env.num_gpus": args.num_gpus,
+        "optim.loss_func": args.loss,
+        "optim.max_epochs": args.max_epochs,
+        "optim.patience": args.patience,
+        "optim.lr": lr,
+        "env.per_gpu_batch_size": args.per_gpu_batch_size,
+        "env.batch_size": args.batch_size,
+    }
+
+    if args.gspo_enable:
+        hyperparameters.update({
+            "optim.lora.gspo_enabled": True,
+            "optim.lora.gspo_group_size": args.gspo_group_size,
+            "optim.lora.gspo_quality_momentum": args.gspo_quality_momentum,
+            "optim.lora.gspo_warmup_epochs": args.gspo_warmup_epochs,
+            "optim.lora.gspo_contrastive_weight": args.gspo_contrastive_weight,
+        })
+
+    if args.adapter_enable:
+        hyperparameters.update({
+            "model.sam.adapter_enabled": True,
+            "model.sam.adapter_dim": args.adapter_dim,
+        })
+        # GSPO-Adapter 扩展
+        if args.gspo_adapter_enable:
+            if not args.gspo_enable:
+                print("Warning: --gspo_adapter_enable requires --gspo_enable. Enabling GSPO automatically.")
+                args.gspo_enable = True
+                hyperparameters.update({
+                    "optim.lora.gspo_enabled": True,
+                    "optim.lora.gspo_group_size": args.gspo_group_size,
+                    "optim.lora.gspo_quality_momentum": args.gspo_quality_momentum,
+                    "optim.lora.gspo_warmup_epochs": args.gspo_warmup_epochs,
+                    "optim.lora.gspo_contrastive_weight": args.gspo_contrastive_weight,
+                })
+            hyperparameters.update({
+                "optim.gspo.adapter_enabled": True,
+                "optim.gspo.adapter_momentum": args.gspo_adapter_momentum,
+            })
+            if args.gspo_adapter_scale_adaptation:
+                hyperparameters.update({
+                    "optim.gspo.adapter_scale_adaptation": True,
+                    "model.sam.adapter_gspo_enabled": True,
+                    "model.sam.adapter_gspo_scale_adaptation": True,
+                })
+
+    if args.eval_only:
+        if not args.ckpt_path:
+            raise ValueError("--eval_only 需要指定 --ckpt_path")
+        predictor = MultiModalPredictor.load(args.ckpt_path)
+    else:
+        predictor = MultiModalPredictor(
+            problem_type="semantic_segmentation",
+            validation_metric=validation_metric,
+            eval_metric=validation_metric,
+            hyperparameters=hyperparameters,
+            label="label",
+        )
+        predictor.fit(train_data=train_df, tuning_data=val_df, seed=args.seed)
+
+    # 评估（IoU + Dice）
+    res = predictor.evaluate(test_df, metrics=["iou", "dice"])
+    print(f"Test results on ACDC: {res}")
+    with open(os.path.join(args.output_dir, "metrics_acdc.txt"), "a") as f:
+        f.write(f"{res}\n")
+
+    # 可视化一小部分验证样本的预测（覆盖写，数量固定）
+    visualize_samples(predictor, val_df, args.vis_output_dir, max_samples=args.vis_samples)
+
+
+if __name__ == "__main__":
+    main()
+
+
+```
+
+```python
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+在 ACDC (来自 ABD 预处理数据) 上运行 Conv-LoRA + SAM + GSPO + Adapter 的
+训练 / 推理脚本。数据准备需先运行 prepare_acdc_conv_lora.py。
+"""
+import argparse
+import os
+
+import numpy as np
+import pandas as pd
+import torch
+from autogluon.multimodal import MultiModalPredictor
+
+
+def expand_path(df: pd.DataFrame, dataset_dir: str):
+    df = df.copy()
+    for col in ["image", "label"]:
+        df[col] = df[col].apply(lambda p: os.path.join(dataset_dir, p))
+    return df
+
+
+def visualize_samples(predictor: MultiModalPredictor, df: pd.DataFrame, vis_dir: str, max_samples: int = 8):
+    """
+    仅保存前 max_samples 个验证样本的预测掩码，避免磁盘爆炸。
+    会覆盖同名文件，文件数量固定。
+    """
+    from PIL import Image
+    os.makedirs(vis_dir, exist_ok=True)
+    subset = df.head(max_samples).copy()
+    try:
+        preds = predictor.predict(subset)
+    except Exception as e:
+        print(f"[VIS] predictor.predict failed: {e}")
+        return
+    
+    # preds 对于语义分割是一个 list of numpy arrays
+    if isinstance(preds, list):
+        for idx, (_, row) in enumerate(subset.iterrows()):
+            if idx >= len(preds):
+                break
+            mask = preds[idx]
+            if mask is None:
+                continue
+            # 保存 mask 为 PNG
+            mask_arr = np.array(mask, dtype=np.uint8)
+            if mask_arr.ndim == 3:
+                mask_arr = mask_arr.squeeze()  # 移除多余维度
+            img_name = os.path.splitext(os.path.basename(row["image"]))[0]
+            out_path = os.path.join(vis_dir, f"{img_name}_pred.png")
+            Image.fromarray(mask_arr).save(out_path)
+        print(f"[VIS] Saved up to {len(subset)} predicted masks to {vis_dir}")
+    elif hasattr(preds, 'columns') and "semantic_mask" in preds.columns:
+        for i, row in subset.iterrows():
+            mask = preds.loc[i, "semantic_mask"]
+            if mask is None:
+                continue
+            mask_arr = np.array(mask, dtype=np.uint8)
+            img_name = os.path.splitext(os.path.basename(row["image"]))[0]
+            out_path = os.path.join(vis_dir, f"{img_name}_pred.png")
+            Image.fromarray(mask_arr).save(out_path)
+        print(f"[VIS] Saved up to {len(subset)} predicted masks to {vis_dir}")
+    else:
+        print(f"[VIS] Unexpected prediction format: {type(preds)}; skip visualization.")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="ACDC semantic segmentation with Conv-LoRA + GSPO + Adapter")
+    parser.add_argument("--dataset_dir", type=str, default="datasets/acdc_conv_lora/acdc_conv_lora",
+                        help="由 prepare_acdc_conv_lora.py 生成的数据集根目录")
+    parser.add_argument("--seed", type=int, default=1337)
+    parser.add_argument("--rank", type=int, default=3)
+    parser.add_argument("--expert_num", type=int, default=8)
+    parser.add_argument("--num_gpus", type=int, default=1)
+    parser.add_argument("--output_dir", type=str, default="outputs/acdc_conv_lora")
+    parser.add_argument("--ckpt_path", type=str, default=None, help="若只做评估，指定已训练模型路径")
+    parser.add_argument("--per_gpu_batch_size", type=int, default=1)
+    parser.add_argument("--batch_size", type=int, default=4, help="有效 batch size；若大于 per_gpu_batch_size*num_gpus，则会做累积")
+    parser.add_argument("--eval_only", action="store_true", help="只做评估，不训练")
+    # GSPO
+    parser.add_argument("--gspo_enable", action="store_true")
+    parser.add_argument("--gspo_group_size", type=int, default=4)
+    parser.add_argument("--gspo_warmup_epochs", type=int, default=5)
+    parser.add_argument("--gspo_contrastive_weight", type=float, default=0.1)
+    parser.add_argument("--gspo_quality_momentum", type=float, default=0.9)
+    # GSPO-Adapter 扩展
+    parser.add_argument("--gspo_adapter_enable", action="store_true",
+                        help="启用 GSPO 对 Encoder Adapter 的质量反馈")
+    parser.add_argument("--gspo_adapter_momentum", type=float, default=0.9,
+                        help="GSPO Adapter 质量历史的动量项")
+    parser.add_argument("--gspo_adapter_scale_adaptation", action="store_true",
+                        help="启用基于质量历史的自适应缩放")
+    # Adapter
+    parser.add_argument("--adapter_enable", action="store_true")
+    parser.add_argument("--adapter_dim", type=int, default=64)
+    # 可视化配置
+    parser.add_argument("--vis_samples", type=int, default=8,
+                        help="训练结束后从验证集可视化的样本数（固定覆盖，不额外增长）")
+    parser.add_argument("--vis_output_dir", type=str, default="outputs/acdc_vis",
+                        help="可视化输出目录")
+    # Training epochs control
+    parser.add_argument("--max_epochs", type=int, default=50, help="Maximum training epochs")
+    parser.add_argument("--patience", type=int, default=10, help="Early stopping patience (set large to disable early stopping)")
+    # Loss function
+    parser.add_argument("--loss", type=str, default="mask2former_loss",
+                        choices=["dice_ce_loss", "mask2former_loss"],
+                        help="Loss function: mask2former_loss (recommended for SAM multi-class) or dice_ce_loss")
+    # Number of mask tokens (critical for Mask2Former-style multi-class segmentation)
+    parser.add_argument("--num_mask_tokens", type=int, default=10,
+                        help="Number of mask tokens/queries (should be >= num_classes for Mask2Former, recommended 10+)")
+    # Quick / Debug
+    parser.add_argument("--debug", action="store_true", help="仅处理少量样本以快速验证")
+    parser.add_argument("--quick_test", type=int, default=None, help="仅处理前 N 个测试样本")
+    args = parser.parse_args()
+
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    # 读取 CSV
+    train_df = expand_path(pd.read_csv(os.path.join(args.dataset_dir, "train.csv")), args.dataset_dir)
+    val_df = expand_path(pd.read_csv(os.path.join(args.dataset_dir, "val.csv")), args.dataset_dir)
+    test_df = expand_path(pd.read_csv(os.path.join(args.dataset_dir, "test.csv")), args.dataset_dir)
+
+    # 快速模式
+    if args.debug:
+        train_df = train_df.head(20)
+        val_df = val_df.head(10)
+        test_df = test_df.head(5)
+    if args.quick_test is not None:
+        test_df = test_df.head(args.quick_test)
+
+    # 默认训练设置（ACDC 多类别分割：0 背景 + 3 前景）
+    validation_metric = "dice"
+    lr = 1e-4
+
+    print(f"\n{'='*60}")
+    print(f"Loss function: {args.loss}")
+    print(f"Max epochs: {args.max_epochs}, Patience: {args.patience}")
+    print(f"{'='*60}\n")
+
+    hyperparameters = {
+        "optim.peft": "conv_lora",
+        "optim.lora.r": args.rank,
+        "optim.lora.conv_lora_expert_num": args.expert_num,
+        "env.num_gpus": args.num_gpus,
+        "optim.loss_func": args.loss,
+        "optim.max_epochs": args.max_epochs,
+        "optim.patience": args.patience,
+        "optim.lr": lr,
+        "env.per_gpu_batch_size": args.per_gpu_batch_size,
+        "env.batch_size": args.batch_size,
+        # Critical for Mask2Former-style multi-class segmentation: need enough mask tokens
+        "model.sam.num_mask_tokens": args.num_mask_tokens,
+    }
+
+    if args.gspo_enable:
+        hyperparameters.update({
+            "optim.lora.gspo_enabled": True,
+            "optim.lora.gspo_group_size": args.gspo_group_size,
+            "optim.lora.gspo_quality_momentum": args.gspo_quality_momentum,
+            "optim.lora.gspo_warmup_epochs": args.gspo_warmup_epochs,
+            "optim.lora.gspo_contrastive_weight": args.gspo_contrastive_weight,
+        })
+
+    if args.adapter_enable:
+        hyperparameters.update({
+            "model.sam.adapter_enabled": True,
+            "model.sam.adapter_dim": args.adapter_dim,
+        })
+        # GSPO-Adapter 扩展
+        if args.gspo_adapter_enable:
+            if not args.gspo_enable:
+                print("Warning: --gspo_adapter_enable requires --gspo_enable. Enabling GSPO automatically.")
+                args.gspo_enable = True
+                hyperparameters.update({
+                    "optim.lora.gspo_enabled": True,
+                    "optim.lora.gspo_group_size": args.gspo_group_size,
+                    "optim.lora.gspo_quality_momentum": args.gspo_quality_momentum,
+                    "optim.lora.gspo_warmup_epochs": args.gspo_warmup_epochs,
+                    "optim.lora.gspo_contrastive_weight": args.gspo_contrastive_weight,
+                })
+            hyperparameters.update({
+                "optim.gspo.adapter_enabled": True,
+                "optim.gspo.adapter_momentum": args.gspo_adapter_momentum,
+            })
+            if args.gspo_adapter_scale_adaptation:
+                hyperparameters.update({
+                    "optim.gspo.adapter_scale_adaptation": True,
+                    "model.sam.adapter_gspo_enabled": True,
+                    "model.sam.adapter_gspo_scale_adaptation": True,
+                })
+
+    if args.eval_only:
+        if not args.ckpt_path:
+            raise ValueError("--eval_only 需要指定 --ckpt_path")
+        predictor = MultiModalPredictor.load(args.ckpt_path)
+    else:
+        predictor = MultiModalPredictor(
+            problem_type="semantic_segmentation",
+            validation_metric=validation_metric,
+            eval_metric=validation_metric,
+            hyperparameters=hyperparameters,
+            label="label",
+        )
+        predictor.fit(train_data=train_df, tuning_data=val_df, seed=args.seed)
+
+    # 评估（IoU + Dice）
+    res = predictor.evaluate(test_df, metrics=["iou", "dice"])
+    print(f"Test results on ACDC: {res}")
+    with open(os.path.join(args.output_dir, "metrics_acdc.txt"), "a") as f:
+        f.write(f"{res}\n")
+
+    # 可视化一小部分验证样本的预测（覆盖写，数量固定）
+    visualize_samples(predictor, val_df, args.vis_output_dir, max_samples=args.vis_samples)
+
+
+if __name__ == "__main__":
+    main()
+
+
+```
+
+现在让我还需要打印配置信息用于调试，并检查 lints：
+
+```python
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+在 ACDC (来自 ABD 预处理数据) 上运行 Conv-LoRA + SAM + GSPO + Adapter 的
+训练 / 推理脚本。数据准备需先运行 prepare_acdc_conv_lora.py。
+"""
+import argparse
+import os
+
+import numpy as np
+import pandas as pd
+import torch
+from autogluon.multimodal import MultiModalPredictor
+
+
+def expand_path(df: pd.DataFrame, dataset_dir: str):
+    df = df.copy()
+    for col in ["image", "label"]:
+        df[col] = df[col].apply(lambda p: os.path.join(dataset_dir, p))
+    return df
+
+
+def visualize_samples(predictor: MultiModalPredictor, df: pd.DataFrame, vis_dir: str, max_samples: int = 8):
+    """
+    仅保存前 max_samples 个验证样本的预测掩码，避免磁盘爆炸。
+    会覆盖同名文件，文件数量固定。
+    """
+    from PIL import Image
+    os.makedirs(vis_dir, exist_ok=True)
+    subset = df.head(max_samples).copy()
+    try:
+        preds = predictor.predict(subset)
+    except Exception as e:
+        print(f"[VIS] predictor.predict failed: {e}")
+        return
+    
+    # preds 对于语义分割是一个 list of numpy arrays
+    if isinstance(preds, list):
+        for idx, (_, row) in enumerate(subset.iterrows()):
+            if idx >= len(preds):
+                break
+            mask = preds[idx]
+            if mask is None:
+                continue
+            # 保存 mask 为 PNG
+            mask_arr = np.array(mask, dtype=np.uint8)
+            if mask_arr.ndim == 3:
+                mask_arr = mask_arr.squeeze()  # 移除多余维度
+            img_name = os.path.splitext(os.path.basename(row["image"]))[0]
+            out_path = os.path.join(vis_dir, f"{img_name}_pred.png")
+            Image.fromarray(mask_arr).save(out_path)
+        print(f"[VIS] Saved up to {len(subset)} predicted masks to {vis_dir}")
+    elif hasattr(preds, 'columns') and "semantic_mask" in preds.columns:
+        for i, row in subset.iterrows():
+            mask = preds.loc[i, "semantic_mask"]
+            if mask is None:
+                continue
+            mask_arr = np.array(mask, dtype=np.uint8)
+            img_name = os.path.splitext(os.path.basename(row["image"]))[0]
+            out_path = os.path.join(vis_dir, f"{img_name}_pred.png")
+            Image.fromarray(mask_arr).save(out_path)
+        print(f"[VIS] Saved up to {len(subset)} predicted masks to {vis_dir}")
+    else:
+        print(f"[VIS] Unexpected prediction format: {type(preds)}; skip visualization.")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="ACDC semantic segmentation with Conv-LoRA + GSPO + Adapter")
+    parser.add_argument("--dataset_dir", type=str, default="datasets/acdc_conv_lora/acdc_conv_lora",
+                        help="由 prepare_acdc_conv_lora.py 生成的数据集根目录")
+    parser.add_argument("--seed", type=int, default=1337)
+    parser.add_argument("--rank", type=int, default=3)
+    parser.add_argument("--expert_num", type=int, default=8)
+    parser.add_argument("--num_gpus", type=int, default=1)
+    parser.add_argument("--output_dir", type=str, default="outputs/acdc_conv_lora")
+    parser.add_argument("--ckpt_path", type=str, default=None, help="若只做评估，指定已训练模型路径")
+    parser.add_argument("--per_gpu_batch_size", type=int, default=1)
+    parser.add_argument("--batch_size", type=int, default=4, help="有效 batch size；若大于 per_gpu_batch_size*num_gpus，则会做累积")
+    parser.add_argument("--eval_only", action="store_true", help="只做评估，不训练")
+    # GSPO
+    parser.add_argument("--gspo_enable", action="store_true")
+    parser.add_argument("--gspo_group_size", type=int, default=4)
+    parser.add_argument("--gspo_warmup_epochs", type=int, default=5)
+    parser.add_argument("--gspo_contrastive_weight", type=float, default=0.1)
+    parser.add_argument("--gspo_quality_momentum", type=float, default=0.9)
+    # GSPO-Adapter 扩展
+    parser.add_argument("--gspo_adapter_enable", action="store_true",
+                        help="启用 GSPO 对 Encoder Adapter 的质量反馈")
+    parser.add_argument("--gspo_adapter_momentum", type=float, default=0.9,
+                        help="GSPO Adapter 质量历史的动量项")
+    parser.add_argument("--gspo_adapter_scale_adaptation", action="store_true",
+                        help="启用基于质量历史的自适应缩放")
+    # Adapter
+    parser.add_argument("--adapter_enable", action="store_true")
+    parser.add_argument("--adapter_dim", type=int, default=64)
+    # 可视化配置
+    parser.add_argument("--vis_samples", type=int, default=8,
+                        help="训练结束后从验证集可视化的样本数（固定覆盖，不额外增长）")
+    parser.add_argument("--vis_output_dir", type=str, default="outputs/acdc_vis",
+                        help="可视化输出目录")
+    # Training epochs control
+    parser.add_argument("--max_epochs", type=int, default=50, help="Maximum training epochs")
+    parser.add_argument("--patience", type=int, default=10, help="Early stopping patience (set large to disable early stopping)")
+    # Loss function
+    parser.add_argument("--loss", type=str, default="mask2former_loss",
+                        choices=["dice_ce_loss", "mask2former_loss"],
+                        help="Loss function: mask2former_loss (recommended for SAM multi-class) or dice_ce_loss")
+    # Number of mask tokens (critical for Mask2Former-style multi-class segmentation)
+    parser.add_argument("--num_mask_tokens", type=int, default=10,
+                        help="Number of mask tokens/queries (should be >= num_classes for Mask2Former, recommended 10+)")
+    # Quick / Debug
+    parser.add_argument("--debug", action="store_true", help="仅处理少量样本以快速验证")
+    parser.add_argument("--quick_test", type=int, default=None, help="仅处理前 N 个测试样本")
+    args = parser.parse_args()
+
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    # 读取 CSV
+    train_df = expand_path(pd.read_csv(os.path.join(args.dataset_dir, "train.csv")), args.dataset_dir)
+    val_df = expand_path(pd.read_csv(os.path.join(args.dataset_dir, "val.csv")), args.dataset_dir)
+    test_df = expand_path(pd.read_csv(os.path.join(args.dataset_dir, "test.csv")), args.dataset_dir)
+
+    # 快速模式
+    if args.debug:
+        train_df = train_df.head(20)
+        val_df = val_df.head(10)
+        test_df = test_df.head(5)
+    if args.quick_test is not None:
+        test_df = test_df.head(args.quick_test)
+
+    # 默认训练设置（ACDC 多类别分割：0 背景 + 3 前景）
+    validation_metric = "dice"
+    lr = 1e-4
+
+    print(f"\n{'='*60}")
+    print(f"Loss function: {args.loss}")
+    print(f"Max epochs: {args.max_epochs}, Patience: {args.patience}")
+    print(f"Num mask tokens: {args.num_mask_tokens} (critical for Mask2Former multi-class)")
+    print(f"{'='*60}\n")
+
+    hyperparameters = {
+        "optim.peft": "conv_lora",
+        "optim.lora.r": args.rank,
+        "optim.lora.conv_lora_expert_num": args.expert_num,
+        "env.num_gpus": args.num_gpus,
+        "optim.loss_func": args.loss,
+        "optim.max_epochs": args.max_epochs,
+        "optim.patience": args.patience,
+        "optim.lr": lr,
+        "env.per_gpu_batch_size": args.per_gpu_batch_size,
+        "env.batch_size": args.batch_size,
+        # Critical for Mask2Former-style multi-class segmentation: need enough mask tokens
+        "model.sam.num_mask_tokens": args.num_mask_tokens,
+    }
+
+    if args.gspo_enable:
+        hyperparameters.update({
+            "optim.lora.gspo_enabled": True,
+            "optim.lora.gspo_group_size": args.gspo_group_size,
+            "optim.lora.gspo_quality_momentum": args.gspo_quality_momentum,
+            "optim.lora.gspo_warmup_epochs": args.gspo_warmup_epochs,
+            "optim.lora.gspo_contrastive_weight": args.gspo_contrastive_weight,
+        })
+
+    if args.adapter_enable:
+        hyperparameters.update({
+            "model.sam.adapter_enabled": True,
+            "model.sam.adapter_dim": args.adapter_dim,
+        })
+        # GSPO-Adapter 扩展
+        if args.gspo_adapter_enable:
+            if not args.gspo_enable:
+                print("Warning: --gspo_adapter_enable requires --gspo_enable. Enabling GSPO automatically.")
+                args.gspo_enable = True
+                hyperparameters.update({
+                    "optim.lora.gspo_enabled": True,
+                    "optim.lora.gspo_group_size": args.gspo_group_size,
+                    "optim.lora.gspo_quality_momentum": args.gspo_quality_momentum,
+                    "optim.lora.gspo_warmup_epochs": args.gspo_warmup_epochs,
+                    "optim.lora.gspo_contrastive_weight": args.gspo_contrastive_weight,
+                })
+            hyperparameters.update({
+                "optim.gspo.adapter_enabled": True,
+                "optim.gspo.adapter_momentum": args.gspo_adapter_momentum,
+            })
+            if args.gspo_adapter_scale_adaptation:
+                hyperparameters.update({
+                    "optim.gspo.adapter_scale_adaptation": True,
+                    "model.sam.adapter_gspo_enabled": True,
+                    "model.sam.adapter_gspo_scale_adaptation": True,
+                })
+
+    if args.eval_only:
+        if not args.ckpt_path:
+            raise ValueError("--eval_only 需要指定 --ckpt_path")
+        predictor = MultiModalPredictor.load(args.ckpt_path)
+    else:
+        predictor = MultiModalPredictor(
+            problem_type="semantic_segmentation",
+            validation_metric=validation_metric,
+            eval_metric=validation_metric,
+            hyperparameters=hyperparameters,
+            label="label",
+        )
+        predictor.fit(train_data=train_df, tuning_data=val_df, seed=args.seed)
+
+    # 评估（IoU + Dice）
+    res = predictor.evaluate(test_df, metrics=["iou", "dice"])
+    print(f"Test results on ACDC: {res}")
+    with open(os.path.join(args.output_dir, "metrics_acdc.txt"), "a") as f:
+        f.write(f"{res}\n")
+
+    # 可视化一小部分验证样本的预测（覆盖写，数量固定）
+    visualize_samples(predictor, val_df, args.vis_output_dir, max_samples=args.vis_samples)
+
+
+if __name__ == "__main__":
+    main()
+
+
+```
+
+现在让我启动训练来验证修复（增加 `num_mask_tokens`）：
+
+让我监控训练进度：
+
+训练开始了，配置显示 `Num mask tokens: 10`。让我等待第一个 epoch 查看验证结果：
+
+很好！**Epoch 0 的 val_dice = 0.27349**，比之前的 0.24471 有提升！让我继续监控更多 epochs：
+
+**太好了！Epoch 1: val_dice = 0.48972**！这是巨大的进步（从 0.27 到 0.49）！继续监控：
 

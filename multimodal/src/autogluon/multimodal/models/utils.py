@@ -675,7 +675,7 @@ def apply_sigmoid(output: Dict):
 def apply_sigmoid_and_semantic_mask(output: Dict):
     """
     Apply sigmoid to logits and also store in SEMANTIC_MASK for semantic segmentation.
-    Handles both binary (single channel) and multi-class cases.
+    Handles both binary (single channel), multi-class cases, and SAM multi-class output.
 
     Parameters
     ----------
@@ -686,21 +686,41 @@ def apply_sigmoid_and_semantic_mask(output: Dict):
     -------
     The output with sigmoid-transformed logits and SEMANTIC_MASK.
     """
+    def semantic_inference(mask_cls, mask_pred):
+        """Combine mask and class predictions following Mask2Former approach."""
+        mask_cls = F.softmax(mask_cls, dim=-1)[..., :-1]  # Remove "no object" class
+        mask_pred = mask_pred.sigmoid()
+        semseg = torch.einsum("qc,qhw->chw", mask_cls, mask_pred)
+        return semseg
+    
     for k, v in output.items():
         logits = v[LOGITS].float()
-        # Apply sigmoid
-        sigmoid_logits = torch.sigmoid(logits)
-        output[k][LOGITS] = sigmoid_logits
         
-        # For multi-class segmentation (num_classes > 1), also set SEMANTIC_MASK
-        # This is needed for evaluation when _output_shape > 1
-        # The logits shape is [B, C, H, W] where C is the number of classes
-        if logits.dim() == 4 and logits.shape[1] > 1:
-            # Multi-class: use softmax for SEMANTIC_MASK (proper probability distribution)
-            output[k][SEMANTIC_MASK] = F.softmax(logits, dim=1)
+        # Check if this is SAM multi-class output (has CLASS_LOGITS)
+        if CLASS_LOGITS in v:
+            # SAM multi-class: combine mask and class predictions
+            pred_classes = v[CLASS_LOGITS]  # [B, num_queries, num_classes+1]
+            pred_masks = logits  # [B, num_queries, H, W]
+            semantic_masks = []
+            for mask_cls_result, mask_pred_result in zip(pred_classes, pred_masks):
+                per_sample_semantic_masks = semantic_inference(mask_cls_result, mask_pred_result)
+                semantic_masks.append(per_sample_semantic_masks)
+            semantic_masks = torch.stack(semantic_masks, dim=0)
+            output[k][SEMANTIC_MASK] = semantic_masks
+            # Also apply sigmoid to logits for consistency
+            output[k][LOGITS] = torch.sigmoid(logits)
         else:
-            # Binary: SEMANTIC_MASK is same as sigmoid output
-            output[k][SEMANTIC_MASK] = sigmoid_logits
+            # Standard output format
+            sigmoid_logits = torch.sigmoid(logits)
+            output[k][LOGITS] = sigmoid_logits
+            
+            # For multi-class segmentation (num_classes > 1), also set SEMANTIC_MASK
+            if logits.dim() == 4 and logits.shape[1] > 1:
+                # Multi-class: use softmax for SEMANTIC_MASK (proper probability distribution)
+                output[k][SEMANTIC_MASK] = F.softmax(logits, dim=1)
+            else:
+                # Binary: SEMANTIC_MASK is same as sigmoid output
+                output[k][SEMANTIC_MASK] = sigmoid_logits
     return output
 
 
@@ -708,6 +728,11 @@ def apply_softmax_semantic_mask(output: Dict):
     """
     Apply softmax to logits and store in SEMANTIC_MASK for multi-class segmentation.
     Used with DiceCELoss and other multi-class losses.
+    
+    Handles two cases:
+    1. Standard multi-class: logits shape [B, C, H, W] - apply softmax directly
+    2. SAM multi-class: logits [B, num_queries, H, W] + CLASS_LOGITS [B, num_queries, num_classes+1]
+       - use semantic_inference to combine mask and class predictions
 
     Parameters
     ----------
@@ -718,12 +743,32 @@ def apply_softmax_semantic_mask(output: Dict):
     -------
     The output with softmax-transformed logits stored in both LOGITS and SEMANTIC_MASK.
     """
+    def semantic_inference(mask_cls, mask_pred):
+        """Combine mask and class predictions following Mask2Former approach."""
+        mask_cls = F.softmax(mask_cls, dim=-1)[..., :-1]  # Remove "no object" class
+        mask_pred = mask_pred.sigmoid()
+        semseg = torch.einsum("qc,qhw->chw", mask_cls, mask_pred)
+        return semseg
+    
     for k, v in output.items():
         logits = v[LOGITS].float()
-        # Apply softmax along class dimension for multi-class segmentation
-        softmax_logits = F.softmax(logits, dim=1)
-        output[k][LOGITS] = softmax_logits
-        output[k][SEMANTIC_MASK] = softmax_logits
+        
+        # Check if this is SAM multi-class output (has CLASS_LOGITS)
+        if CLASS_LOGITS in v:
+            # SAM multi-class: combine mask and class predictions
+            pred_classes = v[CLASS_LOGITS]  # [B, num_queries, num_classes+1]
+            pred_masks = logits  # [B, num_queries, H, W]
+            semantic_masks = []
+            for mask_cls_result, mask_pred_result in zip(pred_classes, pred_masks):
+                per_sample_semantic_masks = semantic_inference(mask_cls_result, mask_pred_result)
+                semantic_masks.append(per_sample_semantic_masks)
+            semantic_masks = torch.stack(semantic_masks, dim=0)
+            output[k][SEMANTIC_MASK] = semantic_masks
+        else:
+            # Standard multi-class: apply softmax directly
+            softmax_logits = F.softmax(logits, dim=1)
+            output[k][LOGITS] = softmax_logits
+            output[k][SEMANTIC_MASK] = softmax_logits
     return output
 
 
