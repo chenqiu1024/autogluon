@@ -25,6 +25,7 @@ def visualize_samples(predictor: MultiModalPredictor, df: pd.DataFrame, vis_dir:
     仅保存前 max_samples 个验证样本的预测掩码，避免磁盘爆炸。
     会覆盖同名文件，文件数量固定。
     """
+    from PIL import Image
     os.makedirs(vis_dir, exist_ok=True)
     subset = df.head(max_samples).copy()
     try:
@@ -32,20 +33,35 @@ def visualize_samples(predictor: MultiModalPredictor, df: pd.DataFrame, vis_dir:
     except Exception as e:
         print(f"[VIS] predictor.predict failed: {e}")
         return
-    if "semantic_mask" not in preds.columns:
-        print("[VIS] semantic_mask not found in predictions; skip visualization.")
-        return
-    for i, row in subset.iterrows():
-        mask = preds.loc[i, "semantic_mask"]
-        if mask is None:
-            continue
-        # 保存 mask 为 PNG
-        from PIL import Image
-        mask_arr = np.array(mask, dtype=np.uint8)
-        img_name = os.path.splitext(os.path.basename(row["image"]))[0]
-        out_path = os.path.join(vis_dir, f"{img_name}_pred.png")
-        Image.fromarray(mask_arr).save(out_path)
-    print(f"[VIS] Saved up to {len(subset)} predicted masks to {vis_dir}")
+    
+    # preds 对于语义分割是一个 list of numpy arrays
+    if isinstance(preds, list):
+        for idx, (_, row) in enumerate(subset.iterrows()):
+            if idx >= len(preds):
+                break
+            mask = preds[idx]
+            if mask is None:
+                continue
+            # 保存 mask 为 PNG
+            mask_arr = np.array(mask, dtype=np.uint8)
+            if mask_arr.ndim == 3:
+                mask_arr = mask_arr.squeeze()  # 移除多余维度
+            img_name = os.path.splitext(os.path.basename(row["image"]))[0]
+            out_path = os.path.join(vis_dir, f"{img_name}_pred.png")
+            Image.fromarray(mask_arr).save(out_path)
+        print(f"[VIS] Saved up to {len(subset)} predicted masks to {vis_dir}")
+    elif hasattr(preds, 'columns') and "semantic_mask" in preds.columns:
+        for i, row in subset.iterrows():
+            mask = preds.loc[i, "semantic_mask"]
+            if mask is None:
+                continue
+            mask_arr = np.array(mask, dtype=np.uint8)
+            img_name = os.path.splitext(os.path.basename(row["image"]))[0]
+            out_path = os.path.join(vis_dir, f"{img_name}_pred.png")
+            Image.fromarray(mask_arr).save(out_path)
+        print(f"[VIS] Saved up to {len(subset)} predicted masks to {vis_dir}")
+    else:
+        print(f"[VIS] Unexpected prediction format: {type(preds)}; skip visualization.")
 
 
 def main():
