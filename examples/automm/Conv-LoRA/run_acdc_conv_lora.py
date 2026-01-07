@@ -98,6 +98,13 @@ def main():
                         help="训练结束后从验证集可视化的样本数（固定覆盖，不额外增长）")
     parser.add_argument("--vis_output_dir", type=str, default="outputs/acdc_vis",
                         help="可视化输出目录")
+    # Training epochs control
+    parser.add_argument("--max_epochs", type=int, default=50, help="Maximum training epochs")
+    parser.add_argument("--patience", type=int, default=10, help="Early stopping patience (set large to disable early stopping)")
+    # Loss function
+    parser.add_argument("--loss", type=str, default="mask2former_loss",
+                        choices=["dice_ce_loss", "mask2former_loss"],
+                        help="Loss function: mask2former_loss (recommended for SAM multi-class) or dice_ce_loss")
     # Quick / Debug
     parser.add_argument("--debug", action="store_true", help="仅处理少量样本以快速验证")
     parser.add_argument("--quick_test", type=int, default=None, help="仅处理前 N 个测试样本")
@@ -120,18 +127,21 @@ def main():
 
     # 默认训练设置（ACDC 多类别分割：0 背景 + 3 前景）
     validation_metric = "dice"
-    # 结构损失在多类时收敛较慢，改为 dice_ce_loss（Dice+CE 混合，更稳）
-    loss = "dice_ce_loss"
-    max_epoch = 50
     lr = 1e-4
+
+    print(f"\n{'='*60}")
+    print(f"Loss function: {args.loss}")
+    print(f"Max epochs: {args.max_epochs}, Patience: {args.patience}")
+    print(f"{'='*60}\n")
 
     hyperparameters = {
         "optim.peft": "conv_lora",
         "optim.lora.r": args.rank,
         "optim.lora.conv_lora_expert_num": args.expert_num,
         "env.num_gpus": args.num_gpus,
-        "optim.loss_func": loss,
-        "optim.max_epochs": max_epoch,
+        "optim.loss_func": args.loss,
+        "optim.max_epochs": args.max_epochs,
+        "optim.patience": args.patience,
         "optim.lr": lr,
         "env.per_gpu_batch_size": args.per_gpu_batch_size,
         "env.batch_size": args.batch_size,

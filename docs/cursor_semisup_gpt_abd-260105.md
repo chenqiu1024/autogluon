@@ -1,5 +1,5 @@
 # ACDC 数据集文件路径不匹配
-_Exported on 1/6/2026 at 00:15:01 PST from Cursor (2.2.44)_
+_Exported on 1/6/2026 at 20:45:42 PST from Cursor (2.2.44)_
 
 ---
 
@@ -26007,5 +26007,1403 @@ nohup python3 run_acdc_conv_lora.py \
   --vis_samples 8 \
   --vis_output_dir outputs/acdc_vis \
 > outputs/acdc_dice_ce_loss.log 2>&1 &
+```
+
+---
+
+**User**
+
+继续除错：autogluon/examples/automm/Conv-LoRA/outputs/acdc_dice_ce_loss-260105.log
+
+---
+
+**Cursor**
+
+训练已成功完成！测试结果：**IoU: 0.241, Dice: 0.245**
+
+最后有一个可视化函数的小错误。让我查看并修复它：
+
+```python
+def visualize_samples(predictor, df, vis_dir, max_samples=8):
+    """
+    仅保存前 max_samples 个验证样本的预测掩码，避免磁盘爆炸。
+    会覆盖同名文件，文件数量固定。
+    """
+    from PIL import Image
+    os.makedirs(vis_dir, exist_ok=True)
+    subset = df.head(max_samples).copy()
+    try:
+        preds = predictor.predict(subset)
+    except Exception as e:
+        print(f"[VIS] predictor.predict failed: {e}")
+        return
+    
+    # preds 对于语义分割是一个 list of numpy arrays
+    if isinstance(preds, list):
+        for idx, (_, row) in enumerate(subset.iterrows()):
+            if idx >= len(preds):
+                break
+            mask = preds[idx]
+            if mask is None:
+                continue
+            # 保存 mask 为 PNG
+            mask_arr = np.array(mask, dtype=np.uint8)
+            if mask_arr.ndim == 3:
+                mask_arr = mask_arr.squeeze()  # 移除多余维度
+            img_name = os.path.splitext(os.path.basename(row["image"]))[0]
+            out_path = os.path.join(vis_dir, f"{img_name}_pred.png")
+            Image.fromarray(mask_arr).save(out_path)
+        print(f"[VIS] Saved up to {len(subset)} predicted masks to {vis_dir}")
+    elif hasattr(preds, 'columns') and "semantic_mask" in preds.columns:
+        for i, row in subset.iterrows():
+            mask = preds.loc[i, "semantic_mask"]
+            if mask is None:
+                continue
+            mask_arr = np.array(mask, dtype=np.uint8)
+            img_name = os.path.splitext(os.path.basename(row["image"]))[0]
+            out_path = os.path.join(vis_dir, f"{img_name}_pred.png")
+            Image.fromarray(mask_arr).save(out_path)
+        print(f"[VIS] Saved up to {len(subset)} predicted masks to {vis_dir}")
+    else:
+        print(f"[VIS] Unexpected prediction format: {type(preds)}; skip visualization.")
+```
+
+```python
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+在 ACDC (来自 ABD 预处理数据) 上运行 Conv-LoRA + SAM + GSPO + Adapter 的
+训练 / 推理脚本。数据准备需先运行 prepare_acdc_conv_lora.py。
+"""
+import argparse
+import os
+
+import numpy as np
+import pandas as pd
+import torch
+from autogluon.multimodal import MultiModalPredictor
+
+
+def expand_path(df: pd.DataFrame, dataset_dir: str):
+    df = df.copy()
+    for col in ["image", "label"]:
+        df[col] = df[col].apply(lambda p: os.path.join(dataset_dir, p))
+    return df
+
+
+def visualize_samples(predictor: MultiModalPredictor, df: pd.DataFrame, vis_dir: str, max_samples: int = 8):
+    """
+    仅保存前 max_samples 个验证样本的预测掩码，避免磁盘爆炸。
+    会覆盖同名文件，文件数量固定。
+    """
+    from PIL import Image
+    os.makedirs(vis_dir, exist_ok=True)
+    subset = df.head(max_samples).copy()
+    try:
+        preds = predictor.predict(subset)
+    except Exception as e:
+        print(f"[VIS] predictor.predict failed: {e}")
+        return
+    
+    # preds 对于语义分割是一个 list of numpy arrays
+    if isinstance(preds, list):
+        for idx, (_, row) in enumerate(subset.iterrows()):
+            if idx >= len(preds):
+                break
+            mask = preds[idx]
+            if mask is None:
+                continue
+            # 保存 mask 为 PNG
+            mask_arr = np.array(mask, dtype=np.uint8)
+            if mask_arr.ndim == 3:
+                mask_arr = mask_arr.squeeze()  # 移除多余维度
+            img_name = os.path.splitext(os.path.basename(row["image"]))[0]
+            out_path = os.path.join(vis_dir, f"{img_name}_pred.png")
+            Image.fromarray(mask_arr).save(out_path)
+        print(f"[VIS] Saved up to {len(subset)} predicted masks to {vis_dir}")
+    elif hasattr(preds, 'columns') and "semantic_mask" in preds.columns:
+        for i, row in subset.iterrows():
+            mask = preds.loc[i, "semantic_mask"]
+            if mask is None:
+                continue
+            mask_arr = np.array(mask, dtype=np.uint8)
+            img_name = os.path.splitext(os.path.basename(row["image"]))[0]
+            out_path = os.path.join(vis_dir, f"{img_name}_pred.png")
+            Image.fromarray(mask_arr).save(out_path)
+        print(f"[VIS] Saved up to {len(subset)} predicted masks to {vis_dir}")
+    else:
+        print(f"[VIS] Unexpected prediction format: {type(preds)}; skip visualization.")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="ACDC semantic segmentation with Conv-LoRA + GSPO + Adapter")
+    parser.add_argument("--dataset_dir", type=str, default="datasets/acdc_conv_lora/acdc_conv_lora",
+                        help="由 prepare_acdc_conv_lora.py 生成的数据集根目录")
+    parser.add_argument("--seed", type=int, default=1337)
+    parser.add_argument("--rank", type=int, default=3)
+    parser.add_argument("--expert_num", type=int, default=8)
+    parser.add_argument("--num_gpus", type=int, default=1)
+    parser.add_argument("--output_dir", type=str, default="outputs/acdc_conv_lora")
+    parser.add_argument("--ckpt_path", type=str, default=None, help="若只做评估，指定已训练模型路径")
+    parser.add_argument("--per_gpu_batch_size", type=int, default=1)
+    parser.add_argument("--batch_size", type=int, default=4, help="有效 batch size；若大于 per_gpu_batch_size*num_gpus，则会做累积")
+    parser.add_argument("--eval_only", action="store_true", help="只做评估，不训练")
+    # GSPO
+    parser.add_argument("--gspo_enable", action="store_true")
+    parser.add_argument("--gspo_group_size", type=int, default=4)
+    parser.add_argument("--gspo_warmup_epochs", type=int, default=5)
+    parser.add_argument("--gspo_contrastive_weight", type=float, default=0.1)
+    parser.add_argument("--gspo_quality_momentum", type=float, default=0.9)
+    # GSPO-Adapter 扩展
+    parser.add_argument("--gspo_adapter_enable", action="store_true",
+                        help="启用 GSPO 对 Encoder Adapter 的质量反馈")
+    parser.add_argument("--gspo_adapter_momentum", type=float, default=0.9,
+                        help="GSPO Adapter 质量历史的动量项")
+    parser.add_argument("--gspo_adapter_scale_adaptation", action="store_true",
+                        help="启用基于质量历史的自适应缩放")
+    # Adapter
+    parser.add_argument("--adapter_enable", action="store_true")
+    parser.add_argument("--adapter_dim", type=int, default=64)
+    # 可视化配置
+    parser.add_argument("--vis_samples", type=int, default=8,
+                        help="训练结束后从验证集可视化的样本数（固定覆盖，不额外增长）")
+    parser.add_argument("--vis_output_dir", type=str, default="outputs/acdc_vis",
+                        help="可视化输出目录")
+    # Quick / Debug
+    parser.add_argument("--debug", action="store_true", help="仅处理少量样本以快速验证")
+    parser.add_argument("--quick_test", type=int, default=None, help="仅处理前 N 个测试样本")
+    args = parser.parse_args()
+
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    # 读取 CSV
+    train_df = expand_path(pd.read_csv(os.path.join(args.dataset_dir, "train.csv")), args.dataset_dir)
+    val_df = expand_path(pd.read_csv(os.path.join(args.dataset_dir, "val.csv")), args.dataset_dir)
+    test_df = expand_path(pd.read_csv(os.path.join(args.dataset_dir, "test.csv")), args.dataset_dir)
+
+    # 快速模式
+    if args.debug:
+        train_df = train_df.head(20)
+        val_df = val_df.head(10)
+        test_df = test_df.head(5)
+    if args.quick_test is not None:
+        test_df = test_df.head(args.quick_test)
+
+    # 默认训练设置（ACDC 多类别分割：0 背景 + 3 前景）
+    validation_metric = "dice"
+    # 结构损失在多类时收敛较慢，改为 dice_ce_loss（Dice+CE 混合，更稳）
+    loss = "dice_ce_loss"
+    max_epoch = 50
+    lr = 1e-4
+
+    hyperparameters = {
+        "optim.peft": "conv_lora",
+        "optim.lora.r": args.rank,
+        "optim.lora.conv_lora_expert_num": args.expert_num,
+        "env.num_gpus": args.num_gpus,
+        "optim.loss_func": loss,
+        "optim.max_epochs": max_epoch,
+        "optim.lr": lr,
+        "env.per_gpu_batch_size": args.per_gpu_batch_size,
+        "env.batch_size": args.batch_size,
+    }
+
+    if args.gspo_enable:
+        hyperparameters.update({
+            "optim.lora.gspo_enabled": True,
+            "optim.lora.gspo_group_size": args.gspo_group_size,
+            "optim.lora.gspo_quality_momentum": args.gspo_quality_momentum,
+            "optim.lora.gspo_warmup_epochs": args.gspo_warmup_epochs,
+            "optim.lora.gspo_contrastive_weight": args.gspo_contrastive_weight,
+        })
+
+    if args.adapter_enable:
+        hyperparameters.update({
+            "model.sam.adapter_enabled": True,
+            "model.sam.adapter_dim": args.adapter_dim,
+        })
+        # GSPO-Adapter 扩展
+        if args.gspo_adapter_enable:
+            if not args.gspo_enable:
+                print("Warning: --gspo_adapter_enable requires --gspo_enable. Enabling GSPO automatically.")
+                args.gspo_enable = True
+                hyperparameters.update({
+                    "optim.lora.gspo_enabled": True,
+                    "optim.lora.gspo_group_size": args.gspo_group_size,
+                    "optim.lora.gspo_quality_momentum": args.gspo_quality_momentum,
+                    "optim.lora.gspo_warmup_epochs": args.gspo_warmup_epochs,
+                    "optim.lora.gspo_contrastive_weight": args.gspo_contrastive_weight,
+                })
+            hyperparameters.update({
+                "optim.gspo.adapter_enabled": True,
+                "optim.gspo.adapter_momentum": args.gspo_adapter_momentum,
+            })
+            if args.gspo_adapter_scale_adaptation:
+                hyperparameters.update({
+                    "optim.gspo.adapter_scale_adaptation": True,
+                    "model.sam.adapter_gspo_enabled": True,
+                    "model.sam.adapter_gspo_scale_adaptation": True,
+                })
+
+    if args.eval_only:
+        if not args.ckpt_path:
+            raise ValueError("--eval_only 需要指定 --ckpt_path")
+        predictor = MultiModalPredictor.load(args.ckpt_path)
+    else:
+        predictor = MultiModalPredictor(
+            problem_type="semantic_segmentation",
+            validation_metric=validation_metric,
+            eval_metric=validation_metric,
+            hyperparameters=hyperparameters,
+            label="label",
+        )
+        predictor.fit(train_data=train_df, tuning_data=val_df, seed=args.seed)
+
+    # 评估（IoU + Dice）
+    res = predictor.evaluate(test_df, metrics=["iou", "dice"])
+    print(f"Test results on ACDC: {res}")
+    with open(os.path.join(args.output_dir, "metrics_acdc.txt"), "a") as f:
+        f.write(f"{res}\n")
+
+    # 可视化一小部分验证样本的预测（覆盖写，数量固定）
+    visualize_samples(predictor, val_df, args.vis_output_dir, max_samples=args.vis_samples)
+
+
+if __name__ == "__main__":
+    main()
+
+
+```
+
+修复完成！
+
+## 训练结果总结
+
+✅ **训练成功完成！** 10 个 epoch 的 ACDC 分割训练。
+
+**测试指标：**
+- **IoU**: 0.241
+- **Dice**: 0.245
+
+虽然这些指标不高，但训练流程已经跑通。指标较低的原因可能是：
+1. SAM 多类分割的 Mask2Former 风格输出需要特殊处理
+2. 仅训练了 10 个 epoch
+3. 可能需要调整超参数
+
+**修复了可视化函数**的错误：`predictor.predict()` 返回的是 list 而不是 DataFrame。
+
+如果需要进一步提升性能，可以：
+1. 增加训练 epoch
+2. 调整学习率
+3. 考虑使用 Mask2FormerLoss 替代 DiceCELoss（更适合 SAM 的输出格式）
+4. 增加数据增强
+
+是否需要重新运行训练来验证可视化修复？
+
+---
+
+**User**
+
+现在的训练命令是不是默认就只跑10个epochs? 想让它跑更多的epochs要怎么指定参数？
+
+---
+
+**Cursor**
+
+脚本中 `max_epoch = 50` 是硬编码的（第 125 行），但没有提供命令行参数来覆盖它。
+
+不过日志显示只跑了 10 个 epochs，这可能是因为**早停 (early stopping)** 机制。让我检查一下：
+
+脚本中确实设置了 `max_epoch = 50`（第 125 行），但默认会有**早停机制 (early stopping)**。
+
+让我检查 AutoGluon 的早停配置：
+
+找到原因了！
+
+## 原因
+
+AutoGluon 默认配置了 **早停机制 (Early Stopping)**：
+- `patience: 10` — 如果验证指标连续 10 个 epoch 没有改善，训练会提前停止
+
+虽然脚本设置了 `max_epoch = 50`，但由于 `val_dice` 一直没有显著改善，早停机制在第 10 个 epoch 后就终止了训练。
+
+## 解决方案
+
+要让训练跑更多 epochs，你可以：
+
+### 方案 1：添加 `--max_epochs` 和 `--patience` 参数
+
+在 `run_acdc_conv_lora.py` 中添加命令行参数：
+
+```python
+# 在 parser.add_argument 部分添加:
+parser.add_argument("--max_epochs", type=int, default=50, help="Maximum training epochs")
+parser.add_argument("--patience", type=int, default=10, help="Early stopping patience (set large to disable)")
+```
+
+然后修改 hyperparameters 设置：
+
+```python
+# 将 max_epoch = 50 替换为:
+max_epoch = args.max_epochs
+
+# 在 hyperparameters 中添加:
+hyperparameters = {
+    # ... existing params ...
+    "optim.max_epochs": max_epoch,
+    "optim.patience": args.patience,  # 添加这行
+    # ...
+}
+```
+
+### 方案 2：直接在脚本中增大 patience
+
+将脚本中的 `hyperparameters` 添加：
+
+```python
+"optim.patience": 100,  # 设置很大的值，基本禁用早停
+```
+
+### 运行命令示例
+
+修改后，你可以这样运行：
+
+```bash
+python3 run_acdc_conv_lora.py \
+  --dataset_dir datasets/acdc_conv_lora/acdc_conv_lora \
+  --max_epochs 100 \
+  --patience 50 \
+  ...
+```
+
+---
+
+如果需要我帮你修改脚本，请切换到 **Agent 模式** 来应用这些更改。
+
+```python
+# 在 parser.add_argument 部分添加:
+parser.add_argument("--max_epochs", type=int, default=50, help="Maximum training epochs")
+parser.add_argument("--patience", type=int, default=10, help="Early stopping patience (set large to disable)")
+```
+
+```python
+# 将 max_epoch = 50 替换为:
+max_epoch = args.max_epochs
+
+# 在 hyperparameters 中添加:
+hyperparameters = {
+    # ... existing params ...
+    "optim.max_epochs": max_epoch,
+    "optim.patience": args.patience,  # 添加这行
+    # ...
+}
+```
+
+```python
+"optim.patience": 100,  # 设置很大的值，基本禁用早停
+```
+
+```shellscript
+python3 run_acdc_conv_lora.py \
+  --dataset_dir datasets/acdc_conv_lora/acdc_conv_lora \
+  --max_epochs 100 \
+  --patience 50 \
+  ...
+```
+
+---
+
+**User**
+
+请应用更改
+
+---
+
+**Cursor**
+
+```python
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+在 ACDC (来自 ABD 预处理数据) 上运行 Conv-LoRA + SAM + GSPO + Adapter 的
+训练 / 推理脚本。数据准备需先运行 prepare_acdc_conv_lora.py。
+"""
+import argparse
+import os
+
+import numpy as np
+import pandas as pd
+import torch
+from autogluon.multimodal import MultiModalPredictor
+
+
+def expand_path(df: pd.DataFrame, dataset_dir: str):
+    df = df.copy()
+    for col in ["image", "label"]:
+        df[col] = df[col].apply(lambda p: os.path.join(dataset_dir, p))
+    return df
+
+
+def visualize_samples(predictor: MultiModalPredictor, df: pd.DataFrame, vis_dir: str, max_samples: int = 8):
+    """
+    仅保存前 max_samples 个验证样本的预测掩码，避免磁盘爆炸。
+    会覆盖同名文件，文件数量固定。
+    """
+    from PIL import Image
+    os.makedirs(vis_dir, exist_ok=True)
+    subset = df.head(max_samples).copy()
+    try:
+        preds = predictor.predict(subset)
+    except Exception as e:
+        print(f"[VIS] predictor.predict failed: {e}")
+        return
+    
+    # preds 对于语义分割是一个 list of numpy arrays
+    if isinstance(preds, list):
+        for idx, (_, row) in enumerate(subset.iterrows()):
+            if idx >= len(preds):
+                break
+            mask = preds[idx]
+            if mask is None:
+                continue
+            # 保存 mask 为 PNG
+            mask_arr = np.array(mask, dtype=np.uint8)
+            if mask_arr.ndim == 3:
+                mask_arr = mask_arr.squeeze()  # 移除多余维度
+            img_name = os.path.splitext(os.path.basename(row["image"]))[0]
+            out_path = os.path.join(vis_dir, f"{img_name}_pred.png")
+            Image.fromarray(mask_arr).save(out_path)
+        print(f"[VIS] Saved up to {len(subset)} predicted masks to {vis_dir}")
+    elif hasattr(preds, 'columns') and "semantic_mask" in preds.columns:
+        for i, row in subset.iterrows():
+            mask = preds.loc[i, "semantic_mask"]
+            if mask is None:
+                continue
+            mask_arr = np.array(mask, dtype=np.uint8)
+            img_name = os.path.splitext(os.path.basename(row["image"]))[0]
+            out_path = os.path.join(vis_dir, f"{img_name}_pred.png")
+            Image.fromarray(mask_arr).save(out_path)
+        print(f"[VIS] Saved up to {len(subset)} predicted masks to {vis_dir}")
+    else:
+        print(f"[VIS] Unexpected prediction format: {type(preds)}; skip visualization.")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="ACDC semantic segmentation with Conv-LoRA + GSPO + Adapter")
+    parser.add_argument("--dataset_dir", type=str, default="datasets/acdc_conv_lora/acdc_conv_lora",
+                        help="由 prepare_acdc_conv_lora.py 生成的数据集根目录")
+    parser.add_argument("--seed", type=int, default=1337)
+    parser.add_argument("--rank", type=int, default=3)
+    parser.add_argument("--expert_num", type=int, default=8)
+    parser.add_argument("--num_gpus", type=int, default=1)
+    parser.add_argument("--output_dir", type=str, default="outputs/acdc_conv_lora")
+    parser.add_argument("--ckpt_path", type=str, default=None, help="若只做评估，指定已训练模型路径")
+    parser.add_argument("--per_gpu_batch_size", type=int, default=1)
+    parser.add_argument("--batch_size", type=int, default=4, help="有效 batch size；若大于 per_gpu_batch_size*num_gpus，则会做累积")
+    parser.add_argument("--eval_only", action="store_true", help="只做评估，不训练")
+    # GSPO
+    parser.add_argument("--gspo_enable", action="store_true")
+    parser.add_argument("--gspo_group_size", type=int, default=4)
+    parser.add_argument("--gspo_warmup_epochs", type=int, default=5)
+    parser.add_argument("--gspo_contrastive_weight", type=float, default=0.1)
+    parser.add_argument("--gspo_quality_momentum", type=float, default=0.9)
+    # GSPO-Adapter 扩展
+    parser.add_argument("--gspo_adapter_enable", action="store_true",
+                        help="启用 GSPO 对 Encoder Adapter 的质量反馈")
+    parser.add_argument("--gspo_adapter_momentum", type=float, default=0.9,
+                        help="GSPO Adapter 质量历史的动量项")
+    parser.add_argument("--gspo_adapter_scale_adaptation", action="store_true",
+                        help="启用基于质量历史的自适应缩放")
+    # Adapter
+    parser.add_argument("--adapter_enable", action="store_true")
+    parser.add_argument("--adapter_dim", type=int, default=64)
+    # 可视化配置
+    parser.add_argument("--vis_samples", type=int, default=8,
+                        help="训练结束后从验证集可视化的样本数（固定覆盖，不额外增长）")
+    parser.add_argument("--vis_output_dir", type=str, default="outputs/acdc_vis",
+                        help="可视化输出目录")
+    # Training epochs control
+    parser.add_argument("--max_epochs", type=int, default=50, help="Maximum training epochs")
+    parser.add_argument("--patience", type=int, default=10, help="Early stopping patience (set large to disable early stopping)")
+    # Quick / Debug
+    parser.add_argument("--debug", action="store_true", help="仅处理少量样本以快速验证")
+    parser.add_argument("--quick_test", type=int, default=None, help="仅处理前 N 个测试样本")
+    args = parser.parse_args()
+
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    # 读取 CSV
+    train_df = expand_path(pd.read_csv(os.path.join(args.dataset_dir, "train.csv")), args.dataset_dir)
+    val_df = expand_path(pd.read_csv(os.path.join(args.dataset_dir, "val.csv")), args.dataset_dir)
+    test_df = expand_path(pd.read_csv(os.path.join(args.dataset_dir, "test.csv")), args.dataset_dir)
+
+    # 快速模式
+    if args.debug:
+        train_df = train_df.head(20)
+        val_df = val_df.head(10)
+        test_df = test_df.head(5)
+    if args.quick_test is not None:
+        test_df = test_df.head(args.quick_test)
+
+    # 默认训练设置（ACDC 多类别分割：0 背景 + 3 前景）
+    validation_metric = "dice"
+    # 结构损失在多类时收敛较慢，改为 dice_ce_loss（Dice+CE 混合，更稳）
+    loss = "dice_ce_loss"
+    max_epoch = 50
+    lr = 1e-4
+
+    hyperparameters = {
+        "optim.peft": "conv_lora",
+        "optim.lora.r": args.rank,
+        "optim.lora.conv_lora_expert_num": args.expert_num,
+        "env.num_gpus": args.num_gpus,
+        "optim.loss_func": loss,
+        "optim.max_epochs": max_epoch,
+        "optim.lr": lr,
+        "env.per_gpu_batch_size": args.per_gpu_batch_size,
+        "env.batch_size": args.batch_size,
+    }
+
+    if args.gspo_enable:
+        hyperparameters.update({
+            "optim.lora.gspo_enabled": True,
+            "optim.lora.gspo_group_size": args.gspo_group_size,
+            "optim.lora.gspo_quality_momentum": args.gspo_quality_momentum,
+            "optim.lora.gspo_warmup_epochs": args.gspo_warmup_epochs,
+            "optim.lora.gspo_contrastive_weight": args.gspo_contrastive_weight,
+        })
+
+    if args.adapter_enable:
+        hyperparameters.update({
+            "model.sam.adapter_enabled": True,
+            "model.sam.adapter_dim": args.adapter_dim,
+        })
+        # GSPO-Adapter 扩展
+        if args.gspo_adapter_enable:
+            if not args.gspo_enable:
+                print("Warning: --gspo_adapter_enable requires --gspo_enable. Enabling GSPO automatically.")
+                args.gspo_enable = True
+                hyperparameters.update({
+                    "optim.lora.gspo_enabled": True,
+                    "optim.lora.gspo_group_size": args.gspo_group_size,
+                    "optim.lora.gspo_quality_momentum": args.gspo_quality_momentum,
+                    "optim.lora.gspo_warmup_epochs": args.gspo_warmup_epochs,
+                    "optim.lora.gspo_contrastive_weight": args.gspo_contrastive_weight,
+                })
+            hyperparameters.update({
+                "optim.gspo.adapter_enabled": True,
+                "optim.gspo.adapter_momentum": args.gspo_adapter_momentum,
+            })
+            if args.gspo_adapter_scale_adaptation:
+                hyperparameters.update({
+                    "optim.gspo.adapter_scale_adaptation": True,
+                    "model.sam.adapter_gspo_enabled": True,
+                    "model.sam.adapter_gspo_scale_adaptation": True,
+                })
+
+    if args.eval_only:
+        if not args.ckpt_path:
+            raise ValueError("--eval_only 需要指定 --ckpt_path")
+        predictor = MultiModalPredictor.load(args.ckpt_path)
+    else:
+        predictor = MultiModalPredictor(
+            problem_type="semantic_segmentation",
+            validation_metric=validation_metric,
+            eval_metric=validation_metric,
+            hyperparameters=hyperparameters,
+            label="label",
+        )
+        predictor.fit(train_data=train_df, tuning_data=val_df, seed=args.seed)
+
+    # 评估（IoU + Dice）
+    res = predictor.evaluate(test_df, metrics=["iou", "dice"])
+    print(f"Test results on ACDC: {res}")
+    with open(os.path.join(args.output_dir, "metrics_acdc.txt"), "a") as f:
+        f.write(f"{res}\n")
+
+    # 可视化一小部分验证样本的预测（覆盖写，数量固定）
+    visualize_samples(predictor, val_df, args.vis_output_dir, max_samples=args.vis_samples)
+
+
+if __name__ == "__main__":
+    main()
+
+
+```
+
+```python
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+在 ACDC (来自 ABD 预处理数据) 上运行 Conv-LoRA + SAM + GSPO + Adapter 的
+训练 / 推理脚本。数据准备需先运行 prepare_acdc_conv_lora.py。
+"""
+import argparse
+import os
+
+import numpy as np
+import pandas as pd
+import torch
+from autogluon.multimodal import MultiModalPredictor
+
+
+def expand_path(df: pd.DataFrame, dataset_dir: str):
+    df = df.copy()
+    for col in ["image", "label"]:
+        df[col] = df[col].apply(lambda p: os.path.join(dataset_dir, p))
+    return df
+
+
+def visualize_samples(predictor: MultiModalPredictor, df: pd.DataFrame, vis_dir: str, max_samples: int = 8):
+    """
+    仅保存前 max_samples 个验证样本的预测掩码，避免磁盘爆炸。
+    会覆盖同名文件，文件数量固定。
+    """
+    from PIL import Image
+    os.makedirs(vis_dir, exist_ok=True)
+    subset = df.head(max_samples).copy()
+    try:
+        preds = predictor.predict(subset)
+    except Exception as e:
+        print(f"[VIS] predictor.predict failed: {e}")
+        return
+    
+    # preds 对于语义分割是一个 list of numpy arrays
+    if isinstance(preds, list):
+        for idx, (_, row) in enumerate(subset.iterrows()):
+            if idx >= len(preds):
+                break
+            mask = preds[idx]
+            if mask is None:
+                continue
+            # 保存 mask 为 PNG
+            mask_arr = np.array(mask, dtype=np.uint8)
+            if mask_arr.ndim == 3:
+                mask_arr = mask_arr.squeeze()  # 移除多余维度
+            img_name = os.path.splitext(os.path.basename(row["image"]))[0]
+            out_path = os.path.join(vis_dir, f"{img_name}_pred.png")
+            Image.fromarray(mask_arr).save(out_path)
+        print(f"[VIS] Saved up to {len(subset)} predicted masks to {vis_dir}")
+    elif hasattr(preds, 'columns') and "semantic_mask" in preds.columns:
+        for i, row in subset.iterrows():
+            mask = preds.loc[i, "semantic_mask"]
+            if mask is None:
+                continue
+            mask_arr = np.array(mask, dtype=np.uint8)
+            img_name = os.path.splitext(os.path.basename(row["image"]))[0]
+            out_path = os.path.join(vis_dir, f"{img_name}_pred.png")
+            Image.fromarray(mask_arr).save(out_path)
+        print(f"[VIS] Saved up to {len(subset)} predicted masks to {vis_dir}")
+    else:
+        print(f"[VIS] Unexpected prediction format: {type(preds)}; skip visualization.")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="ACDC semantic segmentation with Conv-LoRA + GSPO + Adapter")
+    parser.add_argument("--dataset_dir", type=str, default="datasets/acdc_conv_lora/acdc_conv_lora",
+                        help="由 prepare_acdc_conv_lora.py 生成的数据集根目录")
+    parser.add_argument("--seed", type=int, default=1337)
+    parser.add_argument("--rank", type=int, default=3)
+    parser.add_argument("--expert_num", type=int, default=8)
+    parser.add_argument("--num_gpus", type=int, default=1)
+    parser.add_argument("--output_dir", type=str, default="outputs/acdc_conv_lora")
+    parser.add_argument("--ckpt_path", type=str, default=None, help="若只做评估，指定已训练模型路径")
+    parser.add_argument("--per_gpu_batch_size", type=int, default=1)
+    parser.add_argument("--batch_size", type=int, default=4, help="有效 batch size；若大于 per_gpu_batch_size*num_gpus，则会做累积")
+    parser.add_argument("--eval_only", action="store_true", help="只做评估，不训练")
+    # GSPO
+    parser.add_argument("--gspo_enable", action="store_true")
+    parser.add_argument("--gspo_group_size", type=int, default=4)
+    parser.add_argument("--gspo_warmup_epochs", type=int, default=5)
+    parser.add_argument("--gspo_contrastive_weight", type=float, default=0.1)
+    parser.add_argument("--gspo_quality_momentum", type=float, default=0.9)
+    # GSPO-Adapter 扩展
+    parser.add_argument("--gspo_adapter_enable", action="store_true",
+                        help="启用 GSPO 对 Encoder Adapter 的质量反馈")
+    parser.add_argument("--gspo_adapter_momentum", type=float, default=0.9,
+                        help="GSPO Adapter 质量历史的动量项")
+    parser.add_argument("--gspo_adapter_scale_adaptation", action="store_true",
+                        help="启用基于质量历史的自适应缩放")
+    # Adapter
+    parser.add_argument("--adapter_enable", action="store_true")
+    parser.add_argument("--adapter_dim", type=int, default=64)
+    # 可视化配置
+    parser.add_argument("--vis_samples", type=int, default=8,
+                        help="训练结束后从验证集可视化的样本数（固定覆盖，不额外增长）")
+    parser.add_argument("--vis_output_dir", type=str, default="outputs/acdc_vis",
+                        help="可视化输出目录")
+    # Training epochs control
+    parser.add_argument("--max_epochs", type=int, default=50, help="Maximum training epochs")
+    parser.add_argument("--patience", type=int, default=10, help="Early stopping patience (set large to disable early stopping)")
+    # Quick / Debug
+    parser.add_argument("--debug", action="store_true", help="仅处理少量样本以快速验证")
+    parser.add_argument("--quick_test", type=int, default=None, help="仅处理前 N 个测试样本")
+    args = parser.parse_args()
+
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    # 读取 CSV
+    train_df = expand_path(pd.read_csv(os.path.join(args.dataset_dir, "train.csv")), args.dataset_dir)
+    val_df = expand_path(pd.read_csv(os.path.join(args.dataset_dir, "val.csv")), args.dataset_dir)
+    test_df = expand_path(pd.read_csv(os.path.join(args.dataset_dir, "test.csv")), args.dataset_dir)
+
+    # 快速模式
+    if args.debug:
+        train_df = train_df.head(20)
+        val_df = val_df.head(10)
+        test_df = test_df.head(5)
+    if args.quick_test is not None:
+        test_df = test_df.head(args.quick_test)
+
+    # 默认训练设置（ACDC 多类别分割：0 背景 + 3 前景）
+    validation_metric = "dice"
+    # 结构损失在多类时收敛较慢，改为 dice_ce_loss（Dice+CE 混合，更稳）
+    loss = "dice_ce_loss"
+    lr = 1e-4
+
+    hyperparameters = {
+        "optim.peft": "conv_lora",
+        "optim.lora.r": args.rank,
+        "optim.lora.conv_lora_expert_num": args.expert_num,
+        "env.num_gpus": args.num_gpus,
+        "optim.loss_func": loss,
+        "optim.max_epochs": args.max_epochs,
+        "optim.patience": args.patience,
+        "optim.lr": lr,
+        "env.per_gpu_batch_size": args.per_gpu_batch_size,
+        "env.batch_size": args.batch_size,
+    }
+
+    if args.gspo_enable:
+        hyperparameters.update({
+            "optim.lora.gspo_enabled": True,
+            "optim.lora.gspo_group_size": args.gspo_group_size,
+            "optim.lora.gspo_quality_momentum": args.gspo_quality_momentum,
+            "optim.lora.gspo_warmup_epochs": args.gspo_warmup_epochs,
+            "optim.lora.gspo_contrastive_weight": args.gspo_contrastive_weight,
+        })
+
+    if args.adapter_enable:
+        hyperparameters.update({
+            "model.sam.adapter_enabled": True,
+            "model.sam.adapter_dim": args.adapter_dim,
+        })
+        # GSPO-Adapter 扩展
+        if args.gspo_adapter_enable:
+            if not args.gspo_enable:
+                print("Warning: --gspo_adapter_enable requires --gspo_enable. Enabling GSPO automatically.")
+                args.gspo_enable = True
+                hyperparameters.update({
+                    "optim.lora.gspo_enabled": True,
+                    "optim.lora.gspo_group_size": args.gspo_group_size,
+                    "optim.lora.gspo_quality_momentum": args.gspo_quality_momentum,
+                    "optim.lora.gspo_warmup_epochs": args.gspo_warmup_epochs,
+                    "optim.lora.gspo_contrastive_weight": args.gspo_contrastive_weight,
+                })
+            hyperparameters.update({
+                "optim.gspo.adapter_enabled": True,
+                "optim.gspo.adapter_momentum": args.gspo_adapter_momentum,
+            })
+            if args.gspo_adapter_scale_adaptation:
+                hyperparameters.update({
+                    "optim.gspo.adapter_scale_adaptation": True,
+                    "model.sam.adapter_gspo_enabled": True,
+                    "model.sam.adapter_gspo_scale_adaptation": True,
+                })
+
+    if args.eval_only:
+        if not args.ckpt_path:
+            raise ValueError("--eval_only 需要指定 --ckpt_path")
+        predictor = MultiModalPredictor.load(args.ckpt_path)
+    else:
+        predictor = MultiModalPredictor(
+            problem_type="semantic_segmentation",
+            validation_metric=validation_metric,
+            eval_metric=validation_metric,
+            hyperparameters=hyperparameters,
+            label="label",
+        )
+        predictor.fit(train_data=train_df, tuning_data=val_df, seed=args.seed)
+
+    # 评估（IoU + Dice）
+    res = predictor.evaluate(test_df, metrics=["iou", "dice"])
+    print(f"Test results on ACDC: {res}")
+    with open(os.path.join(args.output_dir, "metrics_acdc.txt"), "a") as f:
+        f.write(f"{res}\n")
+
+    # 可视化一小部分验证样本的预测（覆盖写，数量固定）
+    visualize_samples(predictor, val_df, args.vis_output_dir, max_samples=args.vis_samples)
+
+
+if __name__ == "__main__":
+    main()
+
+
+```
+
+修改完成！现在你可以通过命令行参数控制训练 epochs 和早停：
+
+**新增参数：**
+- `--max_epochs`: 最大训练 epochs（默认 50）
+- `--patience`: 早停耐心值（默认 10，设置很大的值可以禁用早停）
+
+**使用示例：**
+
+```bash
+cd /root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA
+
+nohup python3 run_acdc_conv_lora.py \
+  --dataset_dir datasets/acdc_conv_lora/acdc_conv_lora \
+  --rank 3 \
+  --expert_num 8 \
+  --gspo_enable \
+  --adapter_enable \
+  --adapter_dim 64 \
+  --gspo_adapter_enable \
+  --max_epochs 100 \
+  --patience 50 \
+  --output_dir outputs/acdc_100epochs \
+  --vis_samples 8 \
+  --vis_output_dir outputs/acdc_vis \
+> outputs/acdc_100epochs.log 2>&1 &
+```
+
+如果想完全禁用早停，让训练跑满所有 epochs，可以设置一个非常大的 patience 值：`--patience 999`
+
+```shellscript
+cd /root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA
+
+nohup python3 run_acdc_conv_lora.py \
+  --dataset_dir datasets/acdc_conv_lora/acdc_conv_lora \
+  --rank 3 \
+  --expert_num 8 \
+  --gspo_enable \
+  --adapter_enable \
+  --adapter_dim 64 \
+  --gspo_adapter_enable \
+  --max_epochs 100 \
+  --patience 50 \
+  --output_dir outputs/acdc_100epochs \
+  --vis_samples 8 \
+  --vis_output_dir outputs/acdc_vis \
+> outputs/acdc_100epochs.log 2>&1 &
+```
+
+---
+
+**User**
+
+我觉得你提出的这一点“考虑使用 Mask2FormerLoss 替代 DiceCELoss（更适合 SAM 的输出格式）”可能很重要。请仔细实现它
+
+---
+
+**Cursor**
+
+让我先研究 Mask2FormerLoss 的工作方式和输入格式要求：
+
+现在我了解了完整的流程。AutoGluon 已经完全支持 `Mask2FormerLoss`，只需要配置 `optim.loss_func: mask2former_loss`。
+
+让我修改脚本来添加损失函数选择：
+
+```python
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+在 ACDC (来自 ABD 预处理数据) 上运行 Conv-LoRA + SAM + GSPO + Adapter 的
+训练 / 推理脚本。数据准备需先运行 prepare_acdc_conv_lora.py。
+"""
+import argparse
+import os
+
+import numpy as np
+import pandas as pd
+import torch
+from autogluon.multimodal import MultiModalPredictor
+
+
+def expand_path(df: pd.DataFrame, dataset_dir: str):
+    df = df.copy()
+    for col in ["image", "label"]:
+        df[col] = df[col].apply(lambda p: os.path.join(dataset_dir, p))
+    return df
+
+
+def visualize_samples(predictor: MultiModalPredictor, df: pd.DataFrame, vis_dir: str, max_samples: int = 8):
+    """
+    仅保存前 max_samples 个验证样本的预测掩码，避免磁盘爆炸。
+    会覆盖同名文件，文件数量固定。
+    """
+    from PIL import Image
+    os.makedirs(vis_dir, exist_ok=True)
+    subset = df.head(max_samples).copy()
+    try:
+        preds = predictor.predict(subset)
+    except Exception as e:
+        print(f"[VIS] predictor.predict failed: {e}")
+        return
+    
+    # preds 对于语义分割是一个 list of numpy arrays
+    if isinstance(preds, list):
+        for idx, (_, row) in enumerate(subset.iterrows()):
+            if idx >= len(preds):
+                break
+            mask = preds[idx]
+            if mask is None:
+                continue
+            # 保存 mask 为 PNG
+            mask_arr = np.array(mask, dtype=np.uint8)
+            if mask_arr.ndim == 3:
+                mask_arr = mask_arr.squeeze()  # 移除多余维度
+            img_name = os.path.splitext(os.path.basename(row["image"]))[0]
+            out_path = os.path.join(vis_dir, f"{img_name}_pred.png")
+            Image.fromarray(mask_arr).save(out_path)
+        print(f"[VIS] Saved up to {len(subset)} predicted masks to {vis_dir}")
+    elif hasattr(preds, 'columns') and "semantic_mask" in preds.columns:
+        for i, row in subset.iterrows():
+            mask = preds.loc[i, "semantic_mask"]
+            if mask is None:
+                continue
+            mask_arr = np.array(mask, dtype=np.uint8)
+            img_name = os.path.splitext(os.path.basename(row["image"]))[0]
+            out_path = os.path.join(vis_dir, f"{img_name}_pred.png")
+            Image.fromarray(mask_arr).save(out_path)
+        print(f"[VIS] Saved up to {len(subset)} predicted masks to {vis_dir}")
+    else:
+        print(f"[VIS] Unexpected prediction format: {type(preds)}; skip visualization.")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="ACDC semantic segmentation with Conv-LoRA + GSPO + Adapter")
+    parser.add_argument("--dataset_dir", type=str, default="datasets/acdc_conv_lora/acdc_conv_lora",
+                        help="由 prepare_acdc_conv_lora.py 生成的数据集根目录")
+    parser.add_argument("--seed", type=int, default=1337)
+    parser.add_argument("--rank", type=int, default=3)
+    parser.add_argument("--expert_num", type=int, default=8)
+    parser.add_argument("--num_gpus", type=int, default=1)
+    parser.add_argument("--output_dir", type=str, default="outputs/acdc_conv_lora")
+    parser.add_argument("--ckpt_path", type=str, default=None, help="若只做评估，指定已训练模型路径")
+    parser.add_argument("--per_gpu_batch_size", type=int, default=1)
+    parser.add_argument("--batch_size", type=int, default=4, help="有效 batch size；若大于 per_gpu_batch_size*num_gpus，则会做累积")
+    parser.add_argument("--eval_only", action="store_true", help="只做评估，不训练")
+    # GSPO
+    parser.add_argument("--gspo_enable", action="store_true")
+    parser.add_argument("--gspo_group_size", type=int, default=4)
+    parser.add_argument("--gspo_warmup_epochs", type=int, default=5)
+    parser.add_argument("--gspo_contrastive_weight", type=float, default=0.1)
+    parser.add_argument("--gspo_quality_momentum", type=float, default=0.9)
+    # GSPO-Adapter 扩展
+    parser.add_argument("--gspo_adapter_enable", action="store_true",
+                        help="启用 GSPO 对 Encoder Adapter 的质量反馈")
+    parser.add_argument("--gspo_adapter_momentum", type=float, default=0.9,
+                        help="GSPO Adapter 质量历史的动量项")
+    parser.add_argument("--gspo_adapter_scale_adaptation", action="store_true",
+                        help="启用基于质量历史的自适应缩放")
+    # Adapter
+    parser.add_argument("--adapter_enable", action="store_true")
+    parser.add_argument("--adapter_dim", type=int, default=64)
+    # 可视化配置
+    parser.add_argument("--vis_samples", type=int, default=8,
+                        help="训练结束后从验证集可视化的样本数（固定覆盖，不额外增长）")
+    parser.add_argument("--vis_output_dir", type=str, default="outputs/acdc_vis",
+                        help="可视化输出目录")
+    # Training epochs control
+    parser.add_argument("--max_epochs", type=int, default=50, help="Maximum training epochs")
+    parser.add_argument("--patience", type=int, default=10, help="Early stopping patience (set large to disable early stopping)")
+    # Loss function
+    parser.add_argument("--loss", type=str, default="mask2former_loss",
+                        choices=["dice_ce_loss", "mask2former_loss"],
+                        help="Loss function: mask2former_loss (recommended for SAM multi-class) or dice_ce_loss")
+    # Quick / Debug
+    parser.add_argument("--debug", action="store_true", help="仅处理少量样本以快速验证")
+    parser.add_argument("--quick_test", type=int, default=None, help="仅处理前 N 个测试样本")
+    args = parser.parse_args()
+
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    # 读取 CSV
+    train_df = expand_path(pd.read_csv(os.path.join(args.dataset_dir, "train.csv")), args.dataset_dir)
+    val_df = expand_path(pd.read_csv(os.path.join(args.dataset_dir, "val.csv")), args.dataset_dir)
+    test_df = expand_path(pd.read_csv(os.path.join(args.dataset_dir, "test.csv")), args.dataset_dir)
+
+    # 快速模式
+    if args.debug:
+        train_df = train_df.head(20)
+        val_df = val_df.head(10)
+        test_df = test_df.head(5)
+    if args.quick_test is not None:
+        test_df = test_df.head(args.quick_test)
+
+    # 默认训练设置（ACDC 多类别分割：0 背景 + 3 前景）
+    validation_metric = "dice"
+    # 结构损失在多类时收敛较慢，改为 dice_ce_loss（Dice+CE 混合，更稳）
+    loss = "dice_ce_loss"
+    lr = 1e-4
+
+    hyperparameters = {
+        "optim.peft": "conv_lora",
+        "optim.lora.r": args.rank,
+        "optim.lora.conv_lora_expert_num": args.expert_num,
+        "env.num_gpus": args.num_gpus,
+        "optim.loss_func": loss,
+        "optim.max_epochs": args.max_epochs,
+        "optim.patience": args.patience,
+        "optim.lr": lr,
+        "env.per_gpu_batch_size": args.per_gpu_batch_size,
+        "env.batch_size": args.batch_size,
+    }
+
+    if args.gspo_enable:
+        hyperparameters.update({
+            "optim.lora.gspo_enabled": True,
+            "optim.lora.gspo_group_size": args.gspo_group_size,
+            "optim.lora.gspo_quality_momentum": args.gspo_quality_momentum,
+            "optim.lora.gspo_warmup_epochs": args.gspo_warmup_epochs,
+            "optim.lora.gspo_contrastive_weight": args.gspo_contrastive_weight,
+        })
+
+    if args.adapter_enable:
+        hyperparameters.update({
+            "model.sam.adapter_enabled": True,
+            "model.sam.adapter_dim": args.adapter_dim,
+        })
+        # GSPO-Adapter 扩展
+        if args.gspo_adapter_enable:
+            if not args.gspo_enable:
+                print("Warning: --gspo_adapter_enable requires --gspo_enable. Enabling GSPO automatically.")
+                args.gspo_enable = True
+                hyperparameters.update({
+                    "optim.lora.gspo_enabled": True,
+                    "optim.lora.gspo_group_size": args.gspo_group_size,
+                    "optim.lora.gspo_quality_momentum": args.gspo_quality_momentum,
+                    "optim.lora.gspo_warmup_epochs": args.gspo_warmup_epochs,
+                    "optim.lora.gspo_contrastive_weight": args.gspo_contrastive_weight,
+                })
+            hyperparameters.update({
+                "optim.gspo.adapter_enabled": True,
+                "optim.gspo.adapter_momentum": args.gspo_adapter_momentum,
+            })
+            if args.gspo_adapter_scale_adaptation:
+                hyperparameters.update({
+                    "optim.gspo.adapter_scale_adaptation": True,
+                    "model.sam.adapter_gspo_enabled": True,
+                    "model.sam.adapter_gspo_scale_adaptation": True,
+                })
+
+    if args.eval_only:
+        if not args.ckpt_path:
+            raise ValueError("--eval_only 需要指定 --ckpt_path")
+        predictor = MultiModalPredictor.load(args.ckpt_path)
+    else:
+        predictor = MultiModalPredictor(
+            problem_type="semantic_segmentation",
+            validation_metric=validation_metric,
+            eval_metric=validation_metric,
+            hyperparameters=hyperparameters,
+            label="label",
+        )
+        predictor.fit(train_data=train_df, tuning_data=val_df, seed=args.seed)
+
+    # 评估（IoU + Dice）
+    res = predictor.evaluate(test_df, metrics=["iou", "dice"])
+    print(f"Test results on ACDC: {res}")
+    with open(os.path.join(args.output_dir, "metrics_acdc.txt"), "a") as f:
+        f.write(f"{res}\n")
+
+    # 可视化一小部分验证样本的预测（覆盖写，数量固定）
+    visualize_samples(predictor, val_df, args.vis_output_dir, max_samples=args.vis_samples)
+
+
+if __name__ == "__main__":
+    main()
+
+
+```
+
+```python
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+在 ACDC (来自 ABD 预处理数据) 上运行 Conv-LoRA + SAM + GSPO + Adapter 的
+训练 / 推理脚本。数据准备需先运行 prepare_acdc_conv_lora.py。
+"""
+import argparse
+import os
+
+import numpy as np
+import pandas as pd
+import torch
+from autogluon.multimodal import MultiModalPredictor
+
+
+def expand_path(df: pd.DataFrame, dataset_dir: str):
+    df = df.copy()
+    for col in ["image", "label"]:
+        df[col] = df[col].apply(lambda p: os.path.join(dataset_dir, p))
+    return df
+
+
+def visualize_samples(predictor: MultiModalPredictor, df: pd.DataFrame, vis_dir: str, max_samples: int = 8):
+    """
+    仅保存前 max_samples 个验证样本的预测掩码，避免磁盘爆炸。
+    会覆盖同名文件，文件数量固定。
+    """
+    from PIL import Image
+    os.makedirs(vis_dir, exist_ok=True)
+    subset = df.head(max_samples).copy()
+    try:
+        preds = predictor.predict(subset)
+    except Exception as e:
+        print(f"[VIS] predictor.predict failed: {e}")
+        return
+    
+    # preds 对于语义分割是一个 list of numpy arrays
+    if isinstance(preds, list):
+        for idx, (_, row) in enumerate(subset.iterrows()):
+            if idx >= len(preds):
+                break
+            mask = preds[idx]
+            if mask is None:
+                continue
+            # 保存 mask 为 PNG
+            mask_arr = np.array(mask, dtype=np.uint8)
+            if mask_arr.ndim == 3:
+                mask_arr = mask_arr.squeeze()  # 移除多余维度
+            img_name = os.path.splitext(os.path.basename(row["image"]))[0]
+            out_path = os.path.join(vis_dir, f"{img_name}_pred.png")
+            Image.fromarray(mask_arr).save(out_path)
+        print(f"[VIS] Saved up to {len(subset)} predicted masks to {vis_dir}")
+    elif hasattr(preds, 'columns') and "semantic_mask" in preds.columns:
+        for i, row in subset.iterrows():
+            mask = preds.loc[i, "semantic_mask"]
+            if mask is None:
+                continue
+            mask_arr = np.array(mask, dtype=np.uint8)
+            img_name = os.path.splitext(os.path.basename(row["image"]))[0]
+            out_path = os.path.join(vis_dir, f"{img_name}_pred.png")
+            Image.fromarray(mask_arr).save(out_path)
+        print(f"[VIS] Saved up to {len(subset)} predicted masks to {vis_dir}")
+    else:
+        print(f"[VIS] Unexpected prediction format: {type(preds)}; skip visualization.")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="ACDC semantic segmentation with Conv-LoRA + GSPO + Adapter")
+    parser.add_argument("--dataset_dir", type=str, default="datasets/acdc_conv_lora/acdc_conv_lora",
+                        help="由 prepare_acdc_conv_lora.py 生成的数据集根目录")
+    parser.add_argument("--seed", type=int, default=1337)
+    parser.add_argument("--rank", type=int, default=3)
+    parser.add_argument("--expert_num", type=int, default=8)
+    parser.add_argument("--num_gpus", type=int, default=1)
+    parser.add_argument("--output_dir", type=str, default="outputs/acdc_conv_lora")
+    parser.add_argument("--ckpt_path", type=str, default=None, help="若只做评估，指定已训练模型路径")
+    parser.add_argument("--per_gpu_batch_size", type=int, default=1)
+    parser.add_argument("--batch_size", type=int, default=4, help="有效 batch size；若大于 per_gpu_batch_size*num_gpus，则会做累积")
+    parser.add_argument("--eval_only", action="store_true", help="只做评估，不训练")
+    # GSPO
+    parser.add_argument("--gspo_enable", action="store_true")
+    parser.add_argument("--gspo_group_size", type=int, default=4)
+    parser.add_argument("--gspo_warmup_epochs", type=int, default=5)
+    parser.add_argument("--gspo_contrastive_weight", type=float, default=0.1)
+    parser.add_argument("--gspo_quality_momentum", type=float, default=0.9)
+    # GSPO-Adapter 扩展
+    parser.add_argument("--gspo_adapter_enable", action="store_true",
+                        help="启用 GSPO 对 Encoder Adapter 的质量反馈")
+    parser.add_argument("--gspo_adapter_momentum", type=float, default=0.9,
+                        help="GSPO Adapter 质量历史的动量项")
+    parser.add_argument("--gspo_adapter_scale_adaptation", action="store_true",
+                        help="启用基于质量历史的自适应缩放")
+    # Adapter
+    parser.add_argument("--adapter_enable", action="store_true")
+    parser.add_argument("--adapter_dim", type=int, default=64)
+    # 可视化配置
+    parser.add_argument("--vis_samples", type=int, default=8,
+                        help="训练结束后从验证集可视化的样本数（固定覆盖，不额外增长）")
+    parser.add_argument("--vis_output_dir", type=str, default="outputs/acdc_vis",
+                        help="可视化输出目录")
+    # Training epochs control
+    parser.add_argument("--max_epochs", type=int, default=50, help="Maximum training epochs")
+    parser.add_argument("--patience", type=int, default=10, help="Early stopping patience (set large to disable early stopping)")
+    # Loss function
+    parser.add_argument("--loss", type=str, default="mask2former_loss",
+                        choices=["dice_ce_loss", "mask2former_loss"],
+                        help="Loss function: mask2former_loss (recommended for SAM multi-class) or dice_ce_loss")
+    # Quick / Debug
+    parser.add_argument("--debug", action="store_true", help="仅处理少量样本以快速验证")
+    parser.add_argument("--quick_test", type=int, default=None, help="仅处理前 N 个测试样本")
+    args = parser.parse_args()
+
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    # 读取 CSV
+    train_df = expand_path(pd.read_csv(os.path.join(args.dataset_dir, "train.csv")), args.dataset_dir)
+    val_df = expand_path(pd.read_csv(os.path.join(args.dataset_dir, "val.csv")), args.dataset_dir)
+    test_df = expand_path(pd.read_csv(os.path.join(args.dataset_dir, "test.csv")), args.dataset_dir)
+
+    # 快速模式
+    if args.debug:
+        train_df = train_df.head(20)
+        val_df = val_df.head(10)
+        test_df = test_df.head(5)
+    if args.quick_test is not None:
+        test_df = test_df.head(args.quick_test)
+
+    # 默认训练设置（ACDC 多类别分割：0 背景 + 3 前景）
+    validation_metric = "dice"
+    lr = 1e-4
+
+    print(f"\n{'='*60}")
+    print(f"Loss function: {args.loss}")
+    print(f"Max epochs: {args.max_epochs}, Patience: {args.patience}")
+    print(f"{'='*60}\n")
+
+    hyperparameters = {
+        "optim.peft": "conv_lora",
+        "optim.lora.r": args.rank,
+        "optim.lora.conv_lora_expert_num": args.expert_num,
+        "env.num_gpus": args.num_gpus,
+        "optim.loss_func": args.loss,
+        "optim.max_epochs": args.max_epochs,
+        "optim.patience": args.patience,
+        "optim.lr": lr,
+        "env.per_gpu_batch_size": args.per_gpu_batch_size,
+        "env.batch_size": args.batch_size,
+    }
+
+    if args.gspo_enable:
+        hyperparameters.update({
+            "optim.lora.gspo_enabled": True,
+            "optim.lora.gspo_group_size": args.gspo_group_size,
+            "optim.lora.gspo_quality_momentum": args.gspo_quality_momentum,
+            "optim.lora.gspo_warmup_epochs": args.gspo_warmup_epochs,
+            "optim.lora.gspo_contrastive_weight": args.gspo_contrastive_weight,
+        })
+
+    if args.adapter_enable:
+        hyperparameters.update({
+            "model.sam.adapter_enabled": True,
+            "model.sam.adapter_dim": args.adapter_dim,
+        })
+        # GSPO-Adapter 扩展
+        if args.gspo_adapter_enable:
+            if not args.gspo_enable:
+                print("Warning: --gspo_adapter_enable requires --gspo_enable. Enabling GSPO automatically.")
+                args.gspo_enable = True
+                hyperparameters.update({
+                    "optim.lora.gspo_enabled": True,
+                    "optim.lora.gspo_group_size": args.gspo_group_size,
+                    "optim.lora.gspo_quality_momentum": args.gspo_quality_momentum,
+                    "optim.lora.gspo_warmup_epochs": args.gspo_warmup_epochs,
+                    "optim.lora.gspo_contrastive_weight": args.gspo_contrastive_weight,
+                })
+            hyperparameters.update({
+                "optim.gspo.adapter_enabled": True,
+                "optim.gspo.adapter_momentum": args.gspo_adapter_momentum,
+            })
+            if args.gspo_adapter_scale_adaptation:
+                hyperparameters.update({
+                    "optim.gspo.adapter_scale_adaptation": True,
+                    "model.sam.adapter_gspo_enabled": True,
+                    "model.sam.adapter_gspo_scale_adaptation": True,
+                })
+
+    if args.eval_only:
+        if not args.ckpt_path:
+            raise ValueError("--eval_only 需要指定 --ckpt_path")
+        predictor = MultiModalPredictor.load(args.ckpt_path)
+    else:
+        predictor = MultiModalPredictor(
+            problem_type="semantic_segmentation",
+            validation_metric=validation_metric,
+            eval_metric=validation_metric,
+            hyperparameters=hyperparameters,
+            label="label",
+        )
+        predictor.fit(train_data=train_df, tuning_data=val_df, seed=args.seed)
+
+    # 评估（IoU + Dice）
+    res = predictor.evaluate(test_df, metrics=["iou", "dice"])
+    print(f"Test results on ACDC: {res}")
+    with open(os.path.join(args.output_dir, "metrics_acdc.txt"), "a") as f:
+        f.write(f"{res}\n")
+
+    # 可视化一小部分验证样本的预测（覆盖写，数量固定）
+    visualize_samples(predictor, val_df, args.vis_output_dir, max_samples=args.vis_samples)
+
+
+if __name__ == "__main__":
+    main()
+
+
+```
+
+让我检查一下训练代码是否能正确处理 `Mask2FormerLoss`。由于之前我在 `_compute_loss` 中添加了 SAM 多类输出的转换逻辑，现在使用 `Mask2FormerLoss` 时应该走不同的分支：
+
+代码逻辑已经正确分离了：
+- `Mask2FormerLoss`: 直接使用 SAM 的原生 mask + class 输出
+- 其他损失函数: 将 SAM 输出转换为标准 `[B, C, H, W]` 格式
+
+现在让我快速验证脚本配置是否正确：
+
+修改完成！
+
+## 修改摘要
+
+1. **添加了 `--loss` 参数**：
+   - `mask2former_loss`（默认，推荐用于 SAM 多类分割）
+   - `dice_ce_loss`（之前使用的）
+
+2. **Mask2FormerLoss 优势**：
+   - 原生支持 SAM 的 mask + class 输出格式
+   - 不需要手动转换输出格式
+   - 包含 mask loss、dice loss 和 cross-entropy loss 的加权组合
+   - 更适合 Mask2Former 风格的分割架构
+
+## 新的训练命令
+
+```bash
+cd /root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA
+
+nohup python3 run_acdc_conv_lora.py \
+  --dataset_dir datasets/acdc_conv_lora/acdc_conv_lora \
+  --rank 3 \
+  --expert_num 8 \
+  --gspo_enable \
+  --adapter_enable \
+  --adapter_dim 64 \
+  --gspo_adapter_enable \
+  --loss mask2former_loss \
+  --max_epochs 100 \
+  --patience 30 \
+  --output_dir outputs/acdc_mask2former \
+  --vis_samples 8 \
+  --vis_output_dir outputs/acdc_vis_mask2former \
+> outputs/acdc_mask2former.log 2>&1 &
+```
+
+**说明**：
+- `--loss mask2former_loss`：使用 Mask2FormerLoss（现在是默认值）
+- `--max_epochs 100`：训练 100 个 epochs
+- `--patience 30`：30 个 epochs 没有改善才早停
+
+这应该能显著提升多类分割的性能，因为损失函数现在与 SAM 模型的输出格式完全匹配。
+
+```shellscript
+cd /root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA
+
+nohup python3 run_acdc_conv_lora.py \
+  --dataset_dir datasets/acdc_conv_lora/acdc_conv_lora \
+  --rank 3 \
+  --expert_num 8 \
+  --gspo_enable \
+  --adapter_enable \
+  --adapter_dim 64 \
+  --gspo_adapter_enable \
+  --loss mask2former_loss \
+  --max_epochs 100 \
+  --patience 30 \
+  --output_dir outputs/acdc_mask2former \
+  --vis_samples 8 \
+  --vis_output_dir outputs/acdc_vis_mask2former \
+> outputs/acdc_mask2former.log 2>&1 &
 ```
 
