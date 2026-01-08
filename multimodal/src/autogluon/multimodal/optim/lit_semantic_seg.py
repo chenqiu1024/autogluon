@@ -912,6 +912,9 @@ class SemanticSegmentationLitModule(LitModule):
         images = batch[self.model.image_key] if hasattr(self.model, 'image_key') else batch['image']
         labels = batch[self.model.label_key]
         
+        mask_labels = batch.get(self.model.mask_label_key, None)
+        class_labels = batch.get(self.model.class_label_key, None)
+        
         # Define forward function for GSPO
         def forward_fn(images):
             batch_copy = batch.copy()
@@ -922,23 +925,42 @@ class SemanticSegmentationLitModule(LitModule):
             output = run_model(self.model, batch_copy)
             
             # Extract predictions and MOE info
-            logits = output[self.model.prefix][LOGITS]
-            moe_loss = output[self.model.prefix].get(MOE_LOSS, 0)
+            pred_dict = output[self.model.prefix]
+            logits = pred_dict[LOGITS]
+            class_logits = pred_dict.get(CLASS_LOGITS, None)
+            moe_loss = pred_dict.get(MOE_LOSS, 0)
             
             # Extract selected experts if available
             selected_experts = None
-            if hasattr(output[self.model.prefix], 'selected_experts'):
-                selected_experts = output[self.model.prefix]['selected_experts']
+            if hasattr(pred_dict, 'selected_experts'):
+                selected_experts = pred_dict['selected_experts']
             
-            return logits, moe_loss, selected_experts
+            return {"logits": logits, "class_logits": class_logits}, moe_loss, selected_experts
         
         # Define loss function for GSPO
         def loss_fn(predictions, targets):
             if isinstance(self.loss_func, Mask2FormerLoss):
-                # Handle Mask2Former case
-                return self.loss_func(predictions, targets)
-            else:
-                return self.loss_func(input=predictions, target=targets)
+                mask_logits, class_logits = None, None
+                if isinstance(predictions, dict):
+                    mask_logits = predictions.get("logits", predictions.get("masks", None))
+                    class_logits = predictions.get("class_logits", None)
+                elif isinstance(predictions, (tuple, list)) and len(predictions) >= 2:
+                    mask_logits, class_logits = predictions[0], predictions[1]
+                else:
+                    mask_logits = predictions
+                    class_logits = None
+                if class_logits is None:
+                    raise ValueError("Mask2FormerLoss requires class_logits when GSPO is enabled.")
+                return self.loss_func(
+                    masks_queries_logits=mask_logits,
+                    class_queries_logits=class_logits,
+                    mask_labels=mask_labels,
+                    class_labels=class_labels,
+                )
+            # non Mask2Former path
+            if isinstance(predictions, (tuple, list)) and len(predictions) >= 1:
+                predictions = predictions[0]
+            return self.loss_func(input=predictions, target=targets)
         
         # Run GSPO group training
         loss, metrics, selected_experts_groups = self.gspo_trainer.gspo_group_training_step(
@@ -950,12 +972,24 @@ class SemanticSegmentationLitModule(LitModule):
         
         # Update expert quality feedback (Conv-LoRA MoE)
         if selected_experts_groups:
-            quality_scores = [
-                self.gspo_trainer.compute_segmentation_quality(
-                    pred, labels, self.gspo_trainer.quality_metric
+            quality_scores = []
+            for _ in range(self.gspo_trainer.group_size):
+                pred_out, _, _ = forward_fn(images)
+                if isinstance(pred_out, dict):
+                    mask_logits = pred_out.get("logits", pred_out.get("masks", None))
+                    class_logits = pred_out.get("class_logits", None)
+                elif isinstance(pred_out, (tuple, list)) and len(pred_out) >= 2:
+                    mask_logits, class_logits = pred_out[0], pred_out[1]
+                else:
+                    mask_logits, class_logits = pred_out, None
+                quality_scores.append(
+                    self.gspo_trainer.compute_segmentation_quality(
+                        mask_logits,
+                        labels,
+                        self.gspo_trainer.quality_metric,
+                        class_logits=class_logits,
+                    )
                 )
-                for pred in [forward_fn(images)[0] for _ in range(self.gspo_trainer.group_size)]
-            ]
             self.gspo_trainer.update_expert_feedback(
                 selected_experts_groups, quality_scores, self.model
             )

@@ -102,59 +102,98 @@ class GSPOConvLoRATrainer:
         self,
         pred_masks: torch.Tensor,
         gt_masks: torch.Tensor,
-        metric: str = 'iou'
+        metric: str = 'iou',
+        class_logits: torch.Tensor = None,
     ) -> torch.Tensor:
         """
         Compute segmentation quality metrics.
         
-        Args:
-            pred_masks: Predicted masks [B, C, H, W] or [B, H, W]
-            gt_masks: Ground truth masks [B, C, H, W] or [B, H, W]
-            metric: 'iou', 'dice', or 'both'
-            
-        Returns:
-            quality_scores: Tensor of shape [B] containing quality scores
+        - If class_logits is provided (Mask2Former-style), compute per-class
+          IoU/Dice excluding background, then average over foreground classes
+          present in GT. This preserves multi类信息（ACDC）而非二值化。
+        - Otherwise fallback to binary IoU/Dice with threshold 0.5.
         """
-        # Ensure masks are in the right format
+        eps = 1e-6
+        
+        if class_logits is not None:
+            # Mask2Former multi-class: aggregate semantic probabilities
+            # class_logits: [B, Q, C+1], pred_masks: [B, Q, H, W]
+            class_prob = torch.softmax(class_logits, dim=-1)[..., :-1]  # drop background
+            mask_prob = torch.sigmoid(pred_masks)
+            sem_prob = torch.einsum("bqc,bqhw->bchw", class_prob, mask_prob).clamp(min=0.0, max=1.0)
+            B, C, H, W = sem_prob.shape
+            
+            # GT one-hot (exclude background channel 0)
+            gt_onehot = torch.nn.functional.one_hot(gt_masks.long(), num_classes=class_logits.shape[-1])
+            gt_onehot = gt_onehot[..., 1:].permute(0, 3, 1, 2).float()  # [B, C, H, W]
+            
+            inter = (sem_prob * gt_onehot).sum(dim=(2, 3))
+            union = sem_prob.sum(dim=(2, 3)) + gt_onehot.sum(dim=(2, 3)) - inter
+            iou = (inter + eps) / (union + eps)
+            dice = (2 * inter + eps) / (sem_prob.sum(dim=(2, 3)) + gt_onehot.sum(dim=(2, 3)) + eps)
+            
+            if metric == 'iou':
+                score = iou
+            elif metric == 'dice':
+                score = dice
+            else:
+                score = (iou + dice) / 2.0
+            
+            # 平均仅在 GT 中出现的前景类；若某样本全背景，退化为全类平均
+            valid = gt_onehot.sum(dim=(2, 3)) > 0  # [B, C]
+            valid_count = valid.sum(dim=1).clamp(min=1)
+            score = (score * valid.float()).sum(dim=1) / valid_count
+            return score
+        
+        # ---- Binary fallback (原逻辑) ----
         if pred_masks.dim() == 4 and pred_masks.shape[1] > 1:
             pred_masks = torch.argmax(pred_masks, dim=1)
         if gt_masks.dim() == 4 and gt_masks.shape[1] > 1:
             gt_masks = torch.argmax(gt_masks, dim=1)
         
-        # Flatten spatial dimensions
         pred_flat = pred_masks.view(pred_masks.shape[0], -1).float()
         gt_flat = gt_masks.view(gt_masks.shape[0], -1).float()
-        
-        # Binarize if needed
         pred_flat = (pred_flat > 0.5).float()
         gt_flat = (gt_flat > 0.5).float()
         
-        # Compute intersection and union
         intersection = (pred_flat * gt_flat).sum(dim=1)
         union = pred_flat.sum(dim=1) + gt_flat.sum(dim=1) - intersection
-        
-        # IoU
-        iou = (intersection + 1e-6) / (union + 1e-6)
+        iou = (intersection + eps) / (union + eps)
         
         if metric == 'iou':
             return iou
         
-        # DICE
-        dice = (2 * intersection + 1e-6) / (pred_flat.sum(dim=1) + gt_flat.sum(dim=1) + 1e-6)
+        dice = (2 * intersection + eps) / (pred_flat.sum(dim=1) + gt_flat.sum(dim=1) + eps)
         
         if metric == 'dice':
             return dice
-        
-        # Both: average of IoU and DICE
         return (iou + dice) / 2.0
 
     def _prepare_binary_masks(
-        self, pred_masks: torch.Tensor, gt_masks: torch.Tensor
+        self, pred_masks: torch.Tensor, gt_masks: torch.Tensor, class_logits: torch.Tensor = None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Convert logits/probabilities to single-channel probability maps for
-        boundary/smoothness computation.
+        Convert logits/probabilities to single-channel foreground probability
+        maps for boundary/smoothness computation.
+        
+        - For Mask2Former (class_logits provided): sum foreground class probs.
+        - For multi-channel logits without class_logits: take max prob as foreground.
+        - For binary logits: sigmoid.
         """
+        # pred_masks: logits; gt_masks: integer labels or one-hot
+        if class_logits is not None:
+            # Mask2Former aggregation to semantic foreground prob (sum over classes)
+            class_prob = torch.softmax(class_logits, dim=-1)[..., :-1]  # drop background
+            mask_prob = torch.sigmoid(pred_masks)
+            sem_prob = torch.einsum("bqc,bqhw->bchw", class_prob, mask_prob)
+            pred_probs = sem_prob.sum(dim=1, keepdim=True).clamp(min=0.0, max=1.0)  # [B,1,H,W]
+            if gt_masks.dim() == 3:
+                gt_fg = (gt_masks > 0).float()
+            else:
+                gt_fg = torch.argmax(gt_masks, dim=1).float()
+            gt_probs = gt_fg.unsqueeze(1)
+            return pred_probs, gt_probs
+        
         # Ensure channel dimension
         if pred_masks.dim() == 3:
             pred_masks = pred_masks.unsqueeze(1)
@@ -162,7 +201,6 @@ class GSPOConvLoRATrainer:
             gt_masks = gt_masks.unsqueeze(1)
 
         if pred_masks.shape[1] > 1:
-            # Use the maximum class probability as the foreground probability
             pred_probs = torch.softmax(pred_masks, dim=1).max(dim=1, keepdim=True).values
         else:
             pred_probs = torch.sigmoid(pred_masks)
@@ -235,6 +273,7 @@ class GSPOConvLoRATrainer:
         G = self.group_size
         
         group_predictions = []
+        group_class_logits = []
         group_quality_scores = []
         group_base_quality_scores = []
         group_smooth_losses = []
@@ -249,16 +288,25 @@ class GSPOConvLoRATrainer:
             # Apply slight variations via dropout to create diversity
             # (dropout is automatically different across forward passes)
             with torch.set_grad_enabled(True):
-                pred_masks, moe_loss, selected_experts = forward_fn(images)
+                pred_out, moe_loss, selected_experts = forward_fn(images)
             
-            pred_probs, gt_probs = self._prepare_binary_masks(pred_masks, masks_gt)
+            # Normalize outputs: support dict/tuple for Mask2Former
+            if isinstance(pred_out, dict):
+                pred_masks = pred_out.get("logits", pred_out.get("masks", None))
+                class_logits = pred_out.get("class_logits", None)
+            elif isinstance(pred_out, (tuple, list)) and len(pred_out) >= 2:
+                pred_masks, class_logits = pred_out[0], pred_out[1]
+            else:
+                pred_masks, class_logits = pred_out, None
+            
+            pred_probs, gt_probs = self._prepare_binary_masks(pred_masks, masks_gt, class_logits=class_logits)
             smooth_loss = self.compute_smoothness_loss(pred_probs)
             boundary_loss = self.compute_boundary_loss(pred_probs, gt_probs)
             thin_reward = self.compute_thin_reward(pred_probs, gt_probs)
 
             # Compute quality scores
             quality = self.compute_segmentation_quality(
-                pred_masks, masks_gt, metric=self.quality_metric
+                pred_masks, masks_gt, metric=self.quality_metric, class_logits=class_logits
             )
             shaped_quality = (
                 quality
@@ -268,7 +316,7 @@ class GSPOConvLoRATrainer:
             )
             
             # Compute segmentation loss
-            seg_loss = loss_fn(pred_masks, masks_gt)
+            seg_loss = loss_fn((pred_masks, class_logits), masks_gt)
             seg_loss = (
                 seg_loss
                 + self.lambda_smooth * smooth_loss.mean()
@@ -276,6 +324,7 @@ class GSPOConvLoRATrainer:
             )
             
             group_predictions.append(pred_masks)
+            group_class_logits.append(class_logits)
             group_quality_scores.append(shaped_quality)
             group_base_quality_scores.append(quality)
             group_smooth_losses.append(smooth_loss.detach())
