@@ -626,7 +626,8 @@ class SemanticSegmentationLitModule(LitModule):
                     for key, per_output in output.items():
                         sub_out = {}
                         for sub_k, val in per_output.items():
-                            if torch.is_tensor(val) and val.shape[0] == label.shape[0]:
+                            # 仅当第 0 维与 batch 对齐时才子集化，避免标量/非 batch 维度触发索引错误
+                            if torch.is_tensor(val) and val.ndim > 0 and val.shape[0] == label.shape[0]:
                                 sub_out[sub_k] = val[labeled_mask]
                             else:
                                 sub_out[sub_k] = val
