@@ -597,15 +597,21 @@ class Multiclass_IoU(torchmetrics.Metric):
         mini = 1
         maxi = self.num_classes
         nbins = self.num_classes
-        predict = torch.argmax(output, 1) + 1
-        target = target.float() + 1
+        # output: [B, C, H, W] (logits or probabilities)
+        # target: [B, H, W] with background==0, foreground classes in [1..C-1]
+        tgt = target.float()
+        fg_mask = (tgt > 0).float()  # ignore background pixels
 
-        predict = predict.float() * (target > 0).float()
-        intersection = predict * (predict == target).float()
+        predict = torch.argmax(output, 1).float()  # [B,H,W] in [0..C-1]
+        # shift to [1..C] so that 0 can be used as "ignored" for histc
+        predict = (predict + 1.0) * fg_mask
+        tgt = (tgt + 1.0) * fg_mask
+
+        intersection = predict * (predict == tgt).float()
         # areas of intersection and union
         area_inter = torch.histc(intersection, bins=nbins, min=mini, max=maxi)
         area_pred = torch.histc(predict, bins=nbins, min=mini, max=maxi)
-        area_lab = torch.histc(target, bins=nbins, min=mini, max=maxi)
+        area_lab = torch.histc(tgt, bins=nbins, min=mini, max=maxi)
         area_union = area_pred + area_lab - area_inter
         assert torch.sum(area_inter > area_union).item() == 0, "Intersection area should be smaller than Union area"
         return area_inter.float(), area_union.float()
@@ -707,15 +713,18 @@ class Multiclass_DICE(torchmetrics.Metric):
         mini = 1
         maxi = self.num_classes
         nbins = self.num_classes
-        predict = torch.argmax(output, 1) + 1
-        target = target.float() + 1
+        tgt = target.float()
+        fg_mask = (tgt > 0).float()  # ignore background pixels
 
-        predict = predict.float() * (target > 0).float()
-        intersection = predict * (predict == target).float()
+        predict = torch.argmax(output, 1).float()
+        predict = (predict + 1.0) * fg_mask
+        tgt = (tgt + 1.0) * fg_mask
+
+        intersection = predict * (predict == tgt).float()
         # areas of intersection and union
         area_inter = torch.histc(intersection, bins=nbins, min=mini, max=maxi)
         area_pred = torch.histc(predict, bins=nbins, min=mini, max=maxi)
-        area_lab = torch.histc(target, bins=nbins, min=mini, max=maxi)
+        area_lab = torch.histc(tgt, bins=nbins, min=mini, max=maxi)
         area_union = area_pred + area_lab - area_inter
         assert torch.sum(area_inter > area_union).item() == 0, "Intersection area should be smaller than Union area"
         return area_inter.float(), area_union.float()
@@ -857,15 +866,18 @@ class Multiclass_IoU_Pred:
         mini = 1
         maxi = self.num_classes
         nbins = self.num_classes
-        predict = torch.argmax(output, 1) + 1
-        target = target.float() + 1
+        tgt = target.float()
+        fg_mask = (tgt > 0).float()
 
-        predict = predict.float() * (target > 0).float()
-        intersection = predict * (predict == target).float()
+        predict = torch.argmax(output, 1).float()
+        predict = (predict + 1.0) * fg_mask
+        tgt = (tgt + 1.0) * fg_mask
+
+        intersection = predict * (predict == tgt).float()
         # areas of intersection and union
         area_inter = torch.histc(intersection, bins=nbins, min=mini, max=maxi)
         area_pred = torch.histc(predict, bins=nbins, min=mini, max=maxi)
-        area_lab = torch.histc(target, bins=nbins, min=mini, max=maxi)
+        area_lab = torch.histc(tgt, bins=nbins, min=mini, max=maxi)
         area_union = area_pred + area_lab - area_inter
         assert torch.sum(area_inter > area_union).item() == 0, "Intersection area should be smaller than Union area"
         return area_inter.float(), area_union.float()
@@ -965,15 +977,18 @@ class Multiclass_DICE_Pred:
         mini = 1
         maxi = self.num_classes
         nbins = self.num_classes
-        predict = torch.argmax(output, 1) + 1
-        target = target.float() + 1
+        tgt = target.float()
+        fg_mask = (tgt > 0).float()
 
-        predict = predict.float() * (target > 0).float()
-        intersection = predict * (predict == target).float()
+        predict = torch.argmax(output, 1).float()
+        predict = (predict + 1.0) * fg_mask
+        tgt = (tgt + 1.0) * fg_mask
+
+        intersection = predict * (predict == tgt).float()
         # areas of intersection and union
         area_inter = torch.histc(intersection, bins=nbins, min=mini, max=maxi)
         area_pred = torch.histc(predict, bins=nbins, min=mini, max=maxi)
-        area_lab = torch.histc(target, bins=nbins, min=mini, max=maxi)
+        area_lab = torch.histc(tgt, bins=nbins, min=mini, max=maxi)
         area_union = area_pred + area_lab - area_inter
         assert torch.sum(area_inter > area_union).item() == 0, "Intersection area should be smaller than Union area"
         return area_inter.float(), area_union.float()

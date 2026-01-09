@@ -10,7 +10,7 @@ from transformers.models.mask2former.modeling_mask2former import Mask2FormerLoss
 from ..constants import CLASS_LOGITS, LOGITS, MOE_LOSS, SEMANTIC_MASK, WEIGHT
 from ..models.utils import run_model
 from .lit_module import LitModule
-from .metrics.semantic_seg_metrics import Multiclass_IoU
+from .metrics.semantic_seg_metrics import Multiclass_DICE, Multiclass_IoU
 
 logger = logging.getLogger(__name__)
 
@@ -430,7 +430,11 @@ class SemanticSegmentationLitModule(LitModule):
         label: torch.Tensor,
         **kwargs,
     ):
-        if isinstance(metric, Multiclass_IoU):
+        # For Mask2Former-style multi-class segmentation, `logits` here may be mask-token logits
+        # with shape [B, Q, H, W]. Metrics like IoU/DICE expect semantic class logits/probabilities
+        # [B, C, H, W]. We pass `semantic_masks` (already computed in the forward/postprocess)
+        # to ensure validation metrics match evaluation-time metrics.
+        if isinstance(metric, (Multiclass_IoU, Multiclass_DICE)):
             metric.update(kwargs["semantic_masks"], label)
         else:
             metric.update(logits.float(), label)
