@@ -11,13 +11,15 @@
 """
 import argparse
 import os
+import time
 
 import numpy as np
 import pandas as pd
 import torch
+import wandb
 from autogluon.multimodal import MultiModalPredictor
-import numpy as np
 from PIL import Image
+from lightning.pytorch.callbacks import Callback
 
 
 def expand_path(df: pd.DataFrame, dataset_dir: str):
@@ -96,6 +98,26 @@ def compute_fg_macro_dice(predictor: MultiModalPredictor, df: pd.DataFrame, num_
     return float(np.mean(dices))
 
 
+class WandbMetricsCallback(Callback):
+    """将 Lightning 的 callback_metrics 持续推送到 wandb。"""
+
+    def on_train_epoch_end(self, trainer, pl_module):
+        metrics = {}
+        for k, v in trainer.callback_metrics.items():
+            if hasattr(v, "item"):
+                metrics[f"train/{k}"] = v.item()
+        if metrics:
+            wandb.log(metrics, step=trainer.global_step)
+
+    def on_validation_epoch_end(self, trainer, pl_module):
+        metrics = {}
+        for k, v in trainer.callback_metrics.items():
+            if hasattr(v, "item"):
+                metrics[f"val/{k}"] = v.item()
+        if metrics:
+            wandb.log(metrics, step=trainer.global_step)
+
+
 def main():
     parser = argparse.ArgumentParser(description="ACDC semi/weak-supervised semantic segmentation with Conv-LoRA + GSPO + Adapter")
     parser.add_argument("--dataset_dir", type=str, default="datasets/acdc_conv_lora/acdc_conv_lora",
@@ -165,6 +187,22 @@ def main():
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
+
+    # 初始化 wandb（确保已登录）
+    exp_name = f"ACDC-{args.loss}-gspo{int(args.gspo_enable)}-semifrac{args.semi_labeled_fraction}-seed{args.seed}-{int(time.time())}"
+    wandb.init(
+        project="GSPOConvLoRA",
+        name=exp_name,
+        config=vars(args),
+        tags=[
+            "ACDC",
+            "Mask2Former",
+            "Conv-LoRA",
+            f"gspo={args.gspo_enable}",
+            f"adapter={args.adapter_enable}",
+            f"semi_frac={args.semi_labeled_fraction}",
+        ],
+    )
 
     # 读取 CSV
     train_df = expand_path(pd.read_csv(os.path.join(args.dataset_dir, "train.csv")), args.dataset_dir)
@@ -255,6 +293,13 @@ def main():
             hyperparameters=hyperparameters,
             label="label",
         )
+        # 记录模型/梯度
+        wandb.watch(predictor._learner.model, log="all", log_freq=50)
+        # 挂载 wandb 回调，把训练/验证指标同步到 wandb
+        try:
+            predictor._learner._trainer.callbacks.append(WandbMetricsCallback())
+        except Exception as e:
+            print(f"[Warn] Failed to attach WandbMetricsCallback: {e}")
 
         # 配置半/弱监督与训练时的 box prompt（弱监督盒来自 GT box 抖动）
         predictor._learner._train_box_prompt_cfg = {
@@ -298,6 +343,7 @@ def main():
     with open(os.path.join(args.output_dir, "metrics_acdc_semi.txt"), "a") as f:
         f.write(f"{res}\n")
         f.write(f"foreground_macro_dice: {fg_macro_dice}\n")
+    wandb.log({**{f"test/{k}": v for k, v in res.items()}, "test/fg_macro_dice": fg_macro_dice})
 
     # 可视化一小部分验证样本的预测（覆盖写，数量固定）
     visualize_samples(predictor, val_df, args.vis_output_dir, max_samples=args.vis_samples)
