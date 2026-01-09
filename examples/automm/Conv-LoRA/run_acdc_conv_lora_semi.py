@@ -16,6 +16,8 @@ import numpy as np
 import pandas as pd
 import torch
 from autogluon.multimodal import MultiModalPredictor
+import numpy as np
+from PIL import Image
 
 
 def expand_path(df: pd.DataFrame, dataset_dir: str):
@@ -66,6 +68,32 @@ def visualize_samples(predictor: MultiModalPredictor, df: pd.DataFrame, vis_dir:
         print(f"[VIS] Saved up to {len(subset)} predicted masks to {vis_dir}")
     else:
         print(f"[VIS] Unexpected prediction format: {type(preds)}; skip visualization.")
+
+
+def compute_fg_macro_dice(predictor: MultiModalPredictor, df: pd.DataFrame, num_classes: int = 4):
+    """
+    前景宏平均 Dice：对每个前景类 (1..num_classes-1) 分别计算二值 Dice，再取平均。
+    若某类在预测或 GT 中完全缺失，则该类 Dice 记为 0（与 ABD 评估口径一致）。
+    """
+    eps = 1e-6
+    dices = []
+    preds = predictor.predict(df)
+    for idx, (_, row) in enumerate(df.iterrows()):
+        gt = np.array(Image.open(row["label"]))
+        pred = np.array(preds[idx])
+        for c in range(1, num_classes):
+            gt_c = (gt == c)
+            pred_c = (pred == c)
+            if pred_c.sum() == 0 or gt_c.sum() == 0:
+                dice_c = 0.0
+            else:
+                inter = np.logical_and(gt_c, pred_c).sum()
+                union = gt_c.sum() + pred_c.sum()
+                dice_c = (2 * inter + eps) / (union + eps)
+            dices.append(dice_c)
+    if not dices:
+        return 0.0
+    return float(np.mean(dices))
 
 
 def main():
@@ -264,9 +292,12 @@ def main():
 
     # 评估（IoU + Dice）
     res = predictor.evaluate(test_df, metrics=["iou", "dice"])
+    fg_macro_dice = compute_fg_macro_dice(predictor, test_df, num_classes=4)
     print(f"Test results on ACDC (semi): {res}")
+    print(f"Foreground macro Dice (classes 1..3): {fg_macro_dice:.6f}")
     with open(os.path.join(args.output_dir, "metrics_acdc_semi.txt"), "a") as f:
         f.write(f"{res}\n")
+        f.write(f"foreground_macro_dice: {fg_macro_dice}\n")
 
     # 可视化一小部分验证样本的预测（覆盖写，数量固定）
     visualize_samples(predictor, val_df, args.vis_output_dir, max_samples=args.vis_samples)
