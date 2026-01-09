@@ -293,8 +293,12 @@ def main():
             hyperparameters=hyperparameters,
             label="label",
         )
-        # 记录模型/梯度
-        wandb.watch(predictor._learner.model, log="all", log_freq=50)
+        # 记录模型/梯度（SemanticSegmentationLearner 使用 _model 作为实际模型句柄）
+        model_to_watch = getattr(predictor._learner, "_model", None)
+        if isinstance(model_to_watch, torch.nn.Module):
+            wandb.watch(model_to_watch, log="all", log_freq=50)
+        else:
+            print("[Info] Skip wandb.watch: model not available yet.")
         # 挂载 wandb 回调，把训练/验证指标同步到 wandb
         try:
             predictor._learner._trainer.callbacks.append(WandbMetricsCallback())

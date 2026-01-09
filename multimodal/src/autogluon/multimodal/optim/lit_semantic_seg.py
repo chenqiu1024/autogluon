@@ -686,37 +686,37 @@ class SemanticSegmentationLitModule(LitModule):
                 self.log("train_labeled_frac", labeled_mask.float().mean(), on_step=True, on_epoch=True)
             else:
                 # 二值结构损失路径
-            logits = output[self.model.prefix][LOGITS]
-            if logits.dim() == 3:
-                logits = logits.unsqueeze(1)
-            if label.dim() == 3:
-                label_ = label.unsqueeze(1)
-            else:
-                label_ = label
-            
-            per_sample_sup = self._structure_loss_per_sample(logits, label_)
-            sup_count = labeled_mask.sum().clamp(min=1)
-            sup_loss = (per_sample_sup * labeled_mask.float()).sum() / sup_count.float()
-            
-            weak_loss = logits.new_tensor(0.0)
-            if hasattr(self.model, "box_key") and self.model.box_key in batch and (~labeled_mask).any():
-                boxes_b1 = batch[self.model.box_key]  # (B,1,4)
-                boxes = boxes_b1[:, 0, :]
-                logits_u = logits[~labeled_mask]
-                boxes_u = boxes[~labeled_mask]
-                weak_loss = self._weak_box_losses(
-                    logits=logits_u,
-                    boxes=boxes_u,
-                    outside_weight=weak_outside_w,
-                    entropy_weight=weak_entropy_w,
-                    tv_weight=weak_tv_w,
-                )
-            
-            moe_loss = output[self.model.prefix].get(MOE_LOSS, 0.0)
-            loss = sup_loss + weak_loss + moe_loss
-            self.log("train_sup_loss", sup_loss, on_step=True, on_epoch=True)
-            self.log("train_weak_loss", weak_loss, on_step=True, on_epoch=True)
-            self.log("train_labeled_frac", labeled_mask.float().mean(), on_step=True, on_epoch=True)
+                logits = output[self.model.prefix][LOGITS]
+                if logits.dim() == 3:
+                    logits = logits.unsqueeze(1)
+                if label.dim() == 3:
+                    label_ = label.unsqueeze(1)
+                else:
+                    label_ = label
+                
+                per_sample_sup = self._structure_loss_per_sample(logits, label_)
+                sup_count = labeled_mask.sum().clamp(min=1)
+                sup_loss = (per_sample_sup * labeled_mask.float()).sum() / sup_count.float()
+                
+                weak_loss = logits.new_tensor(0.0)
+                if hasattr(self.model, "box_key") and self.model.box_key in batch and (~labeled_mask).any():
+                    boxes_b1 = batch[self.model.box_key]  # (B,1,4)
+                    boxes = boxes_b1[:, 0, :]
+                    logits_u = logits[~labeled_mask]
+                    boxes_u = boxes[~labeled_mask]
+                    weak_loss = self._weak_box_losses(
+                        logits=logits_u,
+                        boxes=boxes_u,
+                        outside_weight=weak_outside_w,
+                        entropy_weight=weak_entropy_w,
+                        tv_weight=weak_tv_w,
+                    )
+                
+                moe_loss = output[self.model.prefix].get(MOE_LOSS, 0.0)
+                loss = sup_loss + weak_loss + moe_loss
+                self.log("train_sup_loss", sup_loss, on_step=True, on_epoch=True)
+                self.log("train_weak_loss", weak_loss, on_step=True, on_epoch=True)
+                self.log("train_labeled_frac", labeled_mask.float().mean(), on_step=True, on_epoch=True)
         else:
             if isinstance(self.loss_func, Mask2FormerLoss):
                 loss = self._compute_loss(
@@ -946,7 +946,7 @@ class SemanticSegmentationLitModule(LitModule):
                     class_logits = predictions.get("class_logits", None)
                 elif isinstance(predictions, (tuple, list)) and len(predictions) >= 2:
                     mask_logits, class_logits = predictions[0], predictions[1]
-            else:
+                else:
                     mask_logits = predictions
                     class_logits = None
                 if class_logits is None:
@@ -960,7 +960,7 @@ class SemanticSegmentationLitModule(LitModule):
             # non Mask2Former path
             if isinstance(predictions, (tuple, list)) and len(predictions) >= 1:
                 predictions = predictions[0]
-                return self.loss_func(input=predictions, target=targets)
+            return self.loss_func(input=predictions, target=targets)
         
         # Run GSPO group training
         loss, metrics, selected_experts_groups = self.gspo_trainer.gspo_group_training_step(
