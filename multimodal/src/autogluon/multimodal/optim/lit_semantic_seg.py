@@ -430,7 +430,10 @@ class SemanticSegmentationLitModule(LitModule):
         label: torch.Tensor,
         **kwargs,
     ):
-        if isinstance(metric, Multiclass_IoU):
+        # For Mask2Former-style multi-class segmentation, semantic_masks (B,C,H,W) is the
+        # correct representation for metric computation. Using raw query logits (B,Q,H,W)
+        # will severely underestimate Dice/IoU.
+        if "semantic_masks" in kwargs and kwargs["semantic_masks"] is not None:
             metric.update(kwargs["semantic_masks"], label)
         else:
             metric.update(logits.float(), label)
