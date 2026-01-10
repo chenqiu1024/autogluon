@@ -12,14 +12,13 @@
 import argparse
 import os
 import time
+from datetime import timedelta
 
 import numpy as np
 import pandas as pd
 import torch
-import wandb
 from autogluon.multimodal import MultiModalPredictor
 from PIL import Image
-from lightning.pytorch.callbacks import Callback
 
 
 def expand_path(df: pd.DataFrame, dataset_dir: str):
@@ -75,7 +74,8 @@ def visualize_samples(predictor: MultiModalPredictor, df: pd.DataFrame, vis_dir:
 def compute_fg_macro_dice(predictor: MultiModalPredictor, df: pd.DataFrame, num_classes: int = 4):
     """
     前景宏平均 Dice：对每个前景类 (1..num_classes-1) 分别计算二值 Dice，再取平均。
-    若某类在预测或 GT 中完全缺失，则该类 Dice 记为 0（与 ABD 评估口径一致）。
+    ABD/ACDC 的 test 脚本口径：若某类预测像素全为 0，则该类 Dice 直接记为 0；
+    否则按标准 Dice 计算（即便 GT 该类为空，Dice 也会是 0）。
     """
     eps = 1e-6
     dices = []
@@ -86,7 +86,8 @@ def compute_fg_macro_dice(predictor: MultiModalPredictor, df: pd.DataFrame, num_
         for c in range(1, num_classes):
             gt_c = (gt == c)
             pred_c = (pred == c)
-            if pred_c.sum() == 0 or gt_c.sum() == 0:
+            # 与 ABD `test_ACDC.py` 一致：只要 pred 该类为空，就直接记 0
+            if pred_c.sum() == 0:
                 dice_c = 0.0
             else:
                 inter = np.logical_and(gt_c, pred_c).sum()
@@ -96,26 +97,6 @@ def compute_fg_macro_dice(predictor: MultiModalPredictor, df: pd.DataFrame, num_
     if not dices:
         return 0.0
     return float(np.mean(dices))
-
-
-class WandbMetricsCallback(Callback):
-    """将 Lightning 的 callback_metrics 持续推送到 wandb。"""
-
-    def on_train_epoch_end(self, trainer, pl_module):
-        metrics = {}
-        for k, v in trainer.callback_metrics.items():
-            if hasattr(v, "item"):
-                metrics[f"train/{k}"] = v.item()
-        if metrics:
-            wandb.log(metrics, step=trainer.global_step)
-
-    def on_validation_epoch_end(self, trainer, pl_module):
-        metrics = {}
-        for k, v in trainer.callback_metrics.items():
-            if hasattr(v, "item"):
-                metrics[f"val/{k}"] = v.item()
-        if metrics:
-            wandb.log(metrics, step=trainer.global_step)
 
 
 def main():
@@ -128,9 +109,28 @@ def main():
     parser.add_argument("--num_gpus", type=int, default=1)
     parser.add_argument("--output_dir", type=str, default="outputs/acdc_conv_lora_semi")
     parser.add_argument("--ckpt_path", type=str, default=None, help="若只做评估，指定已训练模型路径")
+    parser.add_argument(
+        "--eval_ckpt",
+        type=str,
+        default=None,
+        help="纯评估入口：直接加载 Lightning .ckpt 做评估（不再训练，不依赖 output_dir 下的 last.ckpt）",
+    )
+    parser.add_argument(
+        "--resume_ckpt",
+        type=str,
+        default=None,
+        help="严格意义断点续训：指定 Lightning .ckpt 路径（会恢复 optimizer/scheduler/step/epoch）。",
+    )
     parser.add_argument("--per_gpu_batch_size", type=int, default=1)
     parser.add_argument("--batch_size", type=int, default=4, help="有效 batch size；若大于 per_gpu_batch_size*num_gpus，则会做累积")
     parser.add_argument("--eval_only", action="store_true", help="只做评估，不训练")
+    parser.add_argument(
+        "--eval_split",
+        type=str,
+        default="test",
+        choices=["train", "val", "test"],
+        help="eval_only 时评估的数据划分：train / val / test（train 表示在训练集上做评估）",
+    )
     # GSPO
     parser.add_argument("--gspo_enable", action="store_true")
     parser.add_argument("--gspo_group_size", type=int, default=4)
@@ -189,20 +189,67 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     # 初始化 wandb（确保已登录）
+    # 说明：
+    # - AutoGluon/Lightning 默认用 TensorBoardLogger 记录训练与验证指标；
+    # - 用 wandb 的 sync_tensorboard 能稳定同步曲线，无需触碰 learner._trainer 这种内部字段。
+    #
+    # 重要：请避免在脚本目录（如 Conv-LoRA/）下生成名为 `wandb/` 的目录，
+    # 否则 Python 会优先 import 本地 `wandb` 目录，导致 `import wandb` 变成 namespace package，
+    # 出现 "No module named 'wandb.xxx'" 或缺少 `wandb.init` 等问题。
+    wandb = None
+    try:
+        import sys
+
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        # 避免本地 ./wandb/ 遮蔽 pip 安装的 wandb 包
+        # 备注：当从 Conv-LoRA/ 目录运行脚本时，如果存在 Conv-LoRA/wandb/（wandb 默认运行目录），
+        # Python 会优先 import 到这个本地目录，导致 wandb 变成 “namespace package”，缺少 wandb.init 等 API。
+        # 因此在 import 前把脚本目录和空路径从 sys.path 中移除，并清掉已缓存模块。
+        script_dir_norm = os.path.normpath(script_dir)
+        cleaned = []
+        for p in sys.path:
+            if p == "":
+                continue
+            try:
+                if os.path.normpath(p) == script_dir_norm:
+                    continue
+            except Exception:
+                pass
+            cleaned.append(p)
+        sys.path = cleaned
+        sys.modules.pop("wandb", None)
+        import importlib
+
+        wandb = importlib.import_module("wandb")
+        # 额外保护：如果仍然被本地目录遮蔽（namespace package），则禁用 wandb，避免运行时崩溃
+        if not (hasattr(wandb, "init") and hasattr(wandb, "util")):
+            print(
+                "[Warn] Imported 'wandb' does not look like the official package "
+                f"(file={getattr(wandb, '__file__', None)}). "
+                "This is usually caused by a local './wandb/' directory shadowing the pip package. "
+                "Will skip wandb logging."
+            )
+            wandb = None
+    except Exception as e:
+        print(f"[Warn] wandb import failed (will skip wandb logging): {e}")
+
     exp_name = f"ACDC-{args.loss}-gspo{int(args.gspo_enable)}-semifrac{args.semi_labeled_fraction}-seed{args.seed}-{int(time.time())}"
-    wandb.init(
-        project="GSPOConvLoRA",
-        name=exp_name,
-        config=vars(args),
-        tags=[
-            "ACDC",
-            "Mask2Former",
-            "Conv-LoRA",
-            f"gspo={args.gspo_enable}",
-            f"adapter={args.adapter_enable}",
-            f"semi_frac={args.semi_labeled_fraction}",
-        ],
-    )
+    if wandb is not None:
+        wandb.init(
+            project="GSPOConvLoRA",
+            name=exp_name,
+            config=vars(args),
+            dir=args.output_dir,  # wandb 输出目录放到 output_dir，避免污染工作目录
+            sync_tensorboard=True,  # 同步 AutoGluon/Lightning 的 TensorBoard 曲线（train/val loss, val_dice 等）
+            tags=[
+                "ACDC",
+                "Mask2Former",
+                "Conv-LoRA",
+                f"gspo={args.gspo_enable}",
+                f"adapter={args.adapter_enable}",
+                f"semi_frac={args.semi_labeled_fraction}",
+            ],
+        )
 
     # 读取 CSV
     train_df = expand_path(pd.read_csv(os.path.join(args.dataset_dir, "train.csv")), args.dataset_dir)
@@ -282,9 +329,34 @@ def main():
                 })
 
     if args.eval_only:
-        if not args.ckpt_path:
-            raise ValueError("--eval_only 需要指定 --ckpt_path")
-        predictor = MultiModalPredictor.load(args.ckpt_path)
+        # 纯评估模式
+        if args.ckpt_path:
+            predictor = MultiModalPredictor.load(args.ckpt_path)
+        elif args.eval_ckpt:
+            # 利用 time_limit=0 的快速路径，让 AutoGluon 构建模型并从 Lightning ckpt 加载权重，然后直接评估
+            predictor = MultiModalPredictor(
+                problem_type="semantic_segmentation",
+                validation_metric="dice",
+                eval_metric="dice",
+                hyperparameters=hyperparameters,
+                label="label",
+                path=args.output_dir,
+                warn_if_exist=True,
+            )
+            predictor._learner._ckpt_path = args.eval_ckpt
+            predictor._learner._resume = False
+            print(f"[Eval-only] Load model weights from Lightning checkpoint (model only): {args.eval_ckpt}")
+            # time_limit=0 会在 fit_per_run 中早退，不进入训练，只构建并加载 ckpt
+            predictor._learner.fit(
+                train_data=train_df,
+                tuning_data=val_df,
+                time_limit=0,
+                seed=args.seed,
+                clean_ckpts=False,
+                hyperparameters=hyperparameters,
+            )
+        else:
+            raise ValueError("--eval_only 需要指定 --ckpt_path 或 --eval_ckpt")
     else:
         predictor = MultiModalPredictor(
             problem_type="semantic_segmentation",
@@ -292,18 +364,14 @@ def main():
             eval_metric=validation_metric,
             hyperparameters=hyperparameters,
             label="label",
+            path=args.output_dir,
+            warn_if_exist=True,
         )
-        # 记录模型/梯度（SemanticSegmentationLearner 使用 _model 作为实际模型句柄）
-        model_to_watch = getattr(predictor._learner, "_model", None)
-        if isinstance(model_to_watch, torch.nn.Module):
-            wandb.watch(model_to_watch, log="all", log_freq=50)
-        else:
-            print("[Info] Skip wandb.watch: model not available yet.")
-        # 挂载 wandb 回调，把训练/验证指标同步到 wandb
-        try:
-            predictor._learner._trainer.callbacks.append(WandbMetricsCallback())
-        except Exception as e:
-            print(f"[Warn] Failed to attach WandbMetricsCallback: {e}")
+        if wandb is not None:
+            try:
+                wandb.config.update({"autogluon_save_path": predictor.path}, allow_val_change=True)
+            except Exception as e:
+                print(f"[Warn] wandb.config.update failed: {e}")
 
         # 配置半/弱监督与训练时的 box prompt（弱监督盒来自 GT box 抖动）
         predictor._learner._train_box_prompt_cfg = {
@@ -323,6 +391,14 @@ def main():
             "weak_loss_tv_weight": args.weak_loss_tv_weight,
         }
 
+        # 严格意义断点续训（Lightning resume）：恢复模型 + optimizer/scheduler/step/epoch
+        # 原理：BaseLearner.prepare_fit_args() 会读取 self._ckpt_path 并传给 trainer.fit(ckpt_path=...)
+        # 注意：如果只是想用 ckpt 做评估而不要求保存目录中必须已有 last.ckpt，可将 _resume 设为 False 避免 process_save_path 的断言。
+        if args.resume_ckpt:
+            predictor._learner._ckpt_path = args.resume_ckpt
+            predictor._learner._resume = False  # 避免要求 output_dir 下已有 last.ckpt
+            print(f"[Resume] Will resume training from Lightning checkpoint: {args.resume_ckpt}")
+
         # 打印模型保存目录
         try:
             model_path = predictor.path
@@ -340,14 +416,19 @@ def main():
         predictor.fit(train_data=train_df, tuning_data=val_df, seed=args.seed)
 
     # 评估（IoU + Dice）
-    res = predictor.evaluate(test_df, metrics=["iou", "dice"])
-    fg_macro_dice = compute_fg_macro_dice(predictor, test_df, num_classes=4)
-    print(f"Test results on ACDC (semi): {res}")
-    print(f"Foreground macro Dice (classes 1..3): {fg_macro_dice:.6f}")
-    with open(os.path.join(args.output_dir, "metrics_acdc_semi.txt"), "a") as f:
+    eval_df = {"train": train_df, "val": val_df, "test": test_df}[args.eval_split]
+    res = predictor.evaluate(eval_df, metrics=["iou", "dice"])
+    fg_macro_dice = compute_fg_macro_dice(predictor, eval_df, num_classes=4)
+    print(f"Eval split: {args.eval_split}")
+    print(f"Eval results on ACDC ({args.eval_split}): {res}")
+    print(f"Foreground macro Dice (classes 1..3, ABD-style): {fg_macro_dice:.6f}")
+    with open(os.path.join(args.output_dir, f"metrics_acdc_{args.eval_split}.txt"), "a") as f:
         f.write(f"{res}\n")
-        f.write(f"foreground_macro_dice: {fg_macro_dice}\n")
-    wandb.log({**{f"test/{k}": v for k, v in res.items()}, "test/fg_macro_dice": fg_macro_dice})
+        f.write(f"foreground_macro_dice_abd: {fg_macro_dice}\n")
+    if wandb is not None:
+        wandb.log(
+            {**{f"{args.eval_split}/{k}": v for k, v in res.items()}, f"{args.eval_split}/fg_macro_dice_abd": fg_macro_dice}
+        )
 
     # 可视化一小部分验证样本的预测（覆盖写，数量固定）
     visualize_samples(predictor, val_df, args.vis_output_dir, max_samples=args.vis_samples)
