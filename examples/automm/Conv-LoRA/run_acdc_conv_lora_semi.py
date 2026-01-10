@@ -333,7 +333,7 @@ def main():
         if args.ckpt_path:
             predictor = MultiModalPredictor.load(args.ckpt_path)
         elif args.eval_ckpt:
-            # 利用 time_limit=0 的快速路径，让 AutoGluon 构建模型并从 Lightning ckpt 加载权重，然后直接评估
+            # 构建模型，并直接从 Lightning ckpt 加载 state_dict（不进入训练循环）
             predictor = MultiModalPredictor(
                 problem_type="semantic_segmentation",
                 validation_metric="dice",
@@ -343,18 +343,40 @@ def main():
                 path=args.output_dir,
                 warn_if_exist=True,
             )
-            predictor._learner._ckpt_path = args.eval_ckpt
-            predictor._learner._resume = False
-            print(f"[Eval-only] Load model weights from Lightning checkpoint (model only): {args.eval_ckpt}")
-            # time_limit=0 会在 fit_per_run 中早退，不进入训练，只构建并加载 ckpt
-            predictor._learner.fit(
+            # 触发内部构建（无需训练），先准备数据与列类型
+            predictor._learner.prepare_train_tuning_data(
                 train_data=train_df,
                 tuning_data=val_df,
-                time_limit=0,
+                holdout_frac=None,
                 seed=args.seed,
-                clean_ckpts=False,
-                hyperparameters=hyperparameters,
             )
+            predictor._learner.infer_column_types(column_types=None)
+            predictor._learner.infer_output_shape()
+            predictor._learner.infer_validation_metric()
+            predictor._learner.prepare_fit_args(
+                time_limit=0,  # prepare_fit_args 内部转 timedelta；0 表示不真正训练
+                seed=args.seed,
+                standalone=True,
+                clean_ckpts=False,
+            )
+            predictor._learner.get_df_preprocessor_per_run(
+                df_preprocessor=None,
+                config=predictor._learner._config,
+            )
+            predictor._learner.get_model_per_run(
+                model=None,
+                config=predictor._learner._config,
+                df_preprocessor=predictor._learner._df_preprocessor,
+            )
+            # 从 ckpt 加载权重
+            ckpt = torch.load(args.eval_ckpt, map_location="cpu")
+            state_dict = ckpt.get("state_dict", ckpt)
+            missing, unexpected = predictor._learner._model.load_state_dict(state_dict, strict=False)
+            print(f"[Eval-only] Loaded weights from {args.eval_ckpt}")
+            if missing:
+                print(f"[Eval-only][Missing keys]: {missing}")
+            if unexpected:
+                print(f"[Eval-only][Unexpected keys]: {unexpected}")
         else:
             raise ValueError("--eval_only 需要指定 --ckpt_path 或 --eval_ckpt")
     else:
