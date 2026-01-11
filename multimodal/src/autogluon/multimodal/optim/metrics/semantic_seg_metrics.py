@@ -683,56 +683,47 @@ class Binary_DICE(torchmetrics.Metric):
 class Multiclass_DICE(torchmetrics.Metric):
     """
     Compute the DICE coefficient for multi-class semantic segmentation.
+    前景宏平均（不含背景）；实现方式对齐 ABD：逐类二值化后算二值 Dice 再取平均。
     """
 
     def __init__(self, num_classes):
         super().__init__()
-        self.add_state("total_inter", default=torch.zeros(num_classes), dist_reduce_fx=None)
-        self.add_state("total_union", default=torch.zeros(num_classes), dist_reduce_fx=None)
         self.num_classes = num_classes
+        self.add_state("dice_sum", default=torch.tensor(0.0), dist_reduce_fx="sum")
+        self.add_state("class_count", default=torch.tensor(0.0), dist_reduce_fx="sum")
 
     def update(self, logits, labels):
-        inter, union = self.batch_intersection_union(logits, labels)
-        self.total_inter += inter
-        self.total_union += union
+        # logits: [B, C, H, W] (概率/Logits 均可，取 argmax 得到预测类别)
+        # labels: [B, H, W]，取值 0..C-1，背景=0
+        pred = torch.argmax(logits, dim=1)
+        gt = labels.long()
+
+        dice_sum, cls_cnt = self._dice_per_class(pred, gt)
+        self.dice_sum += dice_sum
+        self.class_count += cls_cnt
 
     def compute(self):
-        # foreground-only Dice: average over foreground classes that appear
-        eps = 2.220446049250313e-16
-        valid = self.total_union > 0
-        if not bool(valid.any()):
+        if self.class_count.item() == 0:
             return torch.tensor(0.0)
-        IoU = self.total_inter[valid] / (eps + self.total_union[valid])
-        DICE = 2.0 * IoU / (1.0 + IoU)
-        return torch.tensor(DICE.mean().item())
+        return self.dice_sum / self.class_count
 
-    def batch_intersection_union(self, output, target):
-        # Exclude background (class 0) from statistics.
-        # Classes are 0..C-1 in input; we keep foreground as 2..C bins.
-        nbins = max(self.num_classes - 1, 1)
-        mini = 2
-        maxi = self.num_classes
-
-        predict = torch.argmax(output, 1)  # 0..C-1
-        target = target.long()             # 0..C-1
-
-        # Map foreground to 2..C, background -> 1 -> 0
-        predict_fg = predict + 1
-        target_fg = target + 1
-        bg_mask = target == 0
-        predict_fg[bg_mask] = 0
-        target_fg[bg_mask] = 0
-
-        predict_fg = predict_fg.float()
-        target_fg = target_fg.float()
-
-        intersection = predict_fg * (predict_fg == target_fg).float()
-        area_inter = torch.histc(intersection, bins=nbins, min=mini, max=maxi)
-        area_pred = torch.histc(predict_fg, bins=nbins, min=mini, max=maxi)
-        area_lab = torch.histc(target_fg, bins=nbins, min=mini, max=maxi)
-        area_union = area_pred + area_lab - area_inter
-        assert torch.sum(area_inter > area_union).item() == 0, "Intersection area should be smaller than Union area"
-        return area_inter.float(), area_union.float()
+    def _dice_per_class(self, pred, gt):
+        """
+        对每个前景类 c=1..C-1 计算二值 Dice，再对有效类求平均（宏平均）。
+        若某类 pred+gt 均为 0，则跳过该类。
+        """
+        dice_sum = pred.new_tensor(0.0, dtype=torch.float32)
+        cls_cnt = pred.new_tensor(0.0, dtype=torch.float32)
+        for c in range(1, self.num_classes):
+            pred_c = (pred == c)
+            gt_c = (gt == c)
+            denom = pred_c.sum().float() + gt_c.sum().float()
+            if denom > 0:
+                inter = (pred_c & gt_c).sum().float()
+                dice_c = 2.0 * inter / denom
+                dice_sum += dice_c
+                cls_cnt += 1.0
+        return dice_sum, cls_cnt
 
 
 class Balanced_Error_Rate(torchmetrics.Metric):
@@ -959,55 +950,43 @@ class Binary_DICE_Pred:
 class Multiclass_DICE_Pred:
     """
     Compute the DICE coefficient for multi-class semantic segmentation.
+    前景宏平均（不含背景）；实现方式对齐 ABD：逐类二值化后算二值 Dice 再取平均。
     """
 
     def __init__(self, num_classes):
         super().__init__()
-        self.total_inter = torch.zeros(num_classes)
-        self.total_union = torch.zeros(num_classes)
         self.num_classes = num_classes
+        self.dice_sum = torch.tensor(0.0)
+        self.class_count = torch.tensor(0.0)
 
     def update(self, logits, labels):
-        inter, union = self.batch_intersection_union(logits, labels)
-        self.total_inter += inter
-        self.total_union += union
+        # logits: [B, C, H, W] (概率/Logits 均可，取 argmax 得到预测类别)
+        # labels: [B, H, W]，取值 0..C-1，背景=0
+        pred = torch.argmax(logits, dim=1)
+        gt = labels.long()
+
+        dice_sum, cls_cnt = self._dice_per_class(pred, gt)
+        self.dice_sum += dice_sum
+        self.class_count += cls_cnt
 
     def compute(self):
-        eps = 2.220446049250313e-16
-        valid = self.total_union > 0
-        if not bool(valid.any()):
+        if self.class_count.item() == 0:
             return torch.tensor(0.0)
-        IoU = self.total_inter[valid] / (eps + self.total_union[valid])
-        DICE = 2.0 * IoU / (1.0 + IoU)
-        return torch.tensor(DICE.mean().item())
+        return self.dice_sum / self.class_count
 
-    def batch_intersection_union(self, output, target):
-        # output: Float tensor [B, C, H, W], soft/likelihood for each class (来自模型 logits/概率)
-        # target: Long tensor [B, H, W], 语义分割 GT，取值 0..C-1，其中 0 为背景
-
-        nbins = max(self.num_classes - 1, 1)       # 仅前景类的直方图 bin 数（排除背景）
-        mini = 2                                   # 直方图最小 bin（对应前景类 ID+1 = 2）
-        maxi = self.num_classes                    # 直方图最大 bin（对应前景类 ID+1 = C）
-
-        predict = torch.argmax(output, 1)          # [B, H, W]，取每像素最大类 ID（0..C-1）
-        target = target.long()                     # [B, H, W]，确保是 long，取值 0..C-1
-
-        predict_fg = predict + 1                   # 类索引整体 +1，使前景类变成 2..C，便于直方图
-        target_fg = target + 1                     # 同上
-        bg_mask = target == 0                      # 背景掩码：GT 为背景的位置
-        predict_fg[bg_mask] = 0                    # 背景位置在预测上也置 0，不计入前景统计
-        target_fg[bg_mask] = 0                     # 背景位置在 GT 上置 0，不计入前景统计
-
-        predict_fg = predict_fg.float()            # 转 float 以用于 histc
-        target_fg = target_fg.float()
-
-        intersection = predict_fg * (predict_fg == target_fg).float()  # 逐像素交集（前景类匹配才留下该类 ID）
-        area_inter = torch.histc(intersection, bins=nbins, min=mini, max=maxi)  # 各前景类交集像素数
-        area_pred = torch.histc(predict_fg, bins=nbins, min=mini, max=maxi)     # 各前景类预测像素数
-        area_lab = torch.histc(target_fg, bins=nbins, min=mini, max=maxi)       # 各前景类 GT 像素数
-        area_union = area_pred + area_lab - area_inter                          # 各前景类并集像素数
-        assert torch.sum(area_inter > area_union).item() == 0, "Intersection area should be smaller than Union area"
-        return area_inter.float(), area_union.float()
+    def _dice_per_class(self, pred, gt):
+        dice_sum = pred.new_tensor(0.0, dtype=torch.float32)
+        cls_cnt = pred.new_tensor(0.0, dtype=torch.float32)
+        for c in range(1, self.num_classes):
+            pred_c = (pred == c)
+            gt_c = (gt == c)
+            denom = pred_c.sum().float() + gt_c.sum().float()
+            if denom > 0:
+                inter = (pred_c & gt_c).sum().float()
+                dice_c = 2.0 * inter / denom
+                dice_sum += dice_c
+                cls_cnt += 1.0
+        return dice_sum, cls_cnt
 
 
 class Balanced_Error_Rate_Pred:
