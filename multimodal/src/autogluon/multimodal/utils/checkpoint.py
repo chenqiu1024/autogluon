@@ -18,6 +18,12 @@ from typing import IO, Any, Callable, Dict, List, Optional, Tuple, Union
 import fsspec
 import lightning.pytorch as pl
 import torch
+try:
+    # lightning >=2.1
+    from lightning.pytorch.plugins.io.torch_checkpoint_io import TorchCheckpointIO
+except ModuleNotFoundError:
+    # lightning <2.1 fallback
+    from lightning.pytorch.plugins.io import TorchCheckpointIO
 from lightning.pytorch.strategies import DeepSpeedStrategy
 from lightning.pytorch.utilities.rank_zero import rank_zero_warn
 
@@ -231,6 +237,19 @@ class AutoMMModelCheckpoint(pl.callbacks.ModelCheckpoint):
 
     """
 
+    def __init__(self, *args, save_full_ckpt: bool = False, full_ckpt_dir: Optional[str] = None, **kwargs):
+        """
+        Parameters
+        ----------
+        save_full_ckpt
+            若为 True，则在每次保存（best/last）时额外保存一份完整 Lightning ckpt（包含全部权重和优化器状态）。
+        full_ckpt_dir
+            完整 ckpt 的保存目录；若为 None，则使用原始 filepath 的目录。
+        """
+        super().__init__(*args, **kwargs)
+        self.save_full_ckpt = save_full_ckpt
+        self.full_ckpt_dir = full_ckpt_dir
+
     def _save_checkpoint(self, trainer, filepath):
         # Deepspeed saves model and optimizer states in a shared state in a separate folder
         if isinstance(trainer.strategy, DeepSpeedStrategy):
@@ -240,6 +259,22 @@ class AutoMMModelCheckpoint(pl.callbacks.ModelCheckpoint):
 
         # Required to avoid redundant evaluation and checkpointing
         self._last_global_step_saved = trainer.global_step
+
+        # 额外保存完整 Lightning ckpt（不裁剪 state_dict），便于随时续训/完整评估
+        if self.save_full_ckpt:
+            try:
+                base_dir = self.full_ckpt_dir or os.path.dirname(filepath)
+                os.makedirs(base_dir, exist_ok=True)
+                base_name = os.path.basename(filepath)
+                if base_name.endswith(".ckpt"):
+                    base_name = base_name[:-5]
+                full_path = os.path.join(base_dir, f"{base_name}_full.ckpt")
+                ckpt_io = TorchCheckpointIO()
+                ckpt = trainer._checkpoint_connector.dump_checkpoint(weights_only=False)
+                ckpt_io.save_checkpoint(ckpt, full_path)
+                logger.info(f"Saved full Lightning checkpoint: {full_path}")
+            except Exception as e:
+                logger.warning(f"Failed to save full Lightning checkpoint at {filepath}: {e}")
 
     def _update_best_and_save(
         self,

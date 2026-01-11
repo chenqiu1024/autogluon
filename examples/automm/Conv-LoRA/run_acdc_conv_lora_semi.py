@@ -287,9 +287,13 @@ def main():
     parser.add_argument("--quick_test", type=int, default=None, help="仅处理前 N 个测试样本")
     args = parser.parse_args()
 
-    save_full_ckpt = not args.disable_full_ckpt
-
     args.output_dir = ensure_unique_output_dir(args.output_dir)
+
+    save_full_ckpt = not args.disable_full_ckpt
+    if save_full_ckpt:
+        # 训练过程中即保存完整 Lightning ckpt（通过 AutoMMModelCheckpoint 执行）
+        os.environ["AG_SAVE_FULL_CKPT"] = "1"
+        os.environ["AG_FULL_CKPT_DIR"] = args.output_dir
     parent_dir = os.path.dirname(args.output_dir) or "."
     os.makedirs(parent_dir, exist_ok=True)
     wandb_dir = os.path.join(parent_dir, "wandb_logs", os.path.basename(args.output_dir))

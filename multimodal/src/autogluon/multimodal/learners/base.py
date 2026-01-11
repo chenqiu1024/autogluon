@@ -969,6 +969,10 @@ class BaseLearner(ExportMixin, DistillationMixin, RealtimeMixin):
                 callbacks = []
             return callbacks
 
+        # 是否在训练过程中额外保存完整 Lightning ckpt（含全部权重 + 优化器状态）
+        save_full_ckpt = os.environ.get("AG_SAVE_FULL_CKPT", "0") == "1"
+        full_ckpt_dir = os.environ.get("AG_FULL_CKPT_DIR", None)
+
         checkpoint_callback = AutoMMModelCheckpoint(
             dirpath=save_path,
             save_top_k=config.optim.top_k,
@@ -976,6 +980,8 @@ class BaseLearner(ExportMixin, DistillationMixin, RealtimeMixin):
             monitor=litmodule.validation_metric_name,
             mode=self._minmax_mode,
             save_last=True,
+            save_full_ckpt=save_full_ckpt,
+            full_ckpt_dir=full_ckpt_dir,
         )
         early_stopping_callback = pl.callbacks.EarlyStopping(
             monitor=litmodule.validation_metric_name,
