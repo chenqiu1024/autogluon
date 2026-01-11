@@ -196,6 +196,8 @@ def main():
         project="GSPOConvLoRA",
         name=exp_name,
         config=vars(args),
+        dir=args.output_dir,           # 把 wandb 本地目录放到 output_dir，避免污染工作目录
+        sync_tensorboard=True,         # 关键：把 TensorBoard 的标量（含 val_dice）同步到 wandb
         tags=[
             "ACDC",
             "Mask2Former",
@@ -294,6 +296,8 @@ def main():
             eval_metric=validation_metric,
             hyperparameters=hyperparameters,
             label="label",
+            path=args.output_dir,          # 建议加：保证 TB 日志在 output_dir 下，方便 wandb 同步
+            warn_if_exist=True,            # 若 output_dir 已存在，则警告
         )
         # 记录模型/梯度（SemanticSegmentationLearner 使用 _model 作为实际模型句柄）
         model_to_watch = getattr(predictor._learner, "_model", None)
