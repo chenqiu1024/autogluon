@@ -22,6 +22,16 @@ from PIL import Image
 from lightning.pytorch.callbacks import Callback
 
 
+def ensure_unique_output_dir(output_dir: str) -> str:
+    output_dir = os.path.abspath(output_dir)
+    if os.path.isdir(output_dir) and os.listdir(output_dir):
+        suffix = time.strftime("%Y%m%d_%H%M%S")
+        new_dir = f"{output_dir}_{suffix}"
+        print(f"[Info] Output directory '{output_dir}' already exists; using '{new_dir}' instead to avoid overwriting.")
+        return new_dir
+    return output_dir
+
+
 def expand_path(df: pd.DataFrame, dataset_dir: str):
     df = df.copy()
     for col in ["image", "label"]:
@@ -188,7 +198,11 @@ def main():
     parser.add_argument("--quick_test", type=int, default=None, help="仅处理前 N 个测试样本")
     args = parser.parse_args()
 
-    os.makedirs(args.output_dir, exist_ok=True)
+    args.output_dir = ensure_unique_output_dir(args.output_dir)
+    parent_dir = os.path.dirname(args.output_dir) or "."
+    os.makedirs(parent_dir, exist_ok=True)
+    wandb_dir = os.path.join(parent_dir, "wandb_logs", os.path.basename(args.output_dir))
+    os.makedirs(wandb_dir, exist_ok=True)
 
     # 初始化 wandb（确保已登录）
     exp_name = f"ACDC-{args.loss}-gspo{int(args.gspo_enable)}-semifrac{args.semi_labeled_fraction}-seed{args.seed}-{int(time.time())}"
@@ -196,7 +210,7 @@ def main():
         project="GSPOConvLoRA",
         name=exp_name,
         config=vars(args),
-        dir=args.output_dir,           # 把 wandb 本地目录放到 output_dir，避免污染工作目录
+        dir=wandb_dir,                 # wandb 只在 wandb_logs/ 写文件，避免污染 output_dir
         sync_tensorboard=True,         # 关键：把 TensorBoard 的标量（含 val_dice）同步到 wandb
         tags=[
             "ACDC",
