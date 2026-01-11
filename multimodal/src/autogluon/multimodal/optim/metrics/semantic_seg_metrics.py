@@ -594,9 +594,9 @@ class Multiclass_IoU(torchmetrics.Metric):
         return torch.tensor(IoU.mean().item())
 
     def batch_intersection_union(self, output, target):
-        mini = 1
+        mini = 2
         maxi = self.num_classes
-        nbins = self.num_classes
+        nbins = self.num_classes - 1
         predict = torch.argmax(output, 1) + 1
         target = target.float() + 1
 
@@ -697,25 +697,39 @@ class Multiclass_DICE(torchmetrics.Metric):
         self.total_union += union
 
     def compute(self):
-        # DICE = 2 * intersection / (pred + gt)
-        # We can compute from IoU: DICE = 2 * IoU / (1 + IoU)
-        IoU = 1.0 * self.total_inter / (2.220446049250313e-16 + self.total_union)
+        # foreground-only Dice: average over foreground classes that appear
+        eps = 2.220446049250313e-16
+        valid = self.total_union > 0
+        if not bool(valid.any()):
+            return torch.tensor(0.0)
+        IoU = self.total_inter[valid] / (eps + self.total_union[valid])
         DICE = 2.0 * IoU / (1.0 + IoU)
         return torch.tensor(DICE.mean().item())
 
     def batch_intersection_union(self, output, target):
-        mini = 1
+        # Exclude background (class 0) from statistics.
+        # Classes are 0..C-1 in input; we keep foreground as 2..C bins.
+        nbins = max(self.num_classes - 1, 1)
+        mini = 2
         maxi = self.num_classes
-        nbins = self.num_classes
-        predict = torch.argmax(output, 1) + 1
-        target = target.float() + 1
 
-        predict = predict.float() * (target > 0).float()
-        intersection = predict * (predict == target).float()
-        # areas of intersection and union
+        predict = torch.argmax(output, 1)  # 0..C-1
+        target = target.long()             # 0..C-1
+
+        # Map foreground to 2..C, background -> 1 -> 0
+        predict_fg = predict + 1
+        target_fg = target + 1
+        bg_mask = target == 0
+        predict_fg[bg_mask] = 0
+        target_fg[bg_mask] = 0
+
+        predict_fg = predict_fg.float()
+        target_fg = target_fg.float()
+
+        intersection = predict_fg * (predict_fg == target_fg).float()
         area_inter = torch.histc(intersection, bins=nbins, min=mini, max=maxi)
-        area_pred = torch.histc(predict, bins=nbins, min=mini, max=maxi)
-        area_lab = torch.histc(target, bins=nbins, min=mini, max=maxi)
+        area_pred = torch.histc(predict_fg, bins=nbins, min=mini, max=maxi)
+        area_lab = torch.histc(target_fg, bins=nbins, min=mini, max=maxi)
         area_union = area_pred + area_lab - area_inter
         assert torch.sum(area_inter > area_union).item() == 0, "Intersection area should be smaller than Union area"
         return area_inter.float(), area_union.float()
@@ -854,18 +868,22 @@ class Multiclass_IoU_Pred:
         return torch.tensor(IoU.mean().item())
 
     def batch_intersection_union(self, output, target):
-        mini = 1
+        mini = 2
         maxi = self.num_classes
-        nbins = self.num_classes
-        predict = torch.argmax(output, 1) + 1
-        target = target.float() + 1
+        nbins = self.num_classes - 1
+        predict = torch.argmax(output, 1)
+        target = target.float()
 
-        predict = predict.float() * (target > 0).float()
-        intersection = predict * (predict == target).float()
-        # areas of intersection and union
+        predict_fg = predict + 1
+        target_fg = target + 1
+        bg_mask = target == 0
+        predict_fg[bg_mask] = 0
+        target_fg[bg_mask] = 0
+
+        intersection = predict_fg * (predict_fg == target_fg).float()
         area_inter = torch.histc(intersection, bins=nbins, min=mini, max=maxi)
-        area_pred = torch.histc(predict, bins=nbins, min=mini, max=maxi)
-        area_lab = torch.histc(target, bins=nbins, min=mini, max=maxi)
+        area_pred = torch.histc(predict_fg, bins=nbins, min=mini, max=maxi)
+        area_lab = torch.histc(target_fg, bins=nbins, min=mini, max=maxi)
         area_union = area_pred + area_lab - area_inter
         assert torch.sum(area_inter > area_union).item() == 0, "Intersection area should be smaller than Union area"
         return area_inter.float(), area_union.float()
@@ -955,26 +973,39 @@ class Multiclass_DICE_Pred:
         self.total_union += union
 
     def compute(self):
-        # DICE = 2 * intersection / (pred + gt)
-        # We can compute from IoU: DICE = 2 * IoU / (1 + IoU)
-        IoU = 1.0 * self.total_inter / (2.220446049250313e-16 + self.total_union)
+        eps = 2.220446049250313e-16
+        valid = self.total_union > 0
+        if not bool(valid.any()):
+            return torch.tensor(0.0)
+        IoU = self.total_inter[valid] / (eps + self.total_union[valid])
         DICE = 2.0 * IoU / (1.0 + IoU)
         return torch.tensor(DICE.mean().item())
 
     def batch_intersection_union(self, output, target):
-        mini = 1
-        maxi = self.num_classes
-        nbins = self.num_classes
-        predict = torch.argmax(output, 1) + 1
-        target = target.float() + 1
+        # output: Float tensor [B, C, H, W], soft/likelihood for each class (来自模型 logits/概率)
+        # target: Long tensor [B, H, W], 语义分割 GT，取值 0..C-1，其中 0 为背景
 
-        predict = predict.float() * (target > 0).float()
-        intersection = predict * (predict == target).float()
-        # areas of intersection and union
-        area_inter = torch.histc(intersection, bins=nbins, min=mini, max=maxi)
-        area_pred = torch.histc(predict, bins=nbins, min=mini, max=maxi)
-        area_lab = torch.histc(target, bins=nbins, min=mini, max=maxi)
-        area_union = area_pred + area_lab - area_inter
+        nbins = max(self.num_classes - 1, 1)       # 仅前景类的直方图 bin 数（排除背景）
+        mini = 2                                   # 直方图最小 bin（对应前景类 ID+1 = 2）
+        maxi = self.num_classes                    # 直方图最大 bin（对应前景类 ID+1 = C）
+
+        predict = torch.argmax(output, 1)          # [B, H, W]，取每像素最大类 ID（0..C-1）
+        target = target.long()                     # [B, H, W]，确保是 long，取值 0..C-1
+
+        predict_fg = predict + 1                   # 类索引整体 +1，使前景类变成 2..C，便于直方图
+        target_fg = target + 1                     # 同上
+        bg_mask = target == 0                      # 背景掩码：GT 为背景的位置
+        predict_fg[bg_mask] = 0                    # 背景位置在预测上也置 0，不计入前景统计
+        target_fg[bg_mask] = 0                     # 背景位置在 GT 上置 0，不计入前景统计
+
+        predict_fg = predict_fg.float()            # 转 float 以用于 histc
+        target_fg = target_fg.float()
+
+        intersection = predict_fg * (predict_fg == target_fg).float()  # 逐像素交集（前景类匹配才留下该类 ID）
+        area_inter = torch.histc(intersection, bins=nbins, min=mini, max=maxi)  # 各前景类交集像素数
+        area_pred = torch.histc(predict_fg, bins=nbins, min=mini, max=maxi)     # 各前景类预测像素数
+        area_lab = torch.histc(target_fg, bins=nbins, min=mini, max=maxi)       # 各前景类 GT 像素数
+        area_union = area_pred + area_lab - area_inter                          # 各前景类并集像素数
         assert torch.sum(area_inter > area_union).item() == 0, "Intersection area should be smaller than Union area"
         return area_inter.float(), area_union.float()
 
