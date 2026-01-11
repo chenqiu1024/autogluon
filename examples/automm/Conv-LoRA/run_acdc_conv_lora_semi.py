@@ -302,7 +302,53 @@ def main():
     if args.eval_only:
         if not args.ckpt_path:
             raise ValueError("--eval_only 需要指定 --ckpt_path")
-        predictor = MultiModalPredictor.load(args.ckpt_path)
+
+        def _find_ckpt_file(path: str) -> str:
+            if os.path.isfile(path) and path.endswith(".ckpt"):
+                return path
+            if os.path.isdir(path):
+                preferred = os.path.join(path, "last.ckpt")
+                if os.path.isfile(preferred):
+                    return preferred
+                ckpts = [
+                    os.path.join(path, f)
+                    for f in os.listdir(path)
+                    if f.endswith(".ckpt") and os.path.isfile(os.path.join(path, f))
+                ]
+                if ckpts:
+                    ckpts.sort(key=os.path.getmtime, reverse=True)
+                    return ckpts[0]
+            raise ValueError(f"未找到可用的 .ckpt 文件，路径: {path}")
+
+        assets_path = os.path.join(args.ckpt_path, "assets.json") if os.path.isdir(args.ckpt_path) else None
+        if assets_path and os.path.isfile(assets_path):
+            predictor = MultiModalPredictor.load(args.ckpt_path)
+        else:
+            ckpt_file = _find_ckpt_file(args.ckpt_path)
+            print(f"[Eval-only] assets.json 不存在，改为直接加载 ckpt 权重: {ckpt_file}")
+            predictor = MultiModalPredictor(
+                problem_type="semantic_segmentation",
+                validation_metric=validation_metric,
+                eval_metric=validation_metric,
+                hyperparameters=hyperparameters,
+                label="label",
+                path=args.output_dir,
+                warn_if_exist=False,
+            )
+            state = torch.load(ckpt_file, map_location="cpu")
+            state_dict = state.get("state_dict", state)
+            missing, unexpected = predictor._learner._model.load_state_dict(state_dict, strict=False)
+            print(f"[Eval-only] Loaded weights from {ckpt_file}")
+            if missing:
+                print(f"[Eval-only][Missing keys]: {missing}")
+            if unexpected:
+                print(f"[Eval-only][Unexpected keys]: {unexpected}")
+            # 生成可复用的 predictor 目录，避免下次还要手动加载 ckpt
+            try:
+                predictor.save(args.output_dir, standalone=False)
+                print(f"[Eval-only] 已导出可复用的预测器到: {args.output_dir}")
+            except Exception as e:
+                print(f"[Eval-only] 导出预测器失败（可忽略，仅影响复用）: {e}")
     else:
         predictor = MultiModalPredictor(
             problem_type="semantic_segmentation",
@@ -358,6 +404,12 @@ def main():
             print("\n[Warning] MultiModalPredictor has no 'path' attribute.\n")
 
         predictor.fit(train_data=train_df, tuning_data=val_df, seed=args.seed)
+        # 保存可复用的 predictor 目录（含 assets.json），便于后续 eval_only 直接加载
+        try:
+            predictor.save(args.output_dir, standalone=False)
+            print(f"[Info] Predictor saved to {args.output_dir}")
+        except Exception as e:
+            print(f"[Warn] Predictor save failed (non-fatal): {e}")
 
     # 评估（IoU + Dice）
     res = predictor.evaluate(test_df, metrics=["iou", "dice"])
