@@ -18,8 +18,10 @@ import pandas as pd
 import torch
 import wandb
 from autogluon.multimodal import MultiModalPredictor
+from autogluon.multimodal.constants import LOGITS, SEMANTIC_MASK
 from PIL import Image
 from lightning.pytorch.callbacks import Callback
+import torch.nn.functional as F
 
 
 def ensure_unique_output_dir(output_dir: str) -> str:
@@ -82,7 +84,12 @@ def visualize_samples(predictor: MultiModalPredictor, df: pd.DataFrame, vis_dir:
         print(f"[VIS] Unexpected prediction format: {type(preds)}; skip visualization.")
 
 
-def compute_fg_macro_dice(predictor: MultiModalPredictor, df: pd.DataFrame, num_classes: int = 4):
+def compute_fg_macro_dice(
+    predictor: MultiModalPredictor,
+    df: pd.DataFrame,
+    num_classes: int = 4,
+    preds: list = None,
+):
     """
     前景宏平均 Dice：对每个前景类 (1..num_classes-1) 分别计算二值 Dice，再取平均。
     ABD/ACDC 的 test 脚本口径：若某类预测像素全为 0，则该类 Dice 直接记为 0；
@@ -90,7 +97,8 @@ def compute_fg_macro_dice(predictor: MultiModalPredictor, df: pd.DataFrame, num_
     """
     eps = 1e-6
     dices = []
-    preds = predictor.predict(df)
+    if preds is None:
+        preds = predictor.predict(df)
     for idx, (_, row) in enumerate(df.iterrows()):
         gt = np.array(Image.open(row["label"]))
         pred = np.array(preds[idx])
@@ -108,6 +116,85 @@ def compute_fg_macro_dice(predictor: MultiModalPredictor, df: pd.DataFrame, num_
     if not dices:
         return 0.0
     return float(np.mean(dices))
+
+
+def compute_simple_seg_metrics(preds: list, df: pd.DataFrame, num_classes: int = 4):
+    """
+    简单多类分割指标：返回包含背景的宏平均 Dice/IoU，以及仅前景的宏平均。
+    """
+    eps = 1e-6
+    dice_all, iou_all = [], []
+    dice_fg, iou_fg = [], []
+    for idx, (_, row) in enumerate(df.iterrows()):
+        gt = np.array(Image.open(row["label"]))
+        pred = np.array(preds[idx])
+        for c in range(num_classes):
+            gt_c = gt == c
+            pred_c = pred == c
+            inter = np.logical_and(gt_c, pred_c).sum()
+            union = gt_c.sum() + pred_c.sum()
+            denom_iou = gt_c.sum() + pred_c.sum() - inter
+            # 若该类在 GT 与预测中都不存在，视为完美匹配
+            if union == 0:
+                dice_c = 1.0
+            else:
+                dice_c = (2 * inter + eps) / (union + eps)
+            if denom_iou == 0:
+                iou_c = 1.0
+            else:
+                iou_c = (inter + eps) / (denom_iou + eps)
+            dice_all.append(dice_c)
+            iou_all.append(iou_c)
+            if c > 0:
+                dice_fg.append(dice_c)
+                iou_fg.append(iou_c)
+    return {
+        "dice_macro_all": float(np.mean(dice_all)) if dice_all else 0.0,
+        "iou_macro_all": float(np.mean(iou_all)) if iou_all else 0.0,
+        "dice_macro_fg": float(np.mean(dice_fg)) if dice_fg else 0.0,
+        "iou_macro_fg": float(np.mean(iou_fg)) if iou_fg else 0.0,
+    }
+
+
+def manual_predict_semantic_masks(predictor: MultiModalPredictor, df: pd.DataFrame) -> list:
+    """
+    避开 AutoGluon 对 ret_type=SEMANTIC_MASK 的依赖，直接取 logits/semantic_mask。
+    返回 np.ndarray list，每个元素形状 (H,W)。
+    """
+    learner = predictor._learner
+    data = learner.on_predict_start(df)
+    outputs = learner.predict_per_run(data=data, realtime=False, requires_label=False)
+    image_col = learner.get_image_column_name(data)
+    preds = []
+    for idx, out in enumerate(outputs):
+        if SEMANTIC_MASK in out:
+            mask_logits = out[SEMANTIC_MASK]
+            if isinstance(mask_logits, torch.Tensor) and mask_logits.ndim == 4:
+                mask_logits = mask_logits[0]
+        elif LOGITS in out:
+            mask_logits = out[LOGITS]
+        elif "logits" in out:
+            mask_logits = out["logits"]
+        else:
+            # 兜底：取第一个 tensor-like
+            mask_logits = next(iter(out.values()))
+        if isinstance(mask_logits, torch.Tensor):
+            # 统一为 (1,C,H,W)
+            if mask_logits.ndim == 3:
+                mask_logits = mask_logits.unsqueeze(0)
+            elif mask_logits.ndim == 2:
+                mask_logits = mask_logits.unsqueeze(0).unsqueeze(0)
+            ori_size = Image.open(data[image_col][idx]).size  # (W,H)
+            mask_logits = F.interpolate(
+                mask_logits.float(), (ori_size[1], ori_size[0]), mode="bilinear", align_corners=False
+            )
+            mask = mask_logits.squeeze(0).argmax(dim=0).cpu().numpy()
+        else:
+            mask = np.array(mask_logits)
+            if mask.ndim == 3:
+                mask = mask.squeeze()
+        preds.append(mask.astype(np.uint8))
+    return preds
 
 
 class WandbMetricsCallback(Callback):
@@ -176,6 +263,8 @@ def main():
     # Mask tokens
     parser.add_argument("--num_mask_tokens", type=int, default=10,
                         help="Mask tokens/queries (建议 >= 类别数，Mask2Former 风格推荐 10+)")
+    parser.add_argument("--disable_full_ckpt", action="store_true",
+                        help="默认训练结束会额外保存完整 Lightning ckpt（含优化器状态）；加此参数可关闭。")
     # Semi / weak supervision
     parser.add_argument("--semi_labeled_fraction", type=float, default=0.1,
                         help="使用精确掩码的样本比例，其余仅用弱监督盒约束")
@@ -197,6 +286,8 @@ def main():
     parser.add_argument("--debug", action="store_true", help="仅处理少量样本以快速验证")
     parser.add_argument("--quick_test", type=int, default=None, help="仅处理前 N 个测试样本")
     args = parser.parse_args()
+
+    save_full_ckpt = not args.disable_full_ckpt
 
     args.output_dir = ensure_unique_output_dir(args.output_dir)
     parent_dir = os.path.dirname(args.output_dir) or "."
@@ -335,8 +426,56 @@ def main():
                 path=args.output_dir,
                 warn_if_exist=False,
             )
+            # 手动构建 learner 所需的内部状态，确保 _model 已初始化
+            predictor._learner.prepare_train_tuning_data(
+                train_data=train_df,
+                tuning_data=val_df,
+                holdout_frac=None,
+                seed=args.seed,
+            )
+            predictor._learner.infer_column_types(column_types=None)
+            predictor._learner.infer_output_shape()
+            predictor._learner.infer_validation_metric()
+            predictor._learner.prepare_fit_args(
+                time_limit=0,
+                seed=args.seed,
+                standalone=True,
+                clean_ckpts=False,
+            )
+            predictor._learner.init_pretrained()
+            # 确保 _train_data 可用
+            if predictor._learner._train_data is None:
+                predictor._learner._train_data = train_df
+            df_proc = predictor._learner.get_df_preprocessor_per_run(
+                df_preprocessor=None,
+                config=predictor._learner._config,
+            )
+            if df_proc is None:
+                df_proc = predictor._learner.get_df_preprocessor_per_run(
+                    df_preprocessor=None,
+                    data=train_df,
+                    config=predictor._learner._config,
+                    is_train=False,
+                )
+            predictor._learner._df_preprocessor = df_proc
+            predictor._learner._config = predictor._learner.update_config_by_data_per_run(
+                config=predictor._learner._config,
+                df_preprocessor=df_proc,
+            )
+            model_built = predictor._learner.get_model_per_run(
+                model=None,
+                config=predictor._learner._config,
+                df_preprocessor=df_proc,
+            )
+            predictor._learner._model = model_built
             state = torch.load(ckpt_file, map_location="cpu")
             state_dict = state.get("state_dict", state)
+            # 兼容 Lightning ckpt 前缀：去掉 "model." 或 "model.model." 以匹配当前模型
+            if isinstance(state_dict, dict):
+                keys = list(state_dict.keys())
+                if keys and all(k.startswith("model.model.") for k in keys):
+                    # ckpt 带双重前缀，仅去掉一层，保留 'model.' 以匹配当前模型
+                    state_dict = {k[len("model.") :]: v for k, v in state_dict.items()}
             missing, unexpected = predictor._learner._model.load_state_dict(state_dict, strict=False)
             print(f"[Eval-only] Loaded weights from {ckpt_file}")
             if missing:
@@ -410,10 +549,37 @@ def main():
             print(f"[Info] Predictor saved to {args.output_dir}")
         except Exception as e:
             print(f"[Warn] Predictor save failed (non-fatal): {e}")
+        # 额外保存完整 Lightning ckpt，便于续训/完整评估（含优化器/调度器状态）
+        if save_full_ckpt:
+            try:
+                ckpt_path = os.path.join(args.output_dir, "last_full.ckpt")
+                trainer = getattr(predictor._learner, "_trainer", None)
+                if trainer is not None:
+                    trainer.save_checkpoint(ckpt_path, weights_only=False)
+                    print(f"[Info] Full Lightning ckpt saved: {ckpt_path}")
+                else:
+                    print("[Warn] Trainer not available, skip full ckpt saving.")
+            except Exception as e:
+                print(f"[Warn] Saving full Lightning ckpt failed: {e}")
 
     # 评估（IoU + Dice）
-    res = predictor.evaluate(test_df, metrics=["iou", "dice"])
-    fg_macro_dice = compute_fg_macro_dice(predictor, test_df, num_classes=4)
+    preds_cache = None
+    try:
+        res = predictor.evaluate(test_df, metrics=["iou", "dice"])
+    except Exception as e:
+        print(f"[Warn] predictor.evaluate 失败，回退到手动评估: {e}")
+        preds_cache = manual_predict_semantic_masks(predictor, test_df)
+        manual = compute_simple_seg_metrics(preds_cache, test_df, num_classes=4)
+        res = {
+            "dice_manual_macro_all": manual["dice_macro_all"],
+            "dice_manual_macro_fg": manual["dice_macro_fg"],
+            "iou_manual_macro_all": manual["iou_macro_all"],
+            "iou_manual_macro_fg": manual["iou_macro_fg"],
+        }
+
+    if preds_cache is None:
+        preds_cache = manual_predict_semantic_masks(predictor, test_df)
+    fg_macro_dice = compute_fg_macro_dice(predictor, test_df, num_classes=4, preds=preds_cache)
     print(f"Test results on ACDC (semi): {res}")
     print(f"Foreground macro Dice (classes 1..3): {fg_macro_dice:.6f}")
     with open(os.path.join(args.output_dir, "metrics_acdc_semi.txt"), "a") as f:
@@ -427,4 +593,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
 
