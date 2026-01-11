@@ -75,7 +75,8 @@ def visualize_samples(predictor: MultiModalPredictor, df: pd.DataFrame, vis_dir:
 def compute_fg_macro_dice(predictor: MultiModalPredictor, df: pd.DataFrame, num_classes: int = 4):
     """
     前景宏平均 Dice：对每个前景类 (1..num_classes-1) 分别计算二值 Dice，再取平均。
-    若某类在预测或 GT 中完全缺失，则该类 Dice 记为 0（与 ABD 评估口径一致）。
+    ABD/ACDC 的 test 脚本口径：若某类预测像素全为 0，则该类 Dice 直接记为 0；
+    否则按标准 Dice 计算（即便 GT 该类为空，Dice 也会是 0）。
     """
     eps = 1e-6
     dices = []
@@ -86,7 +87,8 @@ def compute_fg_macro_dice(predictor: MultiModalPredictor, df: pd.DataFrame, num_
         for c in range(1, num_classes):
             gt_c = (gt == c)
             pred_c = (pred == c)
-            if pred_c.sum() == 0 or gt_c.sum() == 0:
+            # 与 ABD `test_ACDC.py` 一致：只要 pred 该类为空，就直接记 0
+            if pred_c.sum() == 0:
                 dice_c = 0.0
             else:
                 inter = np.logical_and(gt_c, pred_c).sum()
