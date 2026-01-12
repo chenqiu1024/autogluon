@@ -1,5 +1,6 @@
 import logging
 import hashlib
+import copy
 from typing import Callable, Dict, Optional
 
 import torch
@@ -39,6 +40,15 @@ class SemanticSegmentationLitModule(LitModule):
         }
         # BBoxPromptPredictor instance for "predict" mode
         self.train_bbox_predictor = train_bbox_predictor
+        # EMA teacher (optional)
+        cfg = self.train_box_prompt_cfg or {}
+        self.ema_enabled = bool(cfg.get("ema_enable", False))
+        self.ema_decay = float(cfg.get("ema_decay", 0.99))
+        self.ema_model = None
+        if self.ema_enabled:
+            self.ema_model = copy.deepcopy(self.model)
+            for p in self.ema_model.parameters():
+                p.requires_grad_(False)
     
     @staticmethod
     def _stable_uniform_0_1(key: str, seed: int = 0) -> float:
@@ -257,6 +267,16 @@ class SemanticSegmentationLitModule(LitModule):
         if count == 0:
             return logits.new_tensor(0.0)
         return total / float(count)
+
+    def _update_ema_model(self):
+        if not self.ema_enabled or self.ema_model is None:
+            return
+        with torch.no_grad():
+            for ema_param, param in zip(self.ema_model.parameters(), self.model.parameters()):
+                ema_param.data.mul_(self.ema_decay).add_(param.data, alpha=1.0 - self.ema_decay)
+            # keep buffers (e.g., BatchNorm stats) in sync
+            for ema_buf, buf in zip(self.ema_model.buffers(), self.model.buffers()):
+                ema_buf.data.copy_(buf.data)
 
     def _predict_boxes_from_images(self, image_paths: list, target_h: int, target_w: int) -> torch.Tensor:
         """
@@ -681,11 +701,59 @@ class SemanticSegmentationLitModule(LitModule):
                         entropy_weight=weak_entropy_w,
                         tv_weight=weak_tv_w,
                     )
+                else:
+                    weak_loss = output[self.model.prefix][LOGITS].new_tensor(0.0)
+
+                # EMA 一致性损失（仅无标签子集）
+                consistency_loss = output[self.model.prefix][LOGITS].new_tensor(0.0)
+                ema_w = float(cfg.get("ema_consistency_weight", 0.0))
+                if self.ema_enabled and self.ema_model is not None and ema_w > 0 and (~labeled_mask).any():
+                    def _subset_batch(b, mask_bool: torch.Tensor):
+                        new = {}
+                        for k, v in b.items():
+                            if torch.is_tensor(v) and v.shape[0] == mask_bool.shape[0]:
+                                new[k] = v[mask_bool]
+                            elif isinstance(v, list) and len(v) == mask_bool.shape[0]:
+                                new[k] = [v[i] for i in range(len(v)) if mask_bool[i].item()]
+                            else:
+                                new[k] = v
+                        return new
+
+                    batch_u = _subset_batch(batch, ~labeled_mask)
+                    with torch.no_grad():
+                        ema_out = run_model(self.ema_model, batch_u)
+                        per_ema = ema_out[self.model.prefix]
+
+                    # student probs
+                    if CLASS_LOGITS in per_output:
+                        class_logits_u = per_output[CLASS_LOGITS][~labeled_mask]
+                        mask_prob_u = torch.sigmoid(mask_logits_u)
+                        class_prob_u = F.softmax(class_logits_u, dim=-1)[..., :-1]
+                        semantic_prob_u = torch.einsum("bqc,bqhw->bchw", class_prob_u, mask_prob_u)
+                        fg_prob_u = semantic_prob_u.sum(dim=1, keepdim=True)
+                    else:
+                        fg_prob_u = torch.sigmoid(mask_logits_u) if mask_logits_u.dim() == 4 else torch.sigmoid(mask_logits_u.unsqueeze(1))
+
+                    # teacher probs
+                    if CLASS_LOGITS in per_ema:
+                        class_logits_t = per_ema[CLASS_LOGITS]
+                        mask_logits_t = per_ema[LOGITS]
+                        mask_prob_t = torch.sigmoid(mask_logits_t)
+                        class_prob_t = F.softmax(class_logits_t, dim=-1)[..., :-1]
+                        semantic_prob_t = torch.einsum("bqc,bqhw->bchw", class_prob_t, mask_prob_t)
+                        fg_prob_t = semantic_prob_t.sum(dim=1, keepdim=True)
+                    else:
+                        mask_logits_t = per_ema[LOGITS]
+                        fg_prob_t = torch.sigmoid(mask_logits_t) if mask_logits_t.dim() == 4 else torch.sigmoid(mask_logits_t.unsqueeze(1))
+
+                    consistency_loss = F.mse_loss(fg_prob_u, fg_prob_t)
                 
                 moe_loss = output[self.model.prefix].get(MOE_LOSS, 0.0)
-                loss = sup_loss + weak_loss + moe_loss
+                loss = sup_loss + weak_loss + ema_w * consistency_loss + moe_loss
                 self.log("train_sup_loss", sup_loss, on_step=True, on_epoch=True)
                 self.log("train_weak_loss", weak_loss, on_step=True, on_epoch=True)
+                if ema_w > 0:
+                    self.log("train_consistency_loss", consistency_loss, on_step=True, on_epoch=True)
                 self.log("train_labeled_frac", labeled_mask.float().mean(), on_step=True, on_epoch=True)
             else:
                 # 二值结构损失路径
@@ -900,6 +968,10 @@ class SemanticSegmentationLitModule(LitModule):
         
         self.log("train_loss", loss)
         return loss
+
+    def on_after_backward(self):
+        # 更新 EMA teacher 参数
+        self._update_ema_model()
     
     def _gspo_training_step(self, batch):
         """

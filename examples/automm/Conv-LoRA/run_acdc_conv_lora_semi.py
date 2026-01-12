@@ -282,6 +282,10 @@ def main():
                         help="盒内熵最小化权重")
     parser.add_argument("--weak_loss_tv_weight", type=float, default=0.0,
                         help="盒内平滑 (TV) 约束权重")
+    # EMA teacher
+    parser.add_argument("--ema_enable", action="store_true", help="启用 EMA teacher 一致性")
+    parser.add_argument("--ema_decay", type=float, default=0.99, help="EMA 衰减系数")
+    parser.add_argument("--ema_consistency_weight", type=float, default=0.1, help="EMA 一致性损失权重")
     # Quick / Debug
     parser.add_argument("--debug", action="store_true", help="仅处理少量样本以快速验证")
     parser.add_argument("--quick_test", type=int, default=None, help="仅处理前 N 个测试样本")
@@ -530,6 +534,9 @@ def main():
             "weak_loss_outside_weight": args.weak_loss_outside_weight,
             "weak_loss_entropy_weight": args.weak_loss_entropy_weight,
             "weak_loss_tv_weight": args.weak_loss_tv_weight,
+            "ema_enable": bool(args.ema_enable),
+            "ema_decay": args.ema_decay,
+            "ema_consistency_weight": args.ema_consistency_weight,
         }
 
         # 打印模型保存目录

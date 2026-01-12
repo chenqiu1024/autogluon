@@ -96,6 +96,10 @@ class SemanticSegmentationLearner(BaseLearner):
             "weak_loss_outside_weight": 1.0,    # enforce outside-box background
             "weak_loss_entropy_weight": 0.05,   # entropy minimization inside box
             "weak_loss_tv_weight": 0.0,         # optional smoothness (total variation) inside box
+            # EMA teacher (optional)
+            "ema_enable": False,
+            "ema_decay": 0.99,
+            "ema_consistency_weight": 0.1,
         }
         # BBoxPromptPredictor instance for "predict" mode (set via external config)
         self._train_bbox_predictor = None
