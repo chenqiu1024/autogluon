@@ -636,6 +636,15 @@ class SemanticSegmentationLitModule(LitModule):
                         batch[self.model.box_key] = pred_boxes.unsqueeze(1)  # (B,1,4)
         # prepare_targets
         output = run_model(self.model, batch)
+        # If class logits exist, compose semantic masks for metrics
+        per_output_all = output.get(self.model.prefix, {})
+        if CLASS_LOGITS in per_output_all:
+            class_logits_all = per_output_all[CLASS_LOGITS]  # [B, Q, C+1]
+            mask_logits_all = per_output_all[LOGITS]         # [B, Q, H, W]
+            mask_prob_all = torch.sigmoid(mask_logits_all)
+            class_prob_all = F.softmax(class_logits_all, dim=-1)[..., :-1]
+            semantic_prob_all = torch.einsum("bqc,bqhw->bchw", class_prob_all, mask_prob_all)
+            output[self.model.prefix][SEMANTIC_MASK] = semantic_prob_all
         
         # ---- Loss: fully-supervised OR semi/weak mixed ----
         if self.training and labeled_mask is not None:
