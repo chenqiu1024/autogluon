@@ -641,6 +641,9 @@ class SemanticSegmentationLitModule(LitModule):
         if self.training and labeled_mask is not None:
             # Semi/weak supervision path
             if isinstance(self.loss_func, Mask2FormerLoss):
+                per_output = output[self.model.prefix]
+                mask_logits_all = per_output[LOGITS]
+
                 # 1) 有标签子集：使用 Mask2FormerLoss
                 sup_loss = output[self.model.prefix][LOGITS].new_tensor(0.0)
                 if labeled_mask.any():
@@ -675,10 +678,18 @@ class SemanticSegmentationLitModule(LitModule):
                 
                 # 2) 无标签子集：对聚合前景概率做盒弱监督
                 weak_loss = output[self.model.prefix][LOGITS].new_tensor(0.0)
-                if hasattr(self.model, "box_key") and self.model.box_key in batch and (~labeled_mask).any():
-                    per_output = output[self.model.prefix]
-                    mask_logits_u = per_output[LOGITS][~labeled_mask]
-                    boxes_u = batch[self.model.box_key][:, 0, :][~labeled_mask]
+                consistency_loss = output[self.model.prefix][LOGITS].new_tensor(0.0)
+                ema_w = float(cfg.get("ema_consistency_weight", 0.0))
+
+                if (~labeled_mask).any():
+                    mask_logits_u = mask_logits_all[~labeled_mask]
+
+                    # 盒弱监督
+                    if hasattr(self.model, "box_key") and self.model.box_key in batch:
+                        boxes_u = batch[self.model.box_key][:, 0, :][~labeled_mask]
+                    else:
+                        boxes_u = None
+
                     if CLASS_LOGITS in per_output:
                         class_logits_u = per_output[CLASS_LOGITS][~labeled_mask]
                         # 语义概率：softmax(class) * sigmoid(mask) -> foreground 概率
@@ -694,59 +705,56 @@ class SemanticSegmentationLitModule(LitModule):
                             fg_logits = torch.logit(fg_prob)
                         else:
                             fg_logits = logits_u
-                    weak_loss = self._weak_box_losses(
-                        logits=fg_logits,
-                        boxes=boxes_u,
-                        outside_weight=weak_outside_w,
-                        entropy_weight=weak_entropy_w,
-                        tv_weight=weak_tv_w,
-                    )
-                else:
-                    weak_loss = output[self.model.prefix][LOGITS].new_tensor(0.0)
+                    if boxes_u is not None:
+                        weak_loss = self._weak_box_losses(
+                            logits=fg_logits,
+                            boxes=boxes_u,
+                            outside_weight=weak_outside_w,
+                            entropy_weight=weak_entropy_w,
+                            tv_weight=weak_tv_w,
+                        )
 
-                # EMA 一致性损失（仅无标签子集）
-                consistency_loss = output[self.model.prefix][LOGITS].new_tensor(0.0)
-                ema_w = float(cfg.get("ema_consistency_weight", 0.0))
-                if self.ema_enabled and self.ema_model is not None and ema_w > 0 and (~labeled_mask).any():
-                    def _subset_batch(b, mask_bool: torch.Tensor):
-                        new = {}
-                        for k, v in b.items():
-                            if torch.is_tensor(v) and v.shape[0] == mask_bool.shape[0]:
-                                new[k] = v[mask_bool]
-                            elif isinstance(v, list) and len(v) == mask_bool.shape[0]:
-                                new[k] = [v[i] for i in range(len(v)) if mask_bool[i].item()]
-                            else:
-                                new[k] = v
-                        return new
+                    # EMA 一致性损失（仅无标签子集）
+                    if self.ema_enabled and self.ema_model is not None and ema_w > 0:
+                        def _subset_batch(b, mask_bool: torch.Tensor):
+                            new = {}
+                            for k, v in b.items():
+                                if torch.is_tensor(v) and v.shape[0] == mask_bool.shape[0]:
+                                    new[k] = v[mask_bool]
+                                elif isinstance(v, list) and len(v) == mask_bool.shape[0]:
+                                    new[k] = [v[i] for i in range(len(v)) if mask_bool[i].item()]
+                                else:
+                                    new[k] = v
+                            return new
 
-                    batch_u = _subset_batch(batch, ~labeled_mask)
-                    with torch.no_grad():
-                        ema_out = run_model(self.ema_model, batch_u)
-                        per_ema = ema_out[self.model.prefix]
+                        batch_u = _subset_batch(batch, ~labeled_mask)
+                        with torch.no_grad():
+                            ema_out = run_model(self.ema_model, batch_u)
+                            per_ema = ema_out[self.model.prefix]
 
-                    # student probs
-                    if CLASS_LOGITS in per_output:
-                        class_logits_u = per_output[CLASS_LOGITS][~labeled_mask]
-                        mask_prob_u = torch.sigmoid(mask_logits_u)
-                        class_prob_u = F.softmax(class_logits_u, dim=-1)[..., :-1]
-                        semantic_prob_u = torch.einsum("bqc,bqhw->bchw", class_prob_u, mask_prob_u)
-                        fg_prob_u = semantic_prob_u.sum(dim=1, keepdim=True)
-                    else:
-                        fg_prob_u = torch.sigmoid(mask_logits_u) if mask_logits_u.dim() == 4 else torch.sigmoid(mask_logits_u.unsqueeze(1))
+                        # student probs
+                        if CLASS_LOGITS in per_output:
+                            class_logits_u = per_output[CLASS_LOGITS][~labeled_mask]
+                            mask_prob_u = torch.sigmoid(mask_logits_u)
+                            class_prob_u = F.softmax(class_logits_u, dim=-1)[..., :-1]
+                            semantic_prob_u = torch.einsum("bqc,bqhw->bchw", class_prob_u, mask_prob_u)
+                            fg_prob_u = semantic_prob_u.sum(dim=1, keepdim=True)
+                        else:
+                            fg_prob_u = torch.sigmoid(mask_logits_u) if mask_logits_u.dim() == 4 else torch.sigmoid(mask_logits_u.unsqueeze(1))
 
-                    # teacher probs
-                    if CLASS_LOGITS in per_ema:
-                        class_logits_t = per_ema[CLASS_LOGITS]
-                        mask_logits_t = per_ema[LOGITS]
-                        mask_prob_t = torch.sigmoid(mask_logits_t)
-                        class_prob_t = F.softmax(class_logits_t, dim=-1)[..., :-1]
-                        semantic_prob_t = torch.einsum("bqc,bqhw->bchw", class_prob_t, mask_prob_t)
-                        fg_prob_t = semantic_prob_t.sum(dim=1, keepdim=True)
-                    else:
-                        mask_logits_t = per_ema[LOGITS]
-                        fg_prob_t = torch.sigmoid(mask_logits_t) if mask_logits_t.dim() == 4 else torch.sigmoid(mask_logits_t.unsqueeze(1))
+                        # teacher probs
+                        if CLASS_LOGITS in per_ema:
+                            class_logits_t = per_ema[CLASS_LOGITS]
+                            mask_logits_t = per_ema[LOGITS]
+                            mask_prob_t = torch.sigmoid(mask_logits_t)
+                            class_prob_t = F.softmax(class_logits_t, dim=-1)[..., :-1]
+                            semantic_prob_t = torch.einsum("bqc,bqhw->bchw", class_prob_t, mask_prob_t)
+                            fg_prob_t = semantic_prob_t.sum(dim=1, keepdim=True)
+                        else:
+                            mask_logits_t = per_ema[LOGITS]
+                            fg_prob_t = torch.sigmoid(mask_logits_t) if mask_logits_t.dim() == 4 else torch.sigmoid(mask_logits_t.unsqueeze(1))
 
-                    consistency_loss = F.mse_loss(fg_prob_u, fg_prob_t)
+                        consistency_loss = F.mse_loss(fg_prob_u, fg_prob_t)
                 
                 moe_loss = output[self.model.prefix].get(MOE_LOSS, 0.0)
                 loss = sup_loss + weak_loss + ema_w * consistency_loss + moe_loss
