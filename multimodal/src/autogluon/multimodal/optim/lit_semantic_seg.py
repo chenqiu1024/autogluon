@@ -962,7 +962,12 @@ class SemanticSegmentationLitModule(LitModule):
         allow_semisup_gspo = bool(getattr(self.gspo_trainer, "allow_semisup", False)) if self.gspo_trainer else False
         
         if self.dual_student:
-            loss = self._training_step_dual(batch)
+            # _training_step_dual may return (output, loss); unwrap to keep `loss` scalar/tensor
+            dual_ret = self._training_step_dual(batch)
+            if isinstance(dual_ret, tuple) and len(dual_ret) == 2:
+                _, loss = dual_ret
+            else:
+                loss = dual_ret
             selected_experts = None
         elif use_gspo and allow_semisup_gspo and semi_labeled_fraction < 1.0:
             # Semi-supervised with GSPO on labeled subset, weak loss on unlabeled subset.
