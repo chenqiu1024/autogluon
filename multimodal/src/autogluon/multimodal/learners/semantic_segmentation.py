@@ -100,6 +100,8 @@ class SemanticSegmentationLearner(BaseLearner):
             "ema_enable": False,
             "ema_decay": 0.99,
             "ema_consistency_weight": 0.1,
+            "ema_pseudo_weight": 0.0,
+            "ema_pseudo_thresh": 0.5,
         }
         # BBoxPromptPredictor instance for "predict" mode (set via external config)
         self._train_bbox_predictor = None

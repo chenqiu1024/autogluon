@@ -286,6 +286,8 @@ def main():
     parser.add_argument("--ema_enable", action="store_true", help="启用 EMA teacher 一致性")
     parser.add_argument("--ema_decay", type=float, default=0.99, help="EMA 衰减系数")
     parser.add_argument("--ema_consistency_weight", type=float, default=0.1, help="EMA 一致性损失权重")
+    parser.add_argument("--ema_pseudo_weight", type=float, default=0.0, help="EMA 伪标签监督权重（硬标签）")
+    parser.add_argument("--ema_pseudo_thresh", type=float, default=0.5, help="EMA 伪标签置信度阈值")
     # Quick / Debug
     parser.add_argument("--debug", action="store_true", help="仅处理少量样本以快速验证")
     parser.add_argument("--quick_test", type=int, default=None, help="仅处理前 N 个测试样本")
@@ -537,6 +539,8 @@ def main():
             "ema_enable": bool(args.ema_enable),
             "ema_decay": args.ema_decay,
             "ema_consistency_weight": args.ema_consistency_weight,
+            "ema_pseudo_weight": args.ema_pseudo_weight,
+            "ema_pseudo_thresh": args.ema_pseudo_thresh,
         }
 
         # 打印模型保存目录

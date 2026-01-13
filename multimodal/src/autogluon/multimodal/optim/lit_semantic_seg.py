@@ -688,7 +688,10 @@ class SemanticSegmentationLitModule(LitModule):
                 # 2) 无标签子集：对聚合前景概率做盒弱监督
                 weak_loss = output[self.model.prefix][LOGITS].new_tensor(0.0)
                 consistency_loss = output[self.model.prefix][LOGITS].new_tensor(0.0)
+                pseudo_loss = output[self.model.prefix][LOGITS].new_tensor(0.0)
                 ema_w = float(cfg.get("ema_consistency_weight", 0.0))
+                pseudo_w = float(cfg.get("ema_pseudo_weight", 0.0))
+                pseudo_thresh = float(cfg.get("ema_pseudo_thresh", 0.5))
 
                 if (~labeled_mask).any():
                     mask_logits_u = mask_logits_all[~labeled_mask]
@@ -764,13 +767,46 @@ class SemanticSegmentationLitModule(LitModule):
                             fg_prob_t = torch.sigmoid(mask_logits_t) if mask_logits_t.dim() == 4 else torch.sigmoid(mask_logits_t.unsqueeze(1))
 
                         consistency_loss = F.mse_loss(fg_prob_u, fg_prob_t)
+
+                    # EMA 硬伪标签监督（多类场景）
+                    if pseudo_w > 0 and self.ema_enabled and self.ema_model is not None and CLASS_LOGITS in per_output:
+                        # 使用 teacher 的语义概率取 argmax 作为伪标签
+                        with torch.no_grad():
+                            # teacher probs 已有 fg_prob_t，但需要 per-class prob
+                            if CLASS_LOGITS in per_ema:
+                                class_logits_t = per_ema[CLASS_LOGITS]
+                                mask_logits_t = per_ema[LOGITS]
+                                mask_prob_t = torch.sigmoid(mask_logits_t)
+                                class_prob_t = F.softmax(class_logits_t, dim=-1)[..., :-1]  # [B, Q, C]
+                                semantic_prob_t = torch.einsum("bqc,bqhw->bchw", class_prob_t, mask_prob_t)
+                            else:
+                                semantic_prob_t = None
+
+                        if semantic_prob_t is not None:
+                            pseudo_label = torch.argmax(semantic_prob_t, dim=1)  # [B,H,W]
+                            conf = torch.max(semantic_prob_t, dim=1)[0]
+                            conf_mask = (conf >= pseudo_thresh).float()
+
+                            # student per-class prob
+                            class_logits_u = per_output[CLASS_LOGITS][~labeled_mask]
+                            mask_prob_u = torch.sigmoid(mask_logits_u)
+                            class_prob_u = F.softmax(class_logits_u, dim=-1)[..., :-1]
+                            semantic_prob_u = torch.einsum("bqc,bqhw->bchw", class_prob_u, mask_prob_u)
+                            student_logits = torch.log(semantic_prob_u.clamp(min=1e-7))
+
+                            ce_map = F.nll_loss(student_logits, pseudo_label, reduction="none")
+                            valid = (conf_mask > 0).float()
+                            if valid.sum() > 0:
+                                pseudo_loss = (ce_map * conf_mask).sum() / valid.sum()
                 
                 moe_loss = output[self.model.prefix].get(MOE_LOSS, 0.0)
-                loss = sup_loss + weak_loss + ema_w * consistency_loss + moe_loss
+                loss = sup_loss + weak_loss + ema_w * consistency_loss + pseudo_w * pseudo_loss + moe_loss
                 self.log("train_sup_loss", sup_loss, on_step=True, on_epoch=True)
                 self.log("train_weak_loss", weak_loss, on_step=True, on_epoch=True)
                 if ema_w > 0:
                     self.log("train_consistency_loss", consistency_loss, on_step=True, on_epoch=True)
+                if pseudo_w > 0:
+                    self.log("train_pseudo_loss", pseudo_loss, on_step=True, on_epoch=True)
                 self.log("train_labeled_frac", labeled_mask.float().mean(), on_step=True, on_epoch=True)
             else:
                 # 二值结构损失路径
