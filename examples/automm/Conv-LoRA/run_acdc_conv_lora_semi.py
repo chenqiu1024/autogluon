@@ -288,6 +288,10 @@ def main():
     parser.add_argument("--ema_consistency_weight", type=float, default=0.1, help="EMA 一致性损失权重")
     parser.add_argument("--ema_pseudo_weight", type=float, default=0.0, help="EMA 伪标签监督权重（硬标签）")
     parser.add_argument("--ema_pseudo_thresh", type=float, default=0.5, help="EMA 伪标签置信度阈值")
+    # Dual-student (Cross-teaching style)
+    parser.add_argument("--dual_student", action="store_true", help="启用双学生互教 + 各自 EMA（GSPO 仅作用主学生）")
+    parser.add_argument("--dual_lr_student_a_mult", type=float, default=1.0, help="双学生模式下，学生A（带GSPO）学习率乘子")
+    parser.add_argument("--dual_lr_student_b_mult", type=float, default=1.3, help="双学生模式下，学生B学习率乘子")
     # Quick / Debug
     parser.add_argument("--debug", action="store_true", help="仅处理少量样本以快速验证")
     parser.add_argument("--quick_test", type=int, default=None, help="仅处理前 N 个测试样本")
@@ -541,6 +545,9 @@ def main():
             "ema_consistency_weight": args.ema_consistency_weight,
             "ema_pseudo_weight": args.ema_pseudo_weight,
             "ema_pseudo_thresh": args.ema_pseudo_thresh,
+            "dual_student": bool(args.dual_student),
+            "dual_lr_student_a_mult": args.dual_lr_student_a_mult,
+            "dual_lr_student_b_mult": args.dual_lr_student_b_mult,
         }
 
         # 打印模型保存目录

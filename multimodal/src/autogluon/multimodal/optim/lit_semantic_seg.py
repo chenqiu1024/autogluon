@@ -4,6 +4,7 @@ import copy
 from typing import Callable, Dict, Optional
 
 import torch
+import torch.optim as optim
 import torchmetrics
 import torch.nn.functional as F
 from transformers.models.mask2former.modeling_mask2former import Mask2FormerLoss
@@ -48,6 +49,17 @@ class SemanticSegmentationLitModule(LitModule):
         if self.ema_enabled:
             self.ema_model = copy.deepcopy(self.model)
             for p in self.ema_model.parameters():
+                p.requires_grad_(False)
+        # Dual-student（可选）：学生B及其EMA。GSPO仍仅作用于学生A（self.model）
+        self.dual_student = bool(cfg.get("dual_student", False))
+        self.model_b = None
+        self.ema_model_b = None
+        if self.dual_student:
+            self.model_b = copy.deepcopy(self.model)
+            self.ema_model_b = copy.deepcopy(self.model)
+            for p in self.model_b.parameters():
+                p.requires_grad_(True)
+            for p in self.ema_model_b.parameters():
                 p.requires_grad_(False)
     
     @staticmethod
@@ -276,6 +288,15 @@ class SemanticSegmentationLitModule(LitModule):
                 ema_param.data.mul_(self.ema_decay).add_(param.data, alpha=1.0 - self.ema_decay)
             # keep buffers (e.g., BatchNorm stats) in sync
             for ema_buf, buf in zip(self.ema_model.buffers(), self.model.buffers()):
+                ema_buf.data.copy_(buf.data)
+
+    def _update_ema_model_b(self):
+        if not self.dual_student or self.ema_model_b is None or self.model_b is None:
+            return
+        with torch.no_grad():
+            for ema_param, param in zip(self.ema_model_b.parameters(), self.model_b.parameters()):
+                ema_param.data.mul_(self.ema_decay).add_(param.data, alpha=1.0 - self.ema_decay)
+            for ema_buf, buf in zip(self.ema_model_b.buffers(), self.model_b.buffers()):
                 ema_buf.data.copy_(buf.data)
 
     def _predict_boxes_from_images(self, image_paths: list, target_h: int, target_w: int) -> torch.Tensor:
@@ -645,6 +666,18 @@ class SemanticSegmentationLitModule(LitModule):
             class_prob_all = F.softmax(class_logits_all, dim=-1)[..., :-1]
             semantic_prob_all = torch.einsum("bqc,bqhw->bchw", class_prob_all, mask_prob_all)
             output[self.model.prefix][SEMANTIC_MASK] = semantic_prob_all
+        # dual student forward (only for dual_student mode)
+        output_b = None
+        if getattr(self, "dual_student", False) and self.model_b is not None:
+            output_b = run_model(self.model_b, batch)
+            per_output_b = output_b.get(self.model_b.prefix, {})
+            if CLASS_LOGITS in per_output_b:
+                class_logits_b = per_output_b[CLASS_LOGITS]
+                mask_logits_b = per_output_b[LOGITS]
+                mask_prob_b = torch.sigmoid(mask_logits_b)
+                class_prob_b = F.softmax(class_logits_b, dim=-1)[..., :-1]
+                semantic_prob_b = torch.einsum("bqc,bqhw->bchw", class_prob_b, mask_prob_b)
+                output_b[self.model_b.prefix][SEMANTIC_MASK] = semantic_prob_b
         
         # ---- Loss: fully-supervised OR semi/weak mixed ----
         if self.training and labeled_mask is not None:
@@ -928,7 +961,10 @@ class SemanticSegmentationLitModule(LitModule):
         )
         allow_semisup_gspo = bool(getattr(self.gspo_trainer, "allow_semisup", False)) if self.gspo_trainer else False
         
-        if use_gspo and allow_semisup_gspo and semi_labeled_fraction < 1.0:
+        if self.dual_student:
+            loss = self._training_step_dual(batch)
+            selected_experts = None
+        elif use_gspo and allow_semisup_gspo and semi_labeled_fraction < 1.0:
             # Semi-supervised with GSPO on labeled subset, weak loss on unlabeled subset.
             label = batch[self.model.label_key]
             # Apply box prompts (gt/noisy/predict + weak jitter boxes already handled inside)
@@ -1021,6 +1057,233 @@ class SemanticSegmentationLitModule(LitModule):
         
         self.log("train_loss", loss)
         return loss
+
+    def configure_optimizers(self):
+        if not getattr(self, "dual_student", False) or self.model_b is None:
+            return super().configure_optimizers()
+        # Dual-student: 参数组区分 A/B 学习率，GSPO 仍只作用 A。
+        base_lr = self.hparams.lr
+        lr_a = base_lr * float(self.train_box_prompt_cfg.get("dual_lr_student_a_mult", 1.0))
+        lr_b = base_lr * float(self.train_box_prompt_cfg.get("dual_lr_student_b_mult", 1.3))
+        params = [
+            {"params": self.model.parameters(), "lr": lr_a},
+            {"params": self.model_b.parameters(), "lr": lr_b},
+        ]
+        optimizer = optim.AdamW(params, weight_decay=self.hparams.weight_decay)
+        return optimizer
+
+    def _training_step_dual(self, batch):
+        """
+        双学生 + 各自 EMA + 互伪标签，GSPO 只作用学生 A（self.model）。
+        骨架：有标签 -> 监督；无标签 -> 盒弱监督(可选) + EMA 一致性 + 学生互伪标签。
+        验证/导出默认用学生 A / EMA_A。
+        """
+        cfg = getattr(self, "train_box_prompt_cfg", {}) or {}
+        semi_labeled_fraction = float(cfg.get("semi_labeled_fraction", 1.0))
+        semi_labeled_seed = int(cfg.get("semi_labeled_seed", 0))
+        weak_box_outward_only = bool(cfg.get("weak_box_outward_only", True))
+        weak_outside_w = float(cfg.get("weak_loss_outside_weight", 1.0))
+        weak_entropy_w = float(cfg.get("weak_loss_entropy_weight", 0.05))
+        weak_tv_w = float(cfg.get("weak_loss_tv_weight", 0.0))
+        ema_w = float(cfg.get("ema_consistency_weight", 0.0))
+        pseudo_w = float(cfg.get("ema_pseudo_weight", 0.0))
+        pseudo_thresh = float(cfg.get("ema_pseudo_thresh", 0.5))
+
+        label = batch[self.model.label_key]
+        image_paths = batch.get(self.model.image_path_key, [])
+        if isinstance(image_paths, str):
+            image_paths = [image_paths]
+        labeled_mask = None
+        if self.training and semi_labeled_fraction < 1.0:
+            labeled_mask = self._get_labeled_mask_from_paths(
+                image_paths=image_paths, labeled_fraction=semi_labeled_fraction, seed=semi_labeled_seed
+            )
+
+        # 应用 box prompt（对 batch 生效，A/B 共用）
+        if self.training:
+            self._apply_train_box_prompts(batch, label)
+
+        # 前向 A
+        output_a = run_model(self.model, batch)
+        per_output_a = output_a[self.model.prefix]
+        # 前向 B
+        output_b = run_model(self.model_b, batch)
+        per_output_b = output_b[self.model_b.prefix]
+
+        # 生成 semantic_mask 供指标（A/B）
+        def _attach_semantic_mask(per_out):
+            if CLASS_LOGITS in per_out:
+                class_logits_all = per_out[CLASS_LOGITS]
+                mask_logits_all = per_out[LOGITS]
+                mask_prob_all = torch.sigmoid(mask_logits_all)
+                class_prob_all = F.softmax(class_logits_all, dim=-1)[..., :-1]
+                semantic_prob_all = torch.einsum("bqc,bqhw->bchw", class_prob_all, mask_prob_all)
+                per_out[SEMANTIC_MASK] = semantic_prob_all
+        _attach_semantic_mask(per_output_a)
+        _attach_semantic_mask(per_output_b)
+
+        # 初始化损失
+        loss = per_output_a[LOGITS].new_tensor(0.0)
+
+        # 分支：Mask2Former / 其他
+        if isinstance(self.loss_func, Mask2FormerLoss):
+            if labeled_mask is None:
+                # 全监督
+                loss = self._compute_loss(
+                    output=output_a,
+                    label=label,
+                    mask_labels=batch[self.model.mask_label_key],
+                    class_labels=batch[self.model.class_label_key],
+                )
+                return output_a, loss
+
+            mask_logits_a_all = per_output_a[LOGITS]
+            mask_logits_b_all = per_output_b[LOGITS]
+
+            # 1) 有标签子集：A、B 各自监督
+            def _subset_output(out, mask_bool):
+                out_sub = {}
+                for k, v in out.items():
+                    if torch.is_tensor(v) and v.ndim > 0 and v.shape[0] == label.shape[0]:
+                        out_sub[k] = v[mask_bool]
+                    else:
+                        out_sub[k] = v
+                return out_sub
+
+            sup_loss_a = loss.new_tensor(0.0)
+            sup_loss_b = loss.new_tensor(0.0)
+            if labeled_mask.any():
+                out_a_l = _subset_output(output_a, labeled_mask)
+                out_b_l = _subset_output(output_b, labeled_mask)
+                label_l = label[labeled_mask]
+                mask_labels = batch.get(self.model.mask_label_key, [])
+                class_labels = batch.get(self.model.class_label_key, [])
+                mask_labels_l = mask_labels[labeled_mask] if isinstance(mask_labels, torch.Tensor) else [m for m, keep in zip(mask_labels, labeled_mask) if keep]
+                class_labels_l = class_labels[labeled_mask] if isinstance(class_labels, torch.Tensor) else [c for c, keep in zip(class_labels, labeled_mask) if keep]
+                sup_loss_a = self._compute_loss(out_a_l, label_l, mask_labels=mask_labels_l, class_labels=class_labels_l)
+                sup_loss_b = self._compute_loss(out_b_l, label_l, mask_labels=mask_labels_l, class_labels=class_labels_l)
+
+            # 2) 无标签子集：弱盒 + EMA 一致性 + 互伪标签 + (可选) EMA 伪标签
+            weak_loss_a = loss.new_tensor(0.0)
+            weak_loss_b = loss.new_tensor(0.0)
+            cons_a = loss.new_tensor(0.0)
+            cons_b = loss.new_tensor(0.0)
+            pseudo_a = loss.new_tensor(0.0)
+            pseudo_b = loss.new_tensor(0.0)
+            if (~labeled_mask).any():
+                mask_logits_a_u = mask_logits_a_all[~labeled_mask]
+                mask_logits_b_u = mask_logits_b_all[~labeled_mask]
+
+                boxes_u = batch[self.model.box_key][:, 0, :][~labeled_mask] if hasattr(self.model, "box_key") and self.model.box_key in batch else None
+
+                def _fg_logits(per_out, mask_logits_u):
+                    if CLASS_LOGITS in per_out:
+                        class_logits_u = per_out[CLASS_LOGITS][~labeled_mask]
+                        mask_prob = torch.sigmoid(mask_logits_u)
+                        class_prob = F.softmax(class_logits_u, dim=-1)[..., :-1]
+                        semantic_prob = torch.einsum("bqc,bqhw->bchw", class_prob, mask_prob)
+                        fg_prob = semantic_prob.sum(dim=1, keepdim=True).clamp(min=1e-7, max=1 - 1e-7)
+                        fg_logits = torch.logit(fg_prob)
+                    else:
+                        logits_u = mask_logits_u
+                        if logits_u.dim() == 4 and logits_u.shape[1] > 1:
+                            fg_prob = torch.sigmoid(logits_u).mean(dim=1, keepdim=True).clamp(min=1e-7, max=1 - 1e-7)
+                            fg_logits = torch.logit(fg_prob)
+                        else:
+                            fg_logits = logits_u
+                        fg_prob = torch.sigmoid(logits_u) if logits_u.dim() == 4 else torch.sigmoid(logits_u.unsqueeze(1))
+                    return fg_logits, fg_prob
+
+                fg_logits_a, fg_prob_a = _fg_logits(per_output_a, mask_logits_a_u)
+                fg_logits_b, fg_prob_b = _fg_logits(per_output_b, mask_logits_b_u)
+
+                # 盒弱监督
+                if boxes_u is not None:
+                    weak_loss_a = self._weak_box_losses(fg_logits_a, boxes_u, weak_outside_w, weak_entropy_w, weak_tv_w)
+                    weak_loss_b = self._weak_box_losses(fg_logits_b, boxes_u, weak_outside_w, weak_entropy_w, weak_tv_w)
+
+                # EMA 一致性（各自）
+                if self.ema_enabled and self.ema_model is not None and ema_w > 0:
+                    ema_out = run_model(self.ema_model, batch)
+                    per_ema = ema_out[self.model.prefix]
+                    if CLASS_LOGITS in per_ema:
+                        class_logits_t = per_ema[CLASS_LOGITS]
+                        mask_logits_t = per_ema[LOGITS]
+                        mask_prob_t = torch.sigmoid(mask_logits_t)
+                        class_prob_t = F.softmax(class_logits_t, dim=-1)[..., :-1]
+                        semantic_prob_t = torch.einsum("bqc,bqhw->bchw", class_prob_t, mask_prob_t)
+                        fg_prob_t = semantic_prob_t.sum(dim=1, keepdim=True)
+                    else:
+                        mask_logits_t = per_ema[LOGITS]
+                        fg_prob_t = torch.sigmoid(mask_logits_t) if mask_logits_t.dim() == 4 else torch.sigmoid(mask_logits_t.unsqueeze(1))
+                    fg_prob_t = fg_prob_t[~labeled_mask]
+                    cons_a = F.mse_loss(fg_prob_a, fg_prob_t)
+
+                if self.ema_enabled and self.ema_model_b is not None and ema_w > 0:
+                    ema_out_b = run_model(self.ema_model_b, batch)
+                    per_ema_b = ema_out_b[self.model_b.prefix]
+                    if CLASS_LOGITS in per_ema_b:
+                        class_logits_t = per_ema_b[CLASS_LOGITS]
+                        mask_logits_t = per_ema_b[LOGITS]
+                        mask_prob_t = torch.sigmoid(mask_logits_t)
+                        class_prob_t = F.softmax(class_logits_t, dim=-1)[..., :-1]
+                        semantic_prob_t = torch.einsum("bqc,bqhw->bchw", class_prob_t, mask_prob_t)
+                        fg_prob_t = semantic_prob_t.sum(dim=1, keepdim=True)
+                    else:
+                        mask_logits_t = per_ema_b[LOGITS]
+                        fg_prob_t = torch.sigmoid(mask_logits_t) if mask_logits_t.dim() == 4 else torch.sigmoid(mask_logits_t.unsqueeze(1))
+                    fg_prob_t = fg_prob_t[~labeled_mask]
+                    cons_b = F.mse_loss(fg_prob_b, fg_prob_t)
+
+                # 互伪标签（student B -> A， student A -> B），硬标签+阈值
+                def _cross_pseudo(student_prob, teacher_prob):
+                    pseudo_label = torch.argmax(teacher_prob, dim=1)
+                    conf = torch.max(teacher_prob, dim=1)[0]
+                    conf_mask = (conf >= pseudo_thresh).float()
+                    student_logit = torch.log(student_prob.clamp(min=1e-7))
+                    ce_map = F.nll_loss(student_logit, pseudo_label, reduction="none")
+                    if conf_mask.sum() > 0:
+                        return (ce_map * conf_mask).sum() / conf_mask.sum()
+                    else:
+                        return student_prob.new_tensor(0.0)
+
+                if CLASS_LOGITS in per_output_a and CLASS_LOGITS in per_output_b and pseudo_w > 0:
+                    # 用语义概率进行伪标签
+                    class_logits_a_u = per_output_a[CLASS_LOGITS][~labeled_mask]
+                    class_logits_b_u = per_output_b[CLASS_LOGITS][~labeled_mask]
+                    mask_prob_a_u = torch.sigmoid(mask_logits_a_u)
+                    mask_prob_b_u = torch.sigmoid(mask_logits_b_u)
+                    class_prob_a_u = F.softmax(class_logits_a_u, dim=-1)[..., :-1]
+                    class_prob_b_u = F.softmax(class_logits_b_u, dim=-1)[..., :-1]
+                    semantic_prob_a_u = torch.einsum("bqc,bqhw->bchw", class_prob_a_u, mask_prob_a_u)
+                    semantic_prob_b_u = torch.einsum("bqc,bqhw->bchw", class_prob_b_u, mask_prob_b_u)
+                    pseudo_a = _cross_pseudo(semantic_prob_a_u, semantic_prob_b_u)
+                    pseudo_b = _cross_pseudo(semantic_prob_b_u, semantic_prob_a_u)
+
+            # 总损失
+            loss = (
+                sup_loss_a + sup_loss_b
+                + weak_loss_a + weak_loss_b
+                + ema_w * (cons_a + cons_b)
+                + pseudo_w * (pseudo_a + pseudo_b)
+            )
+
+            # log
+            self.log("train_sup_loss_a", sup_loss_a, on_step=True, on_epoch=True)
+            self.log("train_sup_loss_b", sup_loss_b, on_step=True, on_epoch=True)
+            self.log("train_weak_loss_a", weak_loss_a, on_step=True, on_epoch=True)
+            self.log("train_weak_loss_b", weak_loss_b, on_step=True, on_epoch=True)
+            if ema_w > 0:
+                self.log("train_consistency_a", cons_a, on_step=True, on_epoch=True)
+                self.log("train_consistency_b", cons_b, on_step=True, on_epoch=True)
+            if pseudo_w > 0:
+                self.log("train_pseudo_a", pseudo_a, on_step=True, on_epoch=True)
+                self.log("train_pseudo_b", pseudo_b, on_step=True, on_epoch=True)
+            self.log("train_labeled_frac", labeled_mask.float().mean(), on_step=True, on_epoch=True)
+            return output_a, loss
+
+        # 非 Mask2Former 路径暂不支持双学生（保持原逻辑）
+        return self._shared_step(batch)
 
     def on_after_backward(self):
         # 更新 EMA teacher 参数

@@ -102,6 +102,11 @@ class SemanticSegmentationLearner(BaseLearner):
             "ema_consistency_weight": 0.1,
             "ema_pseudo_weight": 0.0,
             "ema_pseudo_thresh": 0.5,
+            # Dual-student (optional, ABD-style cross-teaching)
+            "dual_student": False,
+            # Dual-student LR multipliers (only used when dual_student=True)
+            "dual_lr_student_a_mult": 1.0,   # student A (with GSPO)
+            "dual_lr_student_b_mult": 1.3,   # student B (no GSPO)
         }
         # BBoxPromptPredictor instance for "predict" mode (set via external config)
         self._train_bbox_predictor = None
