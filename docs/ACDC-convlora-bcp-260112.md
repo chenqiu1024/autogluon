@@ -7955,3 +7955,71 @@ nohup python3 run_acdc_conv_lora_semi.py \
 
 ---
 
+_**User (2026-01-13 04:34Z)**_
+
+出了显存OOM问题：autogluon/examples/automm/Conv-LoRA/outputs/acdc_gspo_convlora_dual-260112.log
+
+---
+
+_**Agent (model gpt-5.1-codex-max, mode Agent)**_
+
+<tool-use data-tool-type="read" data-tool-name="read_file">
+<details><summary>Tool use: **read_file** • Read file: /root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA/outputs/acdc_gspo_convlora_dual-260112.log</summary>
+
+</details>
+</tool-use>
+
+---
+
+<tool-use data-tool-type="read" data-tool-name="read_file">
+<details><summary>Tool use: **read_file** • Read file: /root/autodl-tmp/works/autogluon/examples/automm/Conv-LoRA/outputs/acdc_gspo_convlora_dual-260112.log</summary>
+
+</details>
+</tool-use>
+
+---
+
+<think><details><summary>Thought Process</summary>
+**Proposing immediate OOM workaround**
+
+Suggest disabling dual_student or switching to a smaller model like sam-vit-base to reduce memory use, with specific command modifications to run single-student mode as a quick fix.</details></think>
+
+---
+
+双学生+双 EMA 把 SAM-ViT-Huge 复制了 4 份（A、B、EMA_A、EMA_B），48GB 显存扛不住。现在的 OOM 就发生在第一个 batch 的前向。最快解法是先退回单学生，或者用更小骨干/减显存开销。建议：
+
+1) 先跑单学生（关掉双学生），确认能训练：
+- 去掉 `--dual_student`（双学生分支不会走）。
+- 其它参数不变。
+
+2) 如果必须保留双学生，必须大幅减显存开销（二选一或组合）：
+- 改用更小的 SAM（如 sam-vit-base）。当前脚本默认加载 `facebook/sam-vit-huge`，没有 CLI 切换骨干的入口，要改代码才能换。
+- 只保留一个 EMA（例如只留 EMA_A），去掉 EMA_B/学生B，等于回到单学生+EMA。
+- 进一步减少开销：`--per_gpu_batch_size 1`（已是 1），关闭弱损耗对显存影响不大；AMP 已开启。
+
+鉴于时间成本，建议先执行方案1：去掉 `--dual_student`，确认单学生能跑通；等有条件再用更小骨干或按需精简双学生分支。
+
+---
+
+_**User (2026-01-13 04:34Z)**_
+
+如果换用更高显存的机器，估计至少要多少显存才够？
+
+---
+
+_**Agent (model gpt-5.1-codex-max, mode Ask)**_
+
+粗估算（SAM-ViT-Huge，双学生 + 双 EMA + AMP）：
+
+- 单学生 + 单 EMA 训练时，SAM-Huge 16-bit 前向+反向大约在 16–20 GB（取决于分辨率、mask token 数、LoRA/GSPO 开销）。  
+- 双学生会直接把前向/反向开销近乎翻倍；再加双 EMA（仅前向，无反向），整体接近 3.5–4 倍单学生的占用。  
+- 你在 48 GB 上 OOM，日志显示第一步就用掉 ~47.5 GB，说明双学生 + 双 EMA 的峰值已超过 48 GB。
+
+**建议保守预估：至少 80–96 GB 显存** 才有余量跑双学生 + 双 EMA + SAM-Huge，保持 batch=1、AMP=fp16。如果想更稳（避免碎片化或后期激活增长），考虑 96 GB 以上（如 A100 80G 可能仍很紧张，A100 80G*2 或 H100 80G*2 更安全，但需要多卡并行支持）。  
+如无法上百 GB 设备，优先考虑：
+- 换小骨干（sam-vit-base）或剪枝；  
+- 去掉 EMA_B / 学生B（退回单学生 + EMA）；  
+- 关闭 GSPO 或改小分辨率。
+
+---
+
