@@ -261,14 +261,12 @@ class AutoMMModelCheckpoint(pl.callbacks.ModelCheckpoint):
         self._last_global_step_saved = trainer.global_step
 
         # 额外保存完整 Lightning ckpt（不裁剪 state_dict），便于随时续训/完整评估
-        if self.save_full_ckpt:
+        # 仅对 last.ckpt 保存一份滚动覆盖的 last_full.ckpt，不为每个 epoch 保存
+        if self.save_full_ckpt and os.path.basename(filepath) == "last.ckpt":
             try:
                 base_dir = self.full_ckpt_dir or os.path.dirname(filepath)
                 os.makedirs(base_dir, exist_ok=True)
-                base_name = os.path.basename(filepath)
-                if base_name.endswith(".ckpt"):
-                    base_name = base_name[:-5]
-                full_path = os.path.join(base_dir, f"{base_name}_full.ckpt")
+                full_path = os.path.join(base_dir, "last_full.ckpt")
                 ckpt_io = TorchCheckpointIO()
                 ckpt = trainer._checkpoint_connector.dump_checkpoint(weights_only=False)
                 ckpt_io.save_checkpoint(ckpt, full_path)
