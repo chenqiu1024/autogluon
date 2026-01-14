@@ -1124,6 +1124,8 @@ class SemanticSegmentationLitModule(LitModule):
         cfg = getattr(self, "train_box_prompt_cfg", {}) or {}
         semi_labeled_fraction = float(cfg.get("semi_labeled_fraction", 1.0))
         semi_labeled_seed = int(cfg.get("semi_labeled_seed", 0))
+        weak_box_jitter_mode = str(cfg.get("weak_box_jitter_mode", "box"))
+        weak_box_jitter_amount = float(cfg.get("weak_box_jitter_amount", cfg.get("noise_frac", 0.12)))
         weak_box_outward_only = bool(cfg.get("weak_box_outward_only", True))
         weak_outside_w = float(cfg.get("weak_loss_outside_weight", 1.0))
         weak_entropy_w = float(cfg.get("weak_loss_entropy_weight", 0.05))
@@ -1145,8 +1147,27 @@ class SemanticSegmentationLitModule(LitModule):
             )
 
         # 应用 box prompt（对 batch 生效，A/B 共用）
+        # NOTE: `_shared_step` 会在 semi/weak 时为 unlabeled 样本注入 weak jitter boxes，
+        # 但 dual-student 路径不走 `_shared_step`，需要在这里同步该逻辑，否则 weak loss 恒为 0。
         if self.training:
             self._apply_train_box_prompts(batch, label)
+            if labeled_mask is not None and hasattr(self.model, "box_key"):
+                gt_boxes_all = self._compute_boxes_from_mask(label)
+                h, w = label.shape[-2], label.shape[-1]
+                weak_boxes = self._jitter_boxes_outward(
+                    gt_boxes_all,
+                    h=h,
+                    w=w,
+                    amount=weak_box_jitter_amount,
+                    mode=weak_box_jitter_mode,
+                    outward_only=weak_box_outward_only,
+                )
+                # apply only to unlabeled samples
+                if (~labeled_mask).any():
+                    boxes_for_batch = gt_boxes_all.clone()
+                    boxes_for_batch[~labeled_mask] = weak_boxes[~labeled_mask]
+                    if not (boxes_for_batch.sum(dim=1) == 0).all():
+                        batch[self.model.box_key] = boxes_for_batch.unsqueeze(1)  # (B,1,4)
 
         # 前向 A
         output_a = run_model(self.model, batch)
