@@ -1093,6 +1093,8 @@ class SemanticSegmentationLitModule(LitModule):
         ema_w = float(cfg.get("ema_consistency_weight", 0.0))
         pseudo_w = float(cfg.get("ema_pseudo_weight", 0.0))
         pseudo_thresh = float(cfg.get("ema_pseudo_thresh", 0.5))
+        use_gspo = self.gspo_trainer is not None and self.gspo_trainer.is_gspo_active(self.current_epoch)
+        allow_semisup_gspo = bool(getattr(self.gspo_trainer, "allow_semisup", False)) if self.gspo_trainer else False
 
         label = batch[self.model.label_key]
         image_paths = batch.get(self.model.image_path_key, [])
@@ -1167,6 +1169,28 @@ class SemanticSegmentationLitModule(LitModule):
                 class_labels_l = class_labels[labeled_mask] if isinstance(class_labels, torch.Tensor) else [c for c, keep in zip(class_labels, labeled_mask) if keep]
                 sup_loss_a = self._compute_loss(out_a_l, label_l, mask_labels=mask_labels_l, class_labels=class_labels_l)
                 sup_loss_b = self._compute_loss(out_b_l, label_l, mask_labels=mask_labels_l, class_labels=class_labels_l)
+
+                # GSPO 仅作用学生 A：允许半监督时只在有标签子集上启用
+                if use_gspo:
+                    def _subset_batch(b, mask_bool: torch.Tensor):
+                        new = {}
+                        for k, v in b.items():
+                            if torch.is_tensor(v) and v.shape[0] == mask_bool.shape[0]:
+                                new[k] = v[mask_bool]
+                            elif isinstance(v, list) and len(v) == mask_bool.shape[0]:
+                                new[k] = [v[i] for i in range(len(v)) if mask_bool[i].item()]
+                            else:
+                                new[k] = v
+                        return new
+
+                    gspo_batch = batch
+                    if allow_semisup_gspo:
+                        gspo_batch = _subset_batch(batch, labeled_mask) if labeled_mask.any() else None
+                    if gspo_batch is not None:
+                        gspo_loss, gspo_metrics, _ = self._gspo_training_step(gspo_batch)
+                        sup_loss_a = gspo_loss  # 用 GSPO 结果替换学生 A 的监督损失，避免重复累计
+                        for key, value in gspo_metrics.items():
+                            self.log(f"train_{key}", value, on_step=True, on_epoch=True)
 
             # 2) 无标签子集：弱盒 + EMA 一致性 + 互伪标签 + (可选) EMA 伪标签
             weak_loss_a = loss.new_tensor(0.0)
@@ -1293,6 +1317,12 @@ class SemanticSegmentationLitModule(LitModule):
     def on_after_backward(self):
         # 更新 EMA teacher 参数
         self._update_ema_model()
+
+    def on_train_epoch_start(self):
+        super().on_train_epoch_start()
+        # 将当前 epoch 同步到 GSPO trainer，确保 warmup 判断生效
+        if self.gspo_trainer is not None:
+            self.gspo_trainer.current_epoch = self.current_epoch
     
     def _gspo_training_step(self, batch):
         """
