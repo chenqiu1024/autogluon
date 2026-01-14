@@ -741,6 +741,8 @@ class SemanticSegmentationLitModule(LitModule):
                         mask_cls = F.softmax(class_logits_u, dim=-1)[..., :-1]
                         mask_prob = torch.sigmoid(mask_logits_u)
                         semantic_prob = torch.einsum("bqc,bqhw->bchw", mask_cls, mask_prob)
+                        # NOTE: semantic_prob is not guaranteed to be normalized across classes.
+                        # Keep fg_prob in [0,1] to stabilize weak/consistency losses.
                         fg_prob = semantic_prob.sum(dim=1, keepdim=True).clamp(min=1e-7, max=1 - 1e-7)
                         fg_logits = torch.logit(fg_prob)
                     else:
@@ -783,7 +785,7 @@ class SemanticSegmentationLitModule(LitModule):
                             mask_prob_u = torch.sigmoid(mask_logits_u)
                             class_prob_u = F.softmax(class_logits_u, dim=-1)[..., :-1]
                             semantic_prob_u = torch.einsum("bqc,bqhw->bchw", class_prob_u, mask_prob_u)
-                            fg_prob_u = semantic_prob_u.sum(dim=1, keepdim=True)
+                            fg_prob_u = semantic_prob_u.sum(dim=1, keepdim=True).clamp(min=0.0, max=1.0)
                         else:
                             fg_prob_u = torch.sigmoid(mask_logits_u) if mask_logits_u.dim() == 4 else torch.sigmoid(mask_logits_u.unsqueeze(1))
 
@@ -794,7 +796,7 @@ class SemanticSegmentationLitModule(LitModule):
                             mask_prob_t = torch.sigmoid(mask_logits_t)
                             class_prob_t = F.softmax(class_logits_t, dim=-1)[..., :-1]
                             semantic_prob_t = torch.einsum("bqc,bqhw->bchw", class_prob_t, mask_prob_t)
-                            fg_prob_t = semantic_prob_t.sum(dim=1, keepdim=True)
+                            fg_prob_t = semantic_prob_t.sum(dim=1, keepdim=True).clamp(min=0.0, max=1.0)
                         else:
                             mask_logits_t = per_ema[LOGITS]
                             fg_prob_t = torch.sigmoid(mask_logits_t) if mask_logits_t.dim() == 4 else torch.sigmoid(mask_logits_t.unsqueeze(1))
@@ -816,8 +818,28 @@ class SemanticSegmentationLitModule(LitModule):
                                 semantic_prob_t = None
 
                         if semantic_prob_t is not None:
-                            pseudo_label = torch.argmax(semantic_prob_t, dim=1)  # [B,H,W]
-                            conf = torch.max(semantic_prob_t, dim=1)[0]
+                            # ---- Debug/W&B monitor: semantic prob mass (raw, before normalization) ----
+                            # If this is frequently > 1, pseudo-label CE can become negative / unstable.
+                            with torch.no_grad():
+                                raw_sum_t = semantic_prob_t.sum(dim=1)  # [B,H,W]
+                                self.log(
+                                    "train/semprob_sum_t_mean",
+                                    raw_sum_t.mean(),
+                                    on_step=True,
+                                    on_epoch=True,
+                                )
+                                self.log(
+                                    "train/semprob_sum_t_max",
+                                    raw_sum_t.amax(),
+                                    on_step=True,
+                                    on_epoch=True,
+                                )
+
+                            # Normalize per-pixel class probabilities to avoid values > 1 leading to negative CE.
+                            prob_t = semantic_prob_t.clamp(min=1e-7)
+                            prob_t = prob_t / prob_t.sum(dim=1, keepdim=True).clamp(min=1e-7)
+                            pseudo_label = torch.argmax(prob_t, dim=1)  # [B,H,W]
+                            conf = torch.max(prob_t, dim=1)[0]
                             conf_mask = (conf >= pseudo_thresh).float()
 
                             # student per-class prob
@@ -825,7 +847,23 @@ class SemanticSegmentationLitModule(LitModule):
                             mask_prob_u = torch.sigmoid(mask_logits_u)
                             class_prob_u = F.softmax(class_logits_u, dim=-1)[..., :-1]
                             semantic_prob_u = torch.einsum("bqc,bqhw->bchw", class_prob_u, mask_prob_u)
-                            student_logits = torch.log(semantic_prob_u.clamp(min=1e-7))
+                            with torch.no_grad():
+                                raw_sum_u = semantic_prob_u.sum(dim=1)  # [B,H,W]
+                                self.log(
+                                    "train/semprob_sum_u_mean",
+                                    raw_sum_u.mean(),
+                                    on_step=True,
+                                    on_epoch=True,
+                                )
+                                self.log(
+                                    "train/semprob_sum_u_max",
+                                    raw_sum_u.amax(),
+                                    on_step=True,
+                                    on_epoch=True,
+                                )
+                            prob_u = semantic_prob_u.clamp(min=1e-7)
+                            prob_u = prob_u / prob_u.sum(dim=1, keepdim=True).clamp(min=1e-7)
+                            student_logits = torch.log(prob_u)
 
                             ce_map = F.nll_loss(student_logits, pseudo_label, reduction="none")
                             valid = (conf_mask > 0).float()
@@ -1266,10 +1304,15 @@ class SemanticSegmentationLitModule(LitModule):
 
                 # 互伪标签（student B -> A， student A -> B），硬标签+阈值
                 def _cross_pseudo(student_prob, teacher_prob):
-                    pseudo_label = torch.argmax(teacher_prob, dim=1)
-                    conf = torch.max(teacher_prob, dim=1)[0]
+                    # Normalize to a proper distribution over classes to avoid negative CE (when prob>1).
+                    t_prob = teacher_prob.clamp(min=1e-7)
+                    t_prob = t_prob / t_prob.sum(dim=1, keepdim=True).clamp(min=1e-7)
+                    pseudo_label = torch.argmax(t_prob, dim=1)
+                    conf = torch.max(t_prob, dim=1)[0]
                     conf_mask = (conf >= pseudo_thresh).float()
-                    student_logit = torch.log(student_prob.clamp(min=1e-7))
+                    s_prob = student_prob.clamp(min=1e-7)
+                    s_prob = s_prob / s_prob.sum(dim=1, keepdim=True).clamp(min=1e-7)
+                    student_logit = torch.log(s_prob)
                     ce_map = F.nll_loss(student_logit, pseudo_label, reduction="none")
                     if conf_mask.sum() > 0:
                         return (ce_map * conf_mask).sum() / conf_mask.sum()
@@ -1286,6 +1329,14 @@ class SemanticSegmentationLitModule(LitModule):
                     class_prob_b_u = F.softmax(class_logits_b_u, dim=-1)[..., :-1]
                     semantic_prob_a_u = torch.einsum("bqc,bqhw->bchw", class_prob_a_u, mask_prob_a_u)
                     semantic_prob_b_u = torch.einsum("bqc,bqhw->bchw", class_prob_b_u, mask_prob_b_u)
+                    # ---- Debug/W&B monitor: raw semantic prob mass (before normalization) ----
+                    with torch.no_grad():
+                        raw_sum_a = semantic_prob_a_u.sum(dim=1)
+                        raw_sum_b = semantic_prob_b_u.sum(dim=1)
+                        self.log("train/semprob_sum_a_mean", raw_sum_a.mean(), on_step=True, on_epoch=True)
+                        self.log("train/semprob_sum_a_max", raw_sum_a.amax(), on_step=True, on_epoch=True)
+                        self.log("train/semprob_sum_b_mean", raw_sum_b.mean(), on_step=True, on_epoch=True)
+                        self.log("train/semprob_sum_b_max", raw_sum_b.amax(), on_step=True, on_epoch=True)
                     pseudo_a = _cross_pseudo(semantic_prob_a_u, semantic_prob_b_u)
                     pseudo_b = _cross_pseudo(semantic_prob_b_u, semantic_prob_a_u)
 
