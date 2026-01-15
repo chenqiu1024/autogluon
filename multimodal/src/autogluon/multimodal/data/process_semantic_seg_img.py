@@ -1,4 +1,5 @@
 import logging
+import os
 import random
 from typing import Dict, List, Optional, Union
 
@@ -82,6 +83,11 @@ class SemanticSegImageProcessor(ImageProcessor):
         self.normalization = transforms.Normalize(self.mean, self.std)
         self.num_classes = model.num_classes
         self.ignore_label = ignore_label
+        # Foreground sampling crop (env-driven)
+        self.fg_crop_enable = os.environ.get("AG_FG_CROP_ENABLE", "0") == "1"
+        self.fg_crop_prob = float(os.environ.get("AG_FG_CROP_PROB", "0.7"))
+        self.fg_crop_min_ratio = float(os.environ.get("AG_FG_CROP_MIN_RATIO", "0.6"))
+        self.fg_crop_max_ratio = float(os.environ.get("AG_FG_CROP_MAX_RATIO", "1.0"))
 
         self.max_img_num_per_col = max_img_num_per_col
         if max_img_num_per_col <= 0:
@@ -227,6 +233,9 @@ class SemanticSegImageProcessor(ImageProcessor):
                     )  # There may be issues with 'transforms.ToTensor()' without this line because 'transforms.ToTensor()' converts 'unit8' to values between 0 and 1.
                     gt = Image.fromarray(gt)
             if is_training:
+                if self.fg_crop_enable and annotation_column:
+                    if random.random() < self.fg_crop_prob:
+                        img, gt = self._foreground_crop(img, gt)
                 if random.random() < 0.5:
                     img = self.train_transforms(img)
                     gt = self.train_transforms(gt)
@@ -314,6 +323,34 @@ class SemanticSegImageProcessor(ImageProcessor):
             if trans_mode == "random_horizontal_flip":
                 train_trans.append(transforms.RandomHorizontalFlip(1.0))
         return transforms.Compose(train_trans)
+
+    def _foreground_crop(self, img: Image.Image, gt: Image.Image):
+        """
+        Random crop around foreground pixels in GT.
+        """
+        try:
+            gt_arr = np.array(gt)
+            fg = np.argwhere(gt_arr > 0)
+            if fg.size == 0:
+                return img, gt
+            h, w = gt_arr.shape[:2]
+            ratio = random.uniform(self.fg_crop_min_ratio, self.fg_crop_max_ratio)
+            crop_size = int(min(h, w) * ratio)
+            if crop_size < 8:
+                return img, gt
+            # pick random foreground pixel as crop center
+            y, x = fg[random.randint(0, len(fg) - 1)]
+            x1 = max(0, x - crop_size // 2)
+            y1 = max(0, y - crop_size // 2)
+            x2 = min(w, x1 + crop_size)
+            y2 = min(h, y1 + crop_size)
+            # adjust if crop goes out of bounds
+            x1 = max(0, x2 - crop_size)
+            y1 = max(0, y2 - crop_size)
+            box = (x1, y1, x2, y2)
+            return img.crop(box), gt.crop(box)
+        except Exception:
+            return img, gt
 
     def __getstate__(self):
         odict = self.__dict__.copy()  # get attribute dictionary

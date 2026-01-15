@@ -89,7 +89,10 @@ def get_loss_func(
         elif "dice_ce_loss" in loss_func_name.lower():
             # Multi-class segmentation with Dice + Cross-Entropy loss
             num_classes = kwargs.get("num_classes", 4)
-            loss_func = DiceCELoss(num_classes=num_classes)
+            class_weights = None
+            if config is not None and hasattr(config, "dice_ce_loss"):
+                class_weights = getattr(config.dice_ce_loss, "class_weights", None)
+            loss_func = DiceCELoss(num_classes=num_classes, class_weights=class_weights)
         elif "mask2former_loss" in loss_func_name.lower():
             weight_dict = {
                 "loss_cross_entropy": config.mask2former_loss.loss_cross_entropy_weight,

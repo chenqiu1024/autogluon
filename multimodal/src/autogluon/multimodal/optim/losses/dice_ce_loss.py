@@ -40,6 +40,7 @@ class DiceCELoss(nn.Module):
         ce_weight: float = 1.0,
         smooth: float = 1.0,
         ignore_index: int = -100,
+        class_weights: Optional[torch.Tensor] = None,
     ):
         super().__init__()
         self.num_classes = num_classes
@@ -47,9 +48,12 @@ class DiceCELoss(nn.Module):
         self.ce_weight = ce_weight
         self.smooth = smooth
         self.ignore_index = ignore_index
+        if class_weights is not None and not isinstance(class_weights, torch.Tensor):
+            class_weights = torch.tensor(class_weights, dtype=torch.float32)
+        self.register_buffer("class_weights", class_weights)
         # Use NLLLoss for log probabilities, CrossEntropyLoss for logits
-        self.nll_loss = nn.NLLLoss(ignore_index=ignore_index)
-        self.ce_loss = nn.CrossEntropyLoss(ignore_index=ignore_index)
+        self.nll_loss = nn.NLLLoss(ignore_index=ignore_index, weight=self.class_weights)
+        self.ce_loss = nn.CrossEntropyLoss(ignore_index=ignore_index, weight=self.class_weights)
     
     def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         """

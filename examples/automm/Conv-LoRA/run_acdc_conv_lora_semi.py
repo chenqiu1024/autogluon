@@ -230,6 +230,8 @@ def main():
     parser.add_argument("--per_gpu_batch_size", type=int, default=1)
     parser.add_argument("--batch_size", type=int, default=4, help="有效 batch size；若大于 per_gpu_batch_size*num_gpus，则会做累积")
     parser.add_argument("--eval_only", action="store_true", help="只做评估，不训练")
+    parser.add_argument("--lr_scale", type=float, default=0.3,
+                        help="学习率缩放系数（默认 0.3，对应最小改动方案）")
     # GSPO
     parser.add_argument("--gspo_enable", action="store_true")
     parser.add_argument("--gspo_group_size", type=int, default=4)
@@ -260,6 +262,8 @@ def main():
     parser.add_argument("--loss", type=str, default="mask2former_loss",
                         choices=["dice_ce_loss", "mask2former_loss"],
                         help="Loss function: mask2former_loss (recommended for SAM multi-class) or dice_ce_loss")
+    parser.add_argument("--dice_ce_pos_weight", type=float, default=5.0,
+                        help="dice_ce_loss 时前景类权重倍数（近似 pos_weight）")
     # Mask tokens
     parser.add_argument("--num_mask_tokens", type=int, default=10,
                         help="Mask tokens/queries (建议 >= 类别数，Mask2Former 风格推荐 10+)")
@@ -282,6 +286,12 @@ def main():
                         help="盒内熵最小化权重")
     parser.add_argument("--weak_loss_tv_weight", type=float, default=0.0,
                         help="盒内平滑 (TV) 约束权重")
+    # Foreground sampling crop (env-driven in processor)
+    parser.add_argument("--fg_crop_enable", action="store_true",
+                        help="启用前景采样 crop（基于 GT 前景随机裁剪）")
+    parser.add_argument("--fg_crop_prob", type=float, default=0.7, help="前景 crop 触发概率")
+    parser.add_argument("--fg_crop_min_ratio", type=float, default=0.6, help="crop 最小比例（相对于短边）")
+    parser.add_argument("--fg_crop_max_ratio", type=float, default=1.0, help="crop 最大比例（相对于短边）")
     # EMA teacher
     parser.add_argument("--ema_enable", action="store_true", help="启用 EMA teacher 一致性")
     parser.add_argument("--ema_decay", type=float, default=0.99, help="EMA 衰减系数")
@@ -342,7 +352,7 @@ def main():
 
     # 默认训练设置（ACDC 多类别分割：0 背景 + 3 前景）
     validation_metric = "dice"
-    lr = 1e-4
+    lr = 1e-4 * float(args.lr_scale)
 
     print(f"\n{'='*60}")
     print(f"Loss function: {args.loss}")
@@ -365,6 +375,12 @@ def main():
         # Mask2Former-style 多类分割需要足够的 mask tokens
         "model.sam.num_mask_tokens": args.num_mask_tokens,
     }
+    if args.loss == "dice_ce_loss":
+        # 前景类加权（近似 pos_weight），适配 ACDC 4 类
+        class_weights = [1.0] + [float(args.dice_ce_pos_weight)] * 3
+        hyperparameters.update({
+            "optim.dice_ce_loss.class_weights": class_weights,
+        })
 
     if args.gspo_enable:
         hyperparameters.update({
@@ -503,6 +519,12 @@ def main():
             except Exception as e:
                 print(f"[Eval-only] 导出预测器失败（可忽略，仅影响复用）: {e}")
     else:
+        # Foreground sampling crop (env-driven for semantic seg processor)
+        if args.fg_crop_enable:
+            os.environ["AG_FG_CROP_ENABLE"] = "1"
+            os.environ["AG_FG_CROP_PROB"] = str(args.fg_crop_prob)
+            os.environ["AG_FG_CROP_MIN_RATIO"] = str(args.fg_crop_min_ratio)
+            os.environ["AG_FG_CROP_MAX_RATIO"] = str(args.fg_crop_max_ratio)
         predictor = MultiModalPredictor(
             problem_type="semantic_segmentation",
             validation_metric=validation_metric,
