@@ -6,6 +6,8 @@ Cross-Entropy loss (which provides stable gradients) for multi-class
 segmentation tasks like ACDC cardiac segmentation.
 """
 
+from typing import Optional
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -83,15 +85,23 @@ class DiceCELoss(nn.Module):
         # Detect if input is log probabilities (all values <= 0 and sum to ~1 after exp)
         # Log probabilities: values are negative, exp(values).sum(dim=1) ≈ 1
         is_log_prob = (input.max() <= 0)
+        # Fallback if class_weights length mismatches input channels
+        weight_ok = self.class_weights is None or self.class_weights.numel() == input.shape[1]
         
         if is_log_prob:
             # Input is log probabilities, use NLLLoss
-            ce_loss = self.nll_loss(input, target)
+            if weight_ok:
+                ce_loss = self.nll_loss(input, target)
+            else:
+                ce_loss = F.nll_loss(input, target, ignore_index=self.ignore_index)
             # For dice loss, convert log probs to probs
             probs = torch.exp(input)
         else:
             # Input is raw logits, use CrossEntropyLoss
-            ce_loss = self.ce_loss(input, target)
+            if weight_ok:
+                ce_loss = self.ce_loss(input, target)
+            else:
+                ce_loss = F.cross_entropy(input, target, ignore_index=self.ignore_index)
             # For dice loss, apply softmax
             probs = F.softmax(input, dim=1)
         

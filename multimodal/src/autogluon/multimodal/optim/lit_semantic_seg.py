@@ -888,33 +888,70 @@ class SemanticSegmentationLitModule(LitModule):
                     self.log("train_pseudo_loss", pseudo_loss, on_step=True, on_epoch=True)
                 self.log("train_labeled_frac", labeled_mask.float().mean(), on_step=True, on_epoch=True)
             else:
-                # 二值结构损失路径
-                logits = output[self.model.prefix][LOGITS]
+                per_output = output[self.model.prefix]
+                logits = per_output[LOGITS]
                 if logits.dim() == 3:
                     logits = logits.unsqueeze(1)
-                if label.dim() == 3:
-                    label_ = label.unsqueeze(1)
+
+                # Multi-class non-Mask2Former (e.g., Dice+CE): use loss_func directly
+                if logits.shape[1] > 1:
+                    # If class logits exist (SAM-style), build semantic logits first
+                    if CLASS_LOGITS in per_output:
+                        class_logits = per_output[CLASS_LOGITS]
+                        mask_prob = torch.sigmoid(logits)
+                        class_prob = F.softmax(class_logits, dim=-1)[..., :-1]
+                        semantic_prob = torch.einsum("bqc,bqhw->bchw", class_prob, mask_prob)
+                        logits_for_loss = torch.log(semantic_prob.clamp(min=1e-7))
+                    else:
+                        logits_for_loss = logits
+
+                    sup_loss = logits.new_tensor(0.0)
+                    if labeled_mask.any():
+                        logits_l = logits_for_loss[labeled_mask]
+                        label_l = label[labeled_mask]
+                        sup_loss = self.loss_func(input=logits_l, target=label_l)
+
+                    weak_loss = logits.new_tensor(0.0)
+                    if hasattr(self.model, "box_key") and self.model.box_key in batch and (~labeled_mask).any():
+                        boxes_b1 = batch[self.model.box_key]  # (B,1,4)
+                        boxes = boxes_b1[:, 0, :]
+                        logits_u = logits_for_loss[~labeled_mask]
+                        boxes_u = boxes[~labeled_mask]
+                        # foreground logit from multiclass probabilities
+                        prob_u = F.softmax(logits_u, dim=1)
+                        fg_prob = prob_u[:, 1:, :, :].sum(dim=1, keepdim=True).clamp(min=1e-7, max=1 - 1e-7)
+                        fg_logits = torch.logit(fg_prob)
+                        weak_loss = self._weak_box_losses(
+                            logits=fg_logits,
+                            boxes=boxes_u,
+                            outside_weight=weak_outside_w,
+                            entropy_weight=weak_entropy_w,
+                            tv_weight=weak_tv_w,
+                        )
                 else:
-                    label_ = label
-                
-                per_sample_sup = self._structure_loss_per_sample(logits, label_)
-                sup_count = labeled_mask.sum().clamp(min=1)
-                sup_loss = (per_sample_sup * labeled_mask.float()).sum() / sup_count.float()
-                
-                weak_loss = logits.new_tensor(0.0)
-                if hasattr(self.model, "box_key") and self.model.box_key in batch and (~labeled_mask).any():
-                    boxes_b1 = batch[self.model.box_key]  # (B,1,4)
-                    boxes = boxes_b1[:, 0, :]
-                    logits_u = logits[~labeled_mask]
-                    boxes_u = boxes[~labeled_mask]
-                    weak_loss = self._weak_box_losses(
-                        logits=logits_u,
-                        boxes=boxes_u,
-                        outside_weight=weak_outside_w,
-                        entropy_weight=weak_entropy_w,
-                        tv_weight=weak_tv_w,
-                    )
-                
+                    # Binary structure loss path
+                    if label.dim() == 3:
+                        label_ = label.unsqueeze(1)
+                    else:
+                        label_ = label
+                    per_sample_sup = self._structure_loss_per_sample(logits, label_)
+                    sup_count = labeled_mask.sum().clamp(min=1)
+                    sup_loss = (per_sample_sup * labeled_mask.float()).sum() / sup_count.float()
+
+                    weak_loss = logits.new_tensor(0.0)
+                    if hasattr(self.model, "box_key") and self.model.box_key in batch and (~labeled_mask).any():
+                        boxes_b1 = batch[self.model.box_key]  # (B,1,4)
+                        boxes = boxes_b1[:, 0, :]
+                        logits_u = logits[~labeled_mask]
+                        boxes_u = boxes[~labeled_mask]
+                        weak_loss = self._weak_box_losses(
+                            logits=logits_u,
+                            boxes=boxes_u,
+                            outside_weight=weak_outside_w,
+                            entropy_weight=weak_entropy_w,
+                            tv_weight=weak_tv_w,
+                        )
+
                 moe_loss = output[self.model.prefix].get(MOE_LOSS, 0.0)
                 loss = sup_loss + weak_loss + moe_loss
                 self.log("train_sup_loss", sup_loss, on_step=True, on_epoch=True)
