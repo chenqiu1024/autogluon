@@ -666,6 +666,14 @@ class SemanticSegmentationLitModule(LitModule):
             class_prob_all = F.softmax(class_logits_all, dim=-1)[..., :-1]
             semantic_prob_all = torch.einsum("bqc,bqhw->bchw", class_prob_all, mask_prob_all)
             output[self.model.prefix][SEMANTIC_MASK] = semantic_prob_all
+            # ---- Training-time Foreground Ratio Monitor ----
+            with torch.no_grad():
+                pred_mask = semantic_prob_all.argmax(dim=1)
+                fg_ratio = (pred_mask > 0).float().mean()
+                self.log("train_fg_pixel_ratio", fg_ratio, on_step=True, on_epoch=True)
+                # GT ratio
+                gt_fg_ratio = (label > 0).float().mean()
+                self.log("train_gt_fg_pixel_ratio", gt_fg_ratio, on_step=True, on_epoch=True)
         # dual student forward (only for dual_student mode)
         output_b = None
         if getattr(self, "dual_student", False) and self.model_b is not None:
@@ -949,6 +957,30 @@ class SemanticSegmentationLitModule(LitModule):
             output = self.model_postprocess_fn(output)
         # By default, on_step=False and on_epoch=True
         self.log("val_loss", loss)
+
+        # ---- Add Foreground Pixel Ratio Monitor ----
+        # Helps diagnose "all-background collapse" (Dice=0)
+        with torch.no_grad():
+            if SEMANTIC_MASK in output[self.model.prefix]:
+                # Mask2Former style: semantic_prob (B,C,H,W)
+                sem_prob = output[self.model.prefix][SEMANTIC_MASK]
+                pred_mask = sem_prob.argmax(dim=1)
+            else:
+                # Standard style: logits (B,C,H,W) or (B,1,H,W)
+                logits = output[self.model.prefix][LOGITS]
+                if logits.shape[1] > 1:
+                    pred_mask = logits.argmax(dim=1)
+                else:
+                    pred_mask = (logits > 0).long()
+            
+            fg_ratio = (pred_mask > 0).float().mean()
+            self.log("val_fg_pixel_ratio", fg_ratio, on_step=False, on_epoch=True)
+            
+            # GT ratio for comparison
+            gt_label = batch[self.model.label_key]
+            gt_fg_ratio = (gt_label > 0).float().mean()
+            self.log("val_gt_fg_pixel_ratio", gt_fg_ratio, on_step=False, on_epoch=True)
+
         if isinstance(self.loss_func, Mask2FormerLoss):
             self._compute_metric_score(
                 metric=self.validation_metric,
@@ -1187,6 +1219,17 @@ class SemanticSegmentationLitModule(LitModule):
                 per_out[SEMANTIC_MASK] = semantic_prob_all
         _attach_semantic_mask(per_output_a)
         _attach_semantic_mask(per_output_b)
+
+        # ---- Training-time Foreground Ratio Monitor (Dual) ----
+        with torch.no_grad():
+            if SEMANTIC_MASK in per_output_a:
+                fg_ratio_a = (per_output_a[SEMANTIC_MASK].argmax(dim=1) > 0).float().mean()
+                fg_ratio_b = (per_output_b[SEMANTIC_MASK].argmax(dim=1) > 0).float().mean()
+                self.log("train_fg_pixel_ratio_a", fg_ratio_a, on_step=True, on_epoch=True)
+                self.log("train_fg_pixel_ratio_b", fg_ratio_b, on_step=True, on_epoch=True)
+                # GT ratio
+                gt_fg_ratio = (label > 0).float().mean()
+                self.log("train_gt_fg_pixel_ratio", gt_fg_ratio, on_step=True, on_epoch=True)
 
         # 初始化损失
         loss = per_output_a[LOGITS].new_tensor(0.0)
